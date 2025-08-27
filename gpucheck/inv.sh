@@ -33,7 +33,9 @@ while IFS= read -r line; do
     fi
 done < <(sudo dmidecode -t slot)
 
-# Get GPU info
+# Prepare to collect output lines
+lines=()
+
 nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max \
     --format=csv,noheader,nounits | while IFS=',' read -r pci gpu_name serial gen_cur gen_max width_cur width_max; do
 
@@ -80,16 +82,30 @@ nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link
         status="${GREEN}OK${NC}"
     fi
 
-    # Print
-    printf "%-25s %-20s %-30s %-20s %-12s %-8s %-15s %-10s %-15s %-15s %-10b\n" \
-        "$slot_name" "$pci" "$gpu_name" "$serial" "$gen_cur" "$gen_max" "$width_cur" "$width_max" "$link_speed" "$link_width" "$status"
-
-    # Write CSV
-    if [[ -n "$csv_file" ]]; then
-        csv_status=$([[ "$degraded" -eq 1 ]] && echo "Degraded" || echo "OK")
-        echo "\"$slot_name\",\"$pci\",\"$gpu_name\",\"$serial\",\"$gen_cur\",\"$gen_max\",\"$width_cur\",\"$width_max\",\"$link_speed\",\"$link_width\",\"$csv_status\"" >> "$csv_file"
-    fi
+    # Store all fields as a tab-separated line for sorting
+    lines+=("$slot_name"$'\t'"$pci"$'\t'"$gpu_name"$'\t'"$serial"$'\t'"$gen_cur"$'\t'"$gen_max"$'\t'"$width_cur"$'\t'"$width_max"$'\t'"$link_speed"$'\t'"$link_width"$'\t'"$status")
 done
 
-rm -f "$slot_file"
+# Wait for the while loop to finish
+wait
 
+# Sort by SLOT (1st field), then enumerate and print
+IFS=$'\n' sorted=($(printf "%s\n" "${lines[@]}" | sort -t$'\t' -k1,1V))
+gpu_idx=0
+for line in "${sorted[@]}"; do
+    IFS=$'\t' read -r slot_name pci gpu_name serial gen_cur gen_max width_cur width_max link_speed link_width status <<<"$line"
+    printf "%-6s %-25s %-20s %-30s %-20s %-12s %-8s %-15s %-10s %-15s %-15s %-10b\n" \
+        "$gpu_idx" "$slot_name" "$pci" "$gpu_name" "$serial" "$gen_cur" "$gen_max" "$width_cur" "$width_max" "$link_speed" "$link_width" "$status"
+    ((gpu_idx++))
+done
+
+# Write CSV
+if [[ -n "$csv_file" ]]; then
+    for line in "${sorted[@]}"; do
+        IFS=$'\t' read -r slot_name pci gpu_name serial gen_cur gen_max width_cur width_max link_speed link_width status <<<"$line"
+        csv_status=$([[ "$status" == *"Degraded"* ]] && echo "Degraded" || echo "OK")
+        echo "\"$slot_name\",\"$pci\",\"$gpu_name\",\"$serial\",\"$gen_cur\",\"$gen_max\",\"$width_cur\",\"$width_max\",\"$link_speed\",\"$link_width\",\"$csv_status\"" >> "$csv_file"
+    done
+fi
+
+rm -f "$slot_file"
