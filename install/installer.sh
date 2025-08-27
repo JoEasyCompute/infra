@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bootstrap-gpu-node.sh
+# installer.sh
 # One-pass bootstrap for Ubuntu 22.04/24.04 GPU nodes:
 # - Autologin on tty1 for a target user
 # - Passwordless sudo for that user
