@@ -1,5 +1,0 @@
-# set remote SAA path for Remote SAA Execution usage
-#remote_saa_path = /root/supermicro/saa
-
-# set file transfer folder for remote SAA Execution usage
-#remote_folder = /root/supermicro

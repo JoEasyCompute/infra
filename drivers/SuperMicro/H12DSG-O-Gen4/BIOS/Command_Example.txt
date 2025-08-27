@@ -1,1 +1,0 @@
-fs0:\> flash.nsh [BIOS ROM FILE] [BMC USERNAME] [BMC PASSWORD]
