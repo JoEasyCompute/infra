@@ -1,0 +1,129 @@
+{
+    "type": "set_notification",
+    "param": {
+        "Coolant_Return_Temperature": {
+            "Warning": {
+                "MinValue": "20.000",
+                "MaxValue": "65.000",
+                "Trap": false
+            },
+            "Alert": {
+                "MinValue": "0.000",
+                "MaxValue": "70.000",
+                "Trap": true
+            }
+        },
+        "Coolant_Supply_Temperature": {
+            "Warning": {
+                "MinValue": "17.000",
+                "MaxValue": "55.000",
+                "Trap": false
+            },
+            "Alert": {
+                "MinValue": "0.000",
+                "MaxValue": "60.000",
+                "Trap": false
+            }
+        },
+        "Facility_water_Return_Temperature": {
+            "Warning": {
+                "MinValue": "17.000",
+                "MaxValue": "48.000",
+                "Trap": false
+            },
+            "Alert": {
+                "MinValue": "0.000",
+                "MaxValue": "60.000",
+                "Trap": true
+            }
+        },
+        "Facility_water_Supply_Temperature": {
+            "Warning": {
+                "MinValue": "17.000",
+                "MaxValue": "65.000",
+                "Trap": false
+            },
+            "Alert": {
+                "MinValue": "0.000",
+                "MaxValue": "70.000",
+                "Trap": true
+            }
+        },
+        "Coolant_Pressure": {
+            "Warning": {
+                "MinValue": "0.150",
+                "MaxValue": "0.200",
+                "Trap": false
+            },
+            "Alert": {
+                "MinValue": "0.000",
+                "MaxValue": "0.250",
+                "Trap": true
+            }
+        },
+        "Facility_Pressure": {
+            "Warning": {
+                "MinValue": "0.000",
+                "MaxValue": "0.500",
+                "Trap": false
+            },
+            "Alert": {
+                "MinValue": "0.000",
+                "MaxValue": "0.600",
+                "Trap": true
+            }
+        },
+        "Coolant_Flow_Rate": {
+            "Warning": {
+                "MinValue": "0.000",
+                "MaxValue": "90.000",
+                "Trap": false
+            },
+            "Alert": {
+                "MinValue": "0.000",
+                "MaxValue": "100.000",
+                "Trap": false
+            }
+        },
+        "Facility_Water_Flow_Rate": {
+            "Warning": {
+                "MinValue": "0.000",
+                "MaxValue": "120.000",
+                "Trap": false
+            },
+            "Alert": {
+                "MinValue": "0.000",
+                "MaxValue": "130.000",
+                "Trap": false
+            }
+        },
+        "Top_Power_Unit_1": true,
+        "Bottom_Power_Unit_2": true,
+        "Control_Unit": true,
+        "Sensor_Module": true,
+        "Left_Pump_1": true,
+        "Right_Pump_2": true,
+        "Left_Valve_1": true,
+        "Right_Valve_2": true,
+        "CDU_Leak_Detection": true,
+        "Humidity_Sensor": true,
+        "CDU_Liquid_Level_OK": false,
+        "CDU_Liquid_Level_Low": true,
+		"CH1_External_Leak_Sensor": false,
+        "CH2_External_Leak_Sensor": false,
+        "CH3_External_Leak_Sensor": false,
+        "CH4_External_Leak_Sensor": false,
+		"CH1_External_Liquid_Level": false,
+        "CH2_External_Liquid_Level": false
+    },
+    "Emergency_Stop": {
+        "CDU_Leak_Detection": true,
+        "CH1_External_Leak_Sensor": false,
+        "CH2_External_Leak_Sensor": false
+    },
+	"Units": {
+        "Temperature": "Celsius",
+        "Pressure": "MPa",
+        "Flow_Rate": "LPM"
+    }
+}

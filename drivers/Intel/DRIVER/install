@@ -1,0 +1,101 @@
+#!/bin/bash
+
+LINUX_DRIVER_FILE_NAME=iqvlinux.tar.gz
+USING_TEMPORARY=no
+OWNER_ACCESS_ONLY=700
+INSTALL_BASE_DIR="$PWD"
+INSTALL_UNPACK_SUBDIR="iqvlinux"
+INSTALL_BUILD_SUBDIR="src/linux/driver"
+
+MODE=install
+if [ "$1" = "uninstall" ]
+then
+    MODE=uninstall
+elif [ "$1" != "" ]
+then
+    LINUX_DRIVER_FILE_NAME="$1"
+fi
+
+# Check if CWD contains space, if yes we have to copy build script to temp dir as make is unable
+# to work in directories with space.
+if [[ "$PWD" == *" "* ]]
+then
+    USING_TEMPORARY=yes
+    echo "CWD contains space, copying sources to temporary folder"
+
+    # Create the temporary installation folder.
+    # mktemp by default provides access rights to the owner of the folder only.
+    # This eliminates the risk of any other user being able to tinker with installation sources.
+    LINUX_TEMP_FOLDER=$(mktemp -d)
+    if [ ! -d "$LINUX_TEMP_FOLDER" ]
+    then
+        echo "Failed to create temporary folder for installation"
+        exit 1
+    fi
+
+    # Check if the current user is the owner of the created temporary folder
+    # and if access to the folder is limited to the owner only.
+    if [ "$(stat -c "%u %a" "$LINUX_TEMP_FOLDER")" != "$(id -u) $OWNER_ACCESS_ONLY" ]
+    then
+        echo "Temporary installation folder does not have a proper owner and/or permissions"
+        rm -rf "$LINUX_TEMP_FOLDER"
+        exit 1
+    fi
+
+    # Copy driver installation sources to the temporary folder and enter it.
+    cp "$LINUX_DRIVER_FILE_NAME" "$LINUX_TEMP_FOLDER"
+    INSTALL_BASE_DIR="$LINUX_TEMP_FOLDER"
+    cd "$INSTALL_BASE_DIR" || exit 1
+fi
+
+UNPACK_DIR="$INSTALL_BASE_DIR/$INSTALL_UNPACK_SUBDIR"
+BUILD_DIR="$INSTALL_BASE_DIR/$INSTALL_UNPACK_SUBDIR/$INSTALL_BUILD_SUBDIR"
+
+if [ -d "$UNPACK_DIR" ]
+then
+    rm -fr "$UNPACK_DIR"
+fi
+mkdir "$UNPACK_DIR"
+
+cp "$LINUX_DRIVER_FILE_NAME" "$UNPACK_DIR"
+cd "$UNPACK_DIR" || exit 1
+
+printf "Extracting archive..."
+
+OUTPUT=$(tar xvzf "$LINUX_DRIVER_FILE_NAME")
+
+Status=$?
+
+if [ $Status -ne 0 ]
+then
+    printf "\033[31mError: %s\033[0m\n" "$OUTPUT"
+else
+    printf "\033[32mOK!\033[0m\n"
+fi
+
+# V=1 if you want verbose output
+if [ "$MODE" = "install" ]
+then
+    printf "Compiling the driver..."
+    OUTPUT=$(make -f Makefile -C "$BUILD_DIR" NALDIR="$UNPACK_DIR" 2>&1)
+    Status=$?
+
+    if [ $Status -ne 0 ]
+    then
+        printf "\033[31mError: %s\033[0m\n" "$OUTPUT"
+    else
+        printf "\033[32mOK!\033[0m\n"
+    fi
+fi
+
+chmod +x "$BUILD_DIR"/nalinstall
+if [ "$MODE" = "install" ]
+then
+    "$BUILD_DIR"/nalinstall "$BUILD_DIR"
+else
+    "$BUILD_DIR"/nalinstall uninstall
+fi
+if [ "$USING_TEMPORARY" = "yes" ]
+then
+    rm -rf "$LINUX_TEMP_FOLDER"
+fi
