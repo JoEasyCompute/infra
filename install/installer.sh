@@ -11,8 +11,8 @@
 # - Build gpu-burn
 #
 # Usage examples:
-#   sudo ./bootstrap-gpu-node.sh --user ezc --driver 580 --mode headless
-#   sudo ./bootstrap-gpu-node.sh --user ezc --driver 575 --mode desktop
+#   sudo ./installer.sh --user ezc --driver 580 --mode headless
+#   sudo ./installer.sh --user ezc --driver 575 --mode desktop
 #
 # Flags:
 #   --user <name>        Linux account to configure (default: ezc)
