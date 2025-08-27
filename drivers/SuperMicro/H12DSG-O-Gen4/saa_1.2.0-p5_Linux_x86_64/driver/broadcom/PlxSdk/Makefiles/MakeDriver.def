@@ -1,0 +1,23 @@
+#-----------------------------------------------------------------------------
+#
+#      File         :  MakeDriver.def
+#      Abstract     :  The makefile for building device drivers
+#
+#-----------------------------------------------------------------------------
+
+
+#=============================================================================
+# Target build options:
+#
+# ImageName = Name of the build target (without extension)
+# TGT_TYPE  = Type of Target image [App | Lib | Driver]
+#=============================================================================
+ImageName = Plx$(PLX_CHIP)$(DBG)
+TGT_TYPE  = Driver
+
+
+
+#=============================================================================
+# Include shared PLX makefile
+#=============================================================================
+include $(PLX_DIR)/Makefiles/PlxMake.def

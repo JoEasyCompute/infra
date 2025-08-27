@@ -1,0 +1,173 @@
+#-----------------------------------------------------------------------------
+#
+#      File         :  Targets.def
+#      Abstract     :  The definitions for building various targets
+#
+#-----------------------------------------------------------------------------
+
+
+
+#=============================================================================
+# Target builds
+#=============================================================================
+ifeq ($(TGT_TYPE), Driver)
+    all:  DisplayParameters RestoreDriverObjects BuildDriver SaveDriverObjects
+else
+    all:  DisplayParameters Build$(TGT_TYPE)
+endif
+
+
+
+#=============================================================================
+# Target builds
+#=============================================================================
+BuildApp: CreateOutputDir $(PLX_OBJECTS)
+	$(OPTIONAL_LF)
+	@echo 'LNK $(ImageName)'
+	$(CC) -o $(OUT_DIR)/$(ImageName) $(LFLAGS) $(PLX_OBJECTS) $(LIBS)
+	@echo
+	@echo Application \"$(OUT_DIR)/$(ImageName)\" built successfully
+	@echo
+
+
+BuildLibrary: CreateOutputDir $(PLX_OBJECTS)
+	$(OPTIONAL_LF)
+	@echo 'LIB $(ImageName).a'
+	$(AR) -rc $(OUT_DIR)/$(ImageName).a $(PLX_OBJECTS)
+	$(OPTIONAL_LF)
+	@echo 'LIB $(ImageName).so'
+	$(CC) -shared -o $(OUT_DIR)/$(ImageName).so $(PLX_OBJECTS)
+	@echo
+	@echo Libraries \"$(OUT_DIR)/$(ImageName).a\" \& \"$(OUT_DIR)/$(ImageName).so\" built successfully
+	@echo
+
+
+BuildDriver:
+	$(Q)$(MAKE) -C $(KDIR) M=`pwd` ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
+	@echo
+	@echo Driver \"$(OUT_DIR)/$(ImageName).ko\" built sucessfully
+	@echo
+
+
+# Saves driver objects (*.o files) back to object directory
+SaveDriverObjects: CreateOutputDir
+	$(Q)# Move intermediate files to output folders...
+	@rm $(VERBOSE) -f Module.symvers
+	@rm $(VERBOSE) -f Module.markers
+	@rm $(VERBOSE) -f modules.order
+	@rm $(VERBOSE) -f .cache.mk
+	@mv $(VERBOSE) $(ImageName).ko        $(OUT_DIR)
+	@if [ -f $(ImageName).ko.* ]; then mv $(VERBOSE) $(ImageName).ko.* $(OUT_DIR); fi
+	@mv $(VERBOSE) $(ImageName).o         $(OBJ_DIR)
+	@mv $(VERBOSE) $(ImageName).mod.*     $(OBJ_DIR)
+	@mv $(VERBOSE) .$(ImageName).*        $(OBJ_DIR)
+	@mv $(VERBOSE) $(COMMON_DIR)/*.o      $(OBJ_DIR)/Common
+	@mv $(VERBOSE) $(COMMON_DIR)/.*.cmd   $(OBJ_DIR)/Common
+	@if [ -d "$(PLX_CHIP_DIR)" ]; then \
+	     mv $(VERBOSE) $(PLX_CHIP_DIR)/*.o    $(OBJ_DIR)/PlxChip; \
+	     mv $(VERBOSE) $(PLX_CHIP_DIR)/.*.cmd $(OBJ_DIR)/PlxChip; \
+	 fi
+	$(OPTIONAL_LF)
+
+
+# Restores driver objects (*.o files) back to original location
+RestoreDriverObjects:
+	$(Q)# Move intermediate files to original folders...
+	@if [ -n "$(PLX_CHIP_DIR)" ]; then \
+	     if [ -d $(OBJ_DIR)/PlxChip ]; then \
+	         mv $(VERBOSE) -u $(OBJ_DIR)/PlxChip/*.*    $(PLX_CHIP_DIR); \
+	         mv $(VERBOSE) -u $(OBJ_DIR)/PlxChip/.*.cmd $(PLX_CHIP_DIR); \
+	         rm $(VERBOSE) -r -f $(OBJ_DIR)/PlxChip; \
+	     fi \
+	 fi
+	@if [ -d $(OBJ_DIR)/Common ]; then \
+	     mv $(VERBOSE) -u $(OBJ_DIR)/Common/*.*     $(COMMON_DIR); \
+	     mv $(VERBOSE) -u $(OBJ_DIR)/Common/.*.cmd  $(COMMON_DIR); \
+	     rm $(VERBOSE) -r -f $(OBJ_DIR)/Common; \
+	 fi
+	@if [ -f $(OBJ_DIR)/$(ImageName).o ]; then \
+	     mv $(VERBOSE) -u $(OBJ_DIR)/$(ImageName).o     .; \
+	     mv $(VERBOSE) -u $(OBJ_DIR)/$(ImageName).mod.* .; \
+	     mv $(VERBOSE) -u $(OBJ_DIR)/.$(ImageName).*    .; \
+	 fi
+	@if [ -f $(OUT_DIR)/$(ImageName).ko.* ]; then \
+	     mv $(VERBOSE) -u $(OUT_DIR)/$(ImageName).ko.*  .; \
+	 fi
+	$(OPTIONAL_LF)
+
+
+
+#=============================================================================
+# Startup and cleanup builds
+#=============================================================================
+
+DisplayParameters:
+	@if [ "$(PLX_NO_CLEAR_SCREEN)" = "" ]; then clear; fi
+	@echo
+	@echo Build: $(ImageName)
+	@echo
+	@echo - PLA: $(PLATFORM_NAME)
+	@if [ "$(TGT_TYPE)" = "Driver" ]; then \
+	    echo - KER: $(KERNEL_VER); \
+	    echo - INC: $(KDIR)/include; \
+	 fi
+	@echo - CPU: $(ARCH) \($(PLX_CPU_BITS)-bit $(PLX_CPU_ENDIAN) Endian\)
+	@echo - CMP: $(CROSS_COMPILE)gcc
+	@echo - TYP: $(PLX_CHIP) $(TGT_TYPE)
+	@echo - PKG: PCI/PCIe SDK v$(SDK_VER);
+	@if [ "$(PLX_ENV)" != "" ]; then \
+	    echo - ENV: $(PLX_ENV); \
+	 fi
+	@echo - CFG: $(BUILD_TYPE)
+	@echo
+
+
+CreateOutputDir:
+	$(Q)# Create output directories...
+	@mkdir $(VERBOSE) -p $(OUT_DIR)
+	@mkdir $(VERBOSE) -p $(OBJ_DIR)
+	@if [ "$(TGT_TYPE)" = "Driver" ]; then \
+	    mkdir $(VERBOSE) -p $(OBJ_DIR)/Common; \
+	    if [ -n "$(PLX_CHIP_DIR)" ]; then \
+	        mkdir $(VERBOSE) -p $(OBJ_DIR)/PlxChip; \
+	    fi \
+	 fi
+
+
+cleanobj:
+	@echo
+	@echo Clean: $(ImageName)
+	@echo
+	@echo Delete: Intermediate build files...
+	@rm -v -f -r $(OBJ_DIR)
+	@if [ "$(TGT_TYPE)" = "Driver" ]; then \
+	    rm -v -f Module.symvers \
+	    rm -v -f Module.markers \
+	    rm -v -f modules.order \
+	    rm -v -f .cache.mk \
+	    rm -v -f $(COMMON_DIR)/*.o \
+	    rm -v -f $(COMMON_DIR)/.*.o.* \
+	    rm -v -f $(COMMON_DIR)/.*.cmd \
+	    rm -v -f $(PLX_CHIP_DIR)/*.o \
+	    rm -v -f $(PLX_CHIP_DIR)/.*.o.* \
+	    rm -v -f $(PLX_CHIP_DIR)/.*.cmd \
+	    rm -v -f .tmp_versions/$(ImageName).mod \
+	    rm -v -f $(ImageName).*; \
+	    rm -v -f .$(ImageName).*; \
+	    if [ -d .tmp_versions ]; then \
+	        rmdir -v --ignore-fail-on-non-empty .tmp_versions; \
+	    fi \
+	fi
+	@echo Delete: ....finished!
+	@echo
+
+
+clean: cleanobj
+	@echo Delete: All build files...
+	@rm -v -f $(OUT_DIR)/$(ImageName)*
+	@rm -v -f $(OUT_DIR)/.$(ImageName)*
+	@if [ -d $(OUT_DIR) ]; then \
+	     rmdir -v --ignore-fail-on-non-empty $(OUT_DIR); \
+	 fi
+	@echo Delete: ....finished!
+	@echo

@@ -1,0 +1,216 @@
+SuperServer Automation Assistant (SAA) UEFI Release Notes
+==================================================
+Software Release Version: V1.2.0-p3
+Release Date: 2025/02/26
+
+
+Introduction
+============
+The SuperServer Automation Assistant (SAA) UEFI can be used to manage the
+system BIOS, BMC and CPLD firmware image update for select systems under EFI
+shell.
+To update DMI information, users can edit DMI information from readable text
+file, as well as use SAA to apply DMI information.
+
+
+Requirements
+============
+@In-Band Usage
+- Managed System
+    * Operating system:
+        EFI shell
+    * Hardware:
+        X12/H12 and later platforms except H12 non-RoT systems
+
+
+Known Limitation
+================
+1. System will be powered off during BIOS update on X12/H12 RoT platforms if
+   the BMC and CPLD firmware does not support BIOS update without power off.
+
+
+Version History
+===============
+V1.2.0-p3 (2025/02/26)
+=========================
+1. Enhancement : Fix GetEventLog command SensorType different on BMC Web 
+                 problem.
+2. Enhancement : TpInfo command to accept value in decimal and hexadecimal 
+                 for item "configID".
+3. Fix         : GetTpInfo command shows incorrect information on H14DST-F.
+
+
+V1.2.0-p2 (2025/02/07)
+=========================
+1. Fix         : Fix GetFanMode and SetFanMode command to support new modes.
+
+
+V1.2.0-p1 (2025/01/24)
+=========================
+1. New Feature : Support H13 AST2600 RoT 2.0 OpenBMC systems.
+2. Enhancement : UpdateAomboardCpld command supports to update AOM-SCM-DC6
+                 and AOM-DCPDB for X14 platform.
+
+
+V1.2.0 (2024/12/27)
+=========================
+1. New Feature : Support H14 AST2600 RoT 2.0 systems.
+2. New Feature : Support GetPsuInfo command through In-Band Redfish host
+                 interface usage.
+3. New Feature : Add GetBmcUserList command to display BMC user information.
+4. New Feature : Add DownloadBmcCfg and UploadBmcCfg commands to download
+                 and upload BMC configuration file.
+5. New Feature : Add DcmiManage command to support DCMI management.
+6. New Feature : Add GetCpuERotInfo command to get the ERot CPU firmware 
+                 information of NVIDIA MGX systems.
+7. New Feature : Add UpdateCpuErot command to update ERot CPU firmware of 
+                 NVIDIA MGX systems.
+8. New Feature : Add CpuErotManage command to get and update golden image,
+                 recover image of ERot CPU on NVIDIA MGX systems.
+9. New Feature : Add GetGpuErotInfo command get the ERot GPU firmware 
+                 information of NVIDIA MGX systems.
+10.New Feature : Add GetFanMode and SetFanMode command to support fan mode 
+                 management.
+11.New Feature : Add GetBootOption and SetBootOption command to support boot
+                 option management.
+12.New Feature : Add FpgaRotManage command to support motherboard FPGA RoT
+                 management.
+13.New Feature : Add GetMiscCpldInfo and UpdateMiscCpld commands to support
+                 miscellaneous CPLD management.
+14.New Feature : UpdateMotherboardFpga support auto AC Cycle after update for
+                 NVIDIA systems.
+15.New Feature : Support new FRU features with FRU related commands.
+				     1. New option --item "ALL" for ChangeFruInfo to support update
+    				     FRU in one line.
+				     2. New option --format for GetFruInfo and RestoreFruInfo to 
+				        backup/restore TEXT format.
+				     3. Support FRU version and FRU information for GetFruInfo 
+				        command.
+				     4. New option --fru_version for ChangeFruInfo to update fru 
+				        version.
+16.New Feature : Support Redfish host interface auto-activation for in-band
+                 command with Redfish host interface mode.
+17.Enhancement : Support GetGpuInfo command for MGX GPU.
+18.Enhancement : Support UpdateGpu command for MGX GPU.
+19.Enhancement : Support R12/R13 BMC and BIOS upload with latest Redfish API
+                 design.
+20.Enhancement : Support IPv6 configurations for BmcLanManage command.
+21.Enhancement : Extend BIOS update and recover timeout for G1/G2 systems.
+22.Enhancement : Update saa_activate_RHI.nsh to reconfigure configuration of all
+                 interfaces after activate RHI.
+23.Enhancement : Enhance 128MB BMC firmware transfer stability for UpdateBmc.
+24.Enhancement : Extend wait time for BMC reset after UpdateBmc on X14 nonROT 
+                 systems.
+25.Enhancement : GetPsuInfo command support new Redfish API design for X13 and
+                 later systems.
+26.Fix         : License check could fail for CheckSelfTest and GetLockdownMode
+                 command for OpenBMC systems.
+27.Fix         : GetEventLog command could fail on X14SBW OpenBmc.
+28.Fix         : ClearMaintenEventLog command could fail on R12/R13 platforms.
+29.Fix         : Fix the failure to find correct Redfish Host Interface IP on 
+                 GH200 system for GetGpuInfo command.
+30.Fix         : Fix X14 motherboard CPLD jed files information parsing error.
+31.Fix         : Fix the getting link status for BmcLanManage command on R13.
+
+
+V1.1.0 (2024/08/29)
+=========================
+1. New Feature : Support X14 AST2600 Delta Next DCSCM ROT2-HW2 OpenBMC.
+2. New Feature : Support X14 AST2600 nonROT OpenBMC.
+3. New Feature : Support H14 AST2600 RoT 2.0 systems.
+4. New Feature : Support X14 AST2600 ROT2-HW2 OpenBMC with SAS3 Expander.
+5. New Feature : Add support for Nvidia Grace platform.
+6. New Feature : Add GetMotherboardFpgaInfo and UpdateMotherboardFpga commands
+                 to support motherboard FPGA firmware management.
+7. New Feature : Add GetAomboardCpldInfo and UpdateAomboardCpld commands to
+                 support CPLD firmware management on the AOM board.
+8. New Feature : Add RestoreFruInfo command to restore FRU information.
+9. New Feature : Add GetLockdownMode command to get the lockdown status from the
+                 managed system.
+10.New Feature : Add CheckSelfTest command to check and report the basic health
+                 status of the BMC.
+11.New Feature : Add GetEventLog and ClearEventLog commands to support event log
+                 management.
+12.New Feature : Add GetMaintenEventLog and ClearMaintenEventLog commands to
+                 support maintenance event log management.
+13.New Feature : Support new actions Delete, GetVer and SetVer to delete SDR ID,
+                 get SDR version and set SDR version separately for
+                 CheckSensorData command.
+14.New Feature : Add TpInfo command to manage the multi-node information.
+15.New Feature : Add BmcHostname command to manage BMC hostname.
+16.New Feature : Add LoadDefaultBmcCfg command to load the default factory BMC
+                 configuration.
+17.New Feature : Add GetPsFruInfo command to get FRU information of power supply
+                 from the managed system.
+18.New Feature : Add GetPsuInfo command to get PSU information from the managed
+                 system.
+19.New Feature : Support runtime update golden and recover BIOS on supported
+                 platforms for BiosRotManage command.
+20.Enhancement : Enhance -I Redfish_HI command mode stability.
+21.Enhancement : Enhance general command stability.
+22.Enhancement : Support action GetLinkStatus to get link status information for
+                 BmcLanManage command.
+23.Fix         : GetBiosInfo command could display an incorrect BIOS version
+                 from R12/R13 platform with the latest BMC firmware.
+24.Fix         : System hang when executing ChangeFruInfo and RestoreFruInfo
+                 commands on R13SPD.
+
+
+V1.0.0 (2024/05/22)
+=========================
+Initial release of SAA, formerly known as SUM.
+
+1. New Feature : Support X14/B14/H14 ROT2.0 AST2600 systems.
+2. New Feature : Support X14/H14 ROT2.0 OpenBMC AST2600 systems.
+3. New Feature : Support X14 GD3 ROT2.0 AST2600 system.
+4. New Feature : Support AOM SCM OpenBMC AST2600 system.
+5. New Feature : Support X13/H13 OpenBMC AST2600 systems.
+6. New Feature : Support X13 ROT2.0 AST2600 system.
+7. New Feature : Support H13 AST2600 ROT2.0 Delta Next systems.
+8. New Feature : Support H13SRA-F/TF systems. 
+9. New Feature : Support H12 with CPLD RoT1.0+ systems.
+10.New Feature : Support AST2500 JBOF systems.
+11.New Feature : Support non-RoT SSE with AST2600.
+12.New Feature : Support ARM64 architecture.
+13.New Feature : Support UpdateCpld command for X13/H13 Non-RoT systems.
+14.New Feature : Add scripts to activate and deactivate Redfish Host Interface.
+15.New Feature : Support BmcLanManage command to manage BMC LAN configuration.
+16.New Feature : Add CpldRotManage command for CPLD RoT FW management.
+17.New Feature : Add GetSwitchBoardCpldInfo and UpdateSwitchBoardCpld commands
+                 to support multiple CPLD management on switch boards for X13
+                 Delta Next systems.
+18.New Feature : Add GetFanBoardCpldInfo and UpdateFanBoardCpld commands to
+                 support multiple CPLD management on FAN boards for X13 Delta
+                 Next systems.
+19.New Feature : Add GetBackplaneCpldInfo and UpdateBackplaneCpld commands to
+                 support NVMe backplane CPLD management.
+20.New Feature : Add multiple motherboard CPLD support for GetCpldInfo and
+                 UpdateCpld commands for CPLD management for X13 Delta Next
+                 systems.
+21.New Feature : Support GetGpuInfo and UpdateGpu commands on H100 and MI300X
+                 systems.
+22.New Feature : Support BmcReset command to reset BMC system.
+23.New Feature : Support UpdateBios command on X13SAW ClientME systems.  
+24.New Feature : Support ChassisIntrusion command to get chassis status.
+25.New Feature : Support GetFruInfo command to get FRU information.
+26.New Feature : Support ChangeFruInfo command to change FRU information.
+27.New Feature : Support CheckSensorData command to list sensor status.
+28.New Feature : GetBiosInfo command supports identifying Siena & Bergamo AMD CPU.
+29.New Feature : Add BIOS user default support for UpdateBios command.
+30.New Feature : Support GetSystemInfo command to get system information.
+31.Enhancement : Support TLSv1.2 ECDHE cipher suite.
+32.Enhancement : Upgrade openssl 1.1.0i.
+33.Enhancement : Enhance new redfish API support for GetBackplaneCpldInfo 
+                 and UpdateBackplaneCpld commands.
+34.Fix         : Support GetBiosInfo and UpdateBios commands on X13/H13 OpenBMC
+                 systems.         
+35.Fix         : Support GetBmcInfo and UpdateBmc commands on X13/H13 OpenBMC
+                 systems.
+
+
+Technical Support
+=================
+Web Site:        www.supermicro.com
+Headquarters:    support@supermicro.com
+European Branch: support@supermicro.nl
+Asian Branch:    support@supermicro.com.tw

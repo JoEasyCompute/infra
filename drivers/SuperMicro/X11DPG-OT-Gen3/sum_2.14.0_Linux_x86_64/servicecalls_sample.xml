@@ -1,0 +1,170 @@
+<ServiceCallsCfg>
+<!--ServiceCallsCfg-->
+  <SMTPServer>
+  <!--SMTPServer-->
+	<!-- Example: -->
+	<!-- 1. <ServerURI>smtp://example.com</ServerURI> or <ServerURI>smtps://example.com</ServerURI>
+		 2. <ServerURI>Smtp://8.8.8.8</ServerURI>
+	<ServerPort>25</ServerPort>
+	<SenderEmail>Username@example.com</SenderEmail>
+	<SenderID>example/Username</SenderID>
+	<SenderPW>abcd!1234</SenderPW>-->
+	<ServerURI></ServerURI>
+	<ServerPort></ServerPort>
+	<!--Supported SMTP protocol: SMTP,SMTP SSL,SMTP STARTTLS-->
+    <!--Known SUM Supported Port: 25,465,587 -->
+	<SenderEmail></SenderEmail>
+	<SenderID></SenderID>
+	<SenderPW></SenderPW>
+  </SMTPServer>
+  <Trigger_Items>
+  <!--Trigger Items-->
+  <!--WARNING: CMM system only supports SDR trigger items-->
+	<SDR_Trigger_Items Action="Enable"></SDR_Trigger_Items>
+    <!--Supported Action: Enable/Disable-->
+	<!--SDR Trigger Items will be automatically configured if Action value is "Enable". -->
+	<SEL_Trigger_Items Action="Enable">
+	<!--Supported values: Enable/Disable-->
+	<!--SEL:HDD(OEM)(0xC0), CPLD(OEM)(0xC2), CPU(OEM)(0xC3), BIOS OEM(Memory Error)(0xCC)-->
+	<!--    NVMe(OEM)(0xD1), SMBIOS error(OEM)(0xD2), Processor Configuration(OEM)(0XD4)-->
+	<!--    Processor(0x07), Management(0x28), Battery(0x29), Memory(0x0C), OEM Driver Slot(0x0D)-->
+	<!--WARNING: Attribution in each element is read-only. User can only change the element content of each node, i.e. Enable/Disable.-->
+		<HDD_OEM>
+		<!--HDD(OEM)(0xC0)-->
+		<!--Supported content: Trigger/Skip-->
+			<SMART1 Description="Disk SMART failure" Severity="Critical/Information">Trigger</SMART1>	
+		</HDD_OEM>
+	   <CPLD_OEM>
+	   <!--CPLD(OEM)(0xC2)-->
+	   <!--Supported content: Trigger/Skip-->
+			<MEM_EVENT1 Description="MEM EVENT GH" Severity="Critical/Information">Trigger</MEM_EVENT1> 
+			<MEM_EVENT2 Description="MEM EVENT EF" Severity="Critical/Information">Trigger</MEM_EVENT2> 
+			<MEM_EVENT3 Description="MEM EVENT CD" Severity="Critical/Information">Trigger</MEM_EVENT3> 
+			<MEM_EVENT4 Description="MEM EVENT AB" Severity="Critical/Information">Trigger</MEM_EVENT4>
+			<PROCHOT1 Description="PROCHOT P2" Severity="Critical/Information">Trigger</PROCHOT1> 
+			<PROCHOT2 Description="PROCHOT P1" Severity="Critical/Information">Trigger</PROCHOT2> 
+			<MEMCHOT1 Description="MEMCHOT P2" Severity="Critical/Information">Trigger</MEMCHOT1> 
+			<MEMCHOT2 Description="MEMCHOT P1" Severity="Critical/Information">Trigger</MEMCHOT2> 
+			<VRHOT1 Description="VRHOT P2" Severity="Critical/Information">  Trigger</VRHOT1> 
+			<VRHOT2 Description="VRHOT P1" Severity="Critical/Information">  Trigger</VRHOT2>
+			<VRHOT3 Description="VRHOT GH" Severity="Critical/Information">  Trigger</VRHOT3> 
+			<VRHOT4 Description="VRHOT EF" Severity="Critical/Information">  Trigger</VRHOT4> 
+			<VRHOT5 Description="VRHOT CD" Severity="Critical/Information">  Trigger</VRHOT5> 
+			<VRHOT6 Description="VRHOT AB" Severity="Critical/Information">  Trigger</VRHOT6> 
+			<CATERR Description="CATERR" Severity="Critical/Information">   Trigger</CATERR>
+	   </CPLD_OEM>
+	   <CPU_OEM>
+	   <!-- CPU(OEM)(0xC3)-->
+	   <!--Supported content: Trigger/Skip-->
+			<CPU1 Description="CPU1 Error" Severity="Critical/Information">Trigger</CPU1> 
+			<CPU2 Description="CPU2 Error" Severity="Critical/Information">Trigger</CPU2> 
+			<CPU3 Description="CPU3 Error" Severity="Critical/Information">Trigger</CPU3> 
+			<PCH Description="PCH Hot" Severity="Critical/Information">   Trigger</PCH>			
+	   </CPU_OEM>   
+	   <BIOS_OEM_Memory_Error>
+	   <!-- BIOS OEM(Memory Error)(0xCC)-->
+	   <!--Supported content: Trigger/Skip-->
+			<Memory_Error1 Description="Uncorrectable error found, Memory Rank is disabled" Severity="Warning/Information">Trigger</Memory_Error1>
+			<Memory_Error2 Description="Incorrect memory DIMM population" Severity="Warning/Information">Trigger</Memory_Error2>	
+			<Memory_Error3 Description="Failing DIMM: DIMM location(Correctable memory component found)" Severity="Warning/Information">Trigger</Memory_Error3>
+			<Memory_Error4 Description="Failing DIMM: DIMM location(Uncorrectable memory component found)" Severity="Warning/Information">Trigger</Memory_Error4>
+			<Memory_Error5 Description="No memory DIMM detected, install memory DIMMs" Severity="Critical/Information">Trigger</Memory_Error5>
+			<Memory_Error6 Description="Incorrect memory DIMM population, check Memory Population Rule" Severity="Critical/Information">Trigger</Memory_Error6>
+			<Memory_Error7 Description="Memory initialization panic, apply AC Reset" Severity="Critical/Information">Trigger</Memory_Error7>
+			<Memory_Error8 Description="DIMM mapped Out" Severity="Critical/Information">Trigger</Memory_Error8>
+	   </BIOS_OEM_Memory_Error>
+	   <NVMe_OEM>
+	   <!-- NVMe(OEM)(0xD1)-->
+	   <!--Supported content: Trigger/Skip-->
+			<NVMe_BPN Description="NVMeBPN drive fault" Severity="Warning/Information">Trigger</NVMe_BPN>
+	   </NVMe_OEM>
+	   <SMBIOS_error_OEM>
+	   <!-- SMBIOS error(OEM)(0xD2)-->
+	   <!--Supported content: Trigger/Skip-->
+			<SMBIOS_error1 Description="SMBIOS error-Pci Parity Error" Severity="Critical/Information">Trigger</SMBIOS_error1>
+			<SMBIOS_error2 Description="SMBIOS error-Pci system Error" Severity="Critical/Information">Trigger</SMBIOS_error2>
+	   </SMBIOS_error_OEM>
+	   <Processor_Configuration_OEM>
+	   <!--Processor Configuration(OEM)(0XD4)-->
+	   <!--Supported content: Trigger/Skip-->
+			<BUS_Error1 Description="Bus Correctable Error" Severity="Warning/Information">Trigger</BUS_Error1>
+			<BUS_Error2 Description="Bus Fatal Error" Severity="Critical/Information">Trigger</BUS_Error2>
+	   </Processor_Configuration_OEM>	  
+	  <Processor>
+	   <!--Processor(0x07)-->
+	   <!--Supported content: Trigger/Skip-->
+			<Processor1 Description="Thermal Trip has occurred" Severity="Critical/Information">Trigger</Processor1>
+			<Processor2 Description="FRB1/BIST Failure" Severity="Critical/Information">Trigger</Processor2>
+			<Processor3 Description="FRB2/Hang in POST Failure" Severity="Critical/Information">Trigger</Processor3>
+			<Processor4 Description="FRB3/Processor Startup/Initialization Failure" Severity="Critical/Information">Trigger</Processor4>
+			<Processor5 Description="SM BIOS 'Uncorrectable CPU-Complex Error'" Severity="Critical/Information">Trigger</Processor5>
+			<Processor6 Description="Terminator Presence Detected" Severity="Information">Trigger</Processor6>
+			<Processor7 Description="Machine check exception" Severity="Information">Trigger</Processor7>
+	   </Processor>
+	   <Management_Subsystem_Health>
+	   <!--Management(0x28)-->
+	   <!--Supported content: Trigger/Skip-->
+			<Management1 Description="Sensor access degraded or unavailable" Severity="Warning/Information">Trigger</Management1>
+	   </Management_Subsystem_Health>
+	   <Battery>
+	   <!--Battery(0x29)-->
+	   <!--Supported content: Trigger/Skip-->
+			<Battery1 Description="Battery low" Severity="Warning/Information">Trigger</Battery1>
+			<Battery2 Description="Battery failed" Severity="Critical/Information">Trigger</Battery2>
+			<Battery3 Description="Battery presence detected" Severity="Information">Trigger</Battery3>
+	   </Battery>
+	   <Memory>
+	   <!--Memory(0x0C)-->
+	   <!--Supported content: Trigger/Skip-->
+			<Memory1 Description="Correctable ECC" Severity="Warning/Information">Trigger</Memory1>
+			<Memory2 Description="Uncorrectable ECC" Severity="Critical/Information">Trigger</Memory2>
+	   </Memory>
+	   <OEM_DRIVER_SLOT>
+	   <!--OEM DRIVER SLOT(0x0D)-->
+	   <!--Supported content: Trigger/Skip-->
+			<Drive_Fault1 Description="Drive Fault" Severity="Critical/Information">Trigger</Drive_Fault1>
+			<!--Supported MBs: [Storage add-on]:X9SCD,X9SCE,X9SCFF+J27 & X11DP Systems-->
+			<Drive_Fault2 Description="Drive Presence" Severity="Critical/Information">Trigger</Drive_Fault2>
+			<Drive_Fault3 Description="Drive Fault" Severity="Critical/Information">Trigger</Drive_Fault3>
+			<Drive_Fault4 Description="Drive Rebuild/Remap in progress" Severity="Information">Trigger</Drive_Fault4>
+	   </OEM_DRIVER_SLOT>
+    </SEL_Trigger_Items>
+	<HW_Event_Alert>
+	<!--HW-related triggered events includes SDR and SEL events selected by SUM. Items examples are -->
+	<!--for SDR, FAN Speed and Power Status. For SEL, CATERR, Uncorrectable ECC, Bus Fatal Error, etc..-->
+		<Notification>disable</Notification>
+		<!--Supported Action: Enable/Disable-->
+		<RecipientEmail></RecipientEmail>
+		<!--If Notification is enabled, HW-related triggered events will be sent back to supermicro dept.-->
+		<!--Default email is "hwevent_alert@supermicro.com", user can change this email under this content.-->
+	</HW_Event_Alert>
+  </Trigger_Items>
+   <Recipient_Information>
+   <!-- Recipient Information -->
+    <!-- Example: <Recipient Name="John Doe" Role="Administrator">JohnDoe@example.com</Recipient> -->
+	<Recipient Name="" Role=""></Recipient>
+  </Recipient_Information> 
+  <Customer_Information>
+  <!-- Customer Information -->
+   <!-- Example: <Customer Name="Jane Doe" Company="Acme">JaneDoe@acme.com</Customer>-->
+   <Customer Name="" Company=""></Customer> 
+  </Customer_Information>
+  <Site_Location_Information>
+  <!-- Site Location Information -->
+  <!-- Example: -->
+  <!-- <Company>Supermicro</Company>
+	<Address>980 Rock Avenue</Address>
+	<City>San Jose</City>
+	<State_Province>CA</State_Province>
+	<Zip>95131</Zip>
+	<Country>US</Country>
+	<Contact Name="Johnny" Role="Administrator">Johnny@example.com</Recipient> -->
+	<Company></Company>
+	<Address></Address>
+	<City></City>
+	<State_Province></State_Province>
+	<Zip></Zip>
+	<Country></Country>
+	<Contact Name="" Role=""></Contact>
+  </Site_Location_Information>
+</ServiceCallsCfg>

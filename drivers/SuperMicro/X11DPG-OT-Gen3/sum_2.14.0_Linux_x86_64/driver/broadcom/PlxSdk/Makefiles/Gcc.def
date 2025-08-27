@@ -1,0 +1,62 @@
+#-----------------------------------------------------------------------------
+#
+#      File         :  Gcc.def
+#      Abstract     :  The definitions for building with the GCC tools
+#
+#-----------------------------------------------------------------------------
+
+
+#=============================================================================
+# Compiler/Assembler names
+#=============================================================================
+AS = $(Q)$(CROSS_COMPILE)as
+AR = $(Q)$(CROSS_COMPILE)ar
+LD = $(Q)$(CROSS_COMPILE)ld
+CC = $(Q)$(CROSS_COMPILE)gcc
+
+
+
+#=============================================================================
+# Options for debug and release builds
+#=============================================================================
+EXTRA_CFLAGS += -DGCC
+
+ifdef PLX_DEBUG
+    EXTRA_CFLAGS += -g3
+else
+    EXTRA_CFLAGS += -O2
+endif
+
+
+
+#=============================================================================
+# Tools command-line
+#
+# Flag descriptions:
+#    -c          Compile only, skip link phase
+#    -Wall       Enable all warnings to be displayed
+#    -pipe       Use pipes instead of temp files for passing data to assembler
+#=============================================================================
+EXTRA_CFLAGS += -c -Wall -pipe
+
+
+
+#=============================================================================
+# Compile rules
+#=============================================================================
+.SUFFIXES: .c
+
+%.o : %.c
+	$(OPTIONAL_LF)
+	@echo 'CC  $<'
+	$(CC) $< -o $@ $(CFLAGS) $(EXTRA_CFLAGS)
+
+$(OBJ_DIR)/%.o : %.c
+	$(OPTIONAL_LF)
+	@echo 'CC  $<'
+	$(CC) $< -o $@ $(CFLAGS) $(EXTRA_CFLAGS)
+
+$(OBJ_DIR)/%.o : $(COMMON_DIR)/%.c
+	$(OPTIONAL_LF)
+	@echo 'CC  $<'
+	$(CC) $< -o $@ $(CFLAGS) $(EXTRA_CFLAGS)

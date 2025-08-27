@@ -1,0 +1,22 @@
+### OS ### 
+#OS_IP=
+#OS_USER=
+#OS_PWD=
+###INB Update Folder
+#INB_PKG_SOURCE_PATH=/root/HGXA100.tar.gz
+#INB_PKG_TARGET_PATH=/tmp/HGXA100/A100_v0.5 
+
+### BMC ### 
+#BMC_IP=
+#BMC_USER= 
+#BMC_PWD= 
+###OOB FW Package Folder
+#OOB_PKG_PATH=/home/GPU/HGX_A100_8-GPU_80G_AC_Firmware_21.10.07/firmware
+#CEC_VER=4.0
+#CEC_FW_FILE=delta-cec-4v0-ota.bin
+#FPGA_VER=3.02
+#FPGA_FW_FILE=CEC-Enabled-fpga3v02-ota.bin
+
+### Tool ### 
+Tool_Package_version=saa_1.2.0_Linux_x86_64
+Tool_Package_name=saa 

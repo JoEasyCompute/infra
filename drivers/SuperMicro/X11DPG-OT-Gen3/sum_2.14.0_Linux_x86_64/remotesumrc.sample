@@ -1,0 +1,2 @@
+# set remote SUM path for Remote In-Band usage
+#remote_sum_path = /home/administrator/supermicro/sum_remote_inband/sum

@@ -1,0 +1,8 @@
+alias 'upd-gen3-bios'='sudo /home/ezc/SuperMicro/X11DPG-OT-Gen3/sum_2.14.0_Linux_x86_64/sum -c UpdateBios --file /home/ezc/SuperMicro/X11DPG-OT-Gen3/BIOS/BIOS_X11DPG-OT-1A06_20240716_4.4_STD.bin'
+alias 'upd-gen4-bios'='sudo /home/ezc/SuperMicro/H12DSG-O-Gen4/saa_1.2.0-p5_Linux_x86_64/saa -c UpdateBios --file /home/ezc/SuperMicro/H12DSG-O-Gen4/BIOS/BIOS_H12DSGO-1B55_20250404_3.3_STDsp.bin'
+alias 'upd-intel-NIC'='sudo /home/ezc/Intel/bootutil64e -up=combo -all -file=/home/ezc/Intel/BootIMG.FLB'
+alias 'ipmi-user'='sudo /home/ezc/IPMICFG-Linux.x86_64 -user list'
+alias 'ipmi-network-reset'='sudo /home/ezc/IPMICFG-Linux.x86_64 -dhcp on && sudo /home/ezc/IPMICFG-Linux.x86_64 -vlan off'
+alias 'ipmi'='sudo /home/ezc/IPMICFG-Linux.x86_64'
+alias 'inv'='sudo /home/ezc/inv.sh'
+alias 'binv'='sudo /home/ezc/bare-inv.sh'

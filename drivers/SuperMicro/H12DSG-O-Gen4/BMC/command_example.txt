@@ -1,0 +1,1 @@
+fs0:\>flash.nsh BMC_ROM_file bmc_user_name bmc_password  
