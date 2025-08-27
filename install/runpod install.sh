@@ -30,7 +30,8 @@ sudo update-alternatives --config g++  # Choose g++-12
 
 # sudo apt install nvidia-driver-575-open nvidia-dkms-575-open nvidia-utils-575 -y
 # sudo apt -V -y install cuda-toolkit-12-9 libnvidia-compute-575 nvidia-dkms-575-open nvidia-utils-575 cudnn9-cuda-12
-sudo apt -y install nvidia-driver-580-open nvidia-dkms-580-open nvidia-utils-580
+sudo apt -V -y install libnvidia-compute-575 nvidia-dkms-575-open nvidia-utils-575
+# sudo apt -y install nvidia-driver-580-open nvidia-dkms-580-open nvidia-utils-580
 
 # update all packages
 sudo apt-get update && sudo apt-get upgrade -y
