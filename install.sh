@@ -7,3 +7,4 @@ mv ~/infra/install/*.sh ~
 mv ~/infra/.bashrc ~
 mv ~/infra/.aliases ~
 ln -s ~/.aliases ~/.bash_aliases
+source ~/.bashrc
