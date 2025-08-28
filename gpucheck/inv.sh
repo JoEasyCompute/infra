@@ -20,6 +20,7 @@ printf "%-25s %-20s %-30s %-20s %-12s %-8s %-15s %-10s %-15s %-15s %-10s\n" \
 echo "-----------------------------------------------------------------------------------------------------------------------------------------------------"
 
 slot_file=$(mktemp)
+lines_file=$(mktemp)
 
 # Build slot-to-address map
 current_slot=""
@@ -32,9 +33,6 @@ while IFS= read -r line; do
         echo "$pci_trimmed|$current_slot" >> "$slot_file"
     fi
 done < <(sudo dmidecode -t slot)
-
-# Prepare to collect output lines
-lines=()
 
 nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max \
     --format=csv,noheader,nounits | while IFS=',' read -r pci gpu_name serial gen_cur gen_max width_cur width_max; do
@@ -83,29 +81,30 @@ nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link
     fi
 
     # Store all fields as a tab-separated line for sorting
-    lines+=("$slot_name"$'\t'"$pci"$'\t'"$gpu_name"$'\t'"$serial"$'\t'"$gen_cur"$'\t'"$gen_max"$'\t'"$width_cur"$'\t'"$width_max"$'\t'"$link_speed"$'\t'"$link_width"$'\t'"$status")
+    echo -e "$slot_name\t$pci\t$gpu_name\t$serial\t$gen_cur\t$gen_max\t$width_cur\t$width_max\t$link_speed\t$link_width\t$status" >> "$lines_file"
 done
 
-# Wait for the while loop to finish
-wait
+# Print header
+printf "%-6s %-25s %-20s %-30s %-20s %-12s %-8s %-15s %-10s %-15s %-15s %-10s\n" \
+    "GPU#" "Slot" "PCI Address" "GPU Name" "Serial Number" "Gen(Cur)" "Gen(Max)" "Width(Cur)" "Width(Max)" "LnkSta Speed" "LnkSta Width" "Status"
+echo "-----------------------------------------------------------------------------------------------------------------------------------------------------"
 
 # Sort by SLOT (1st field), then enumerate and print
-IFS=$'\n' sorted=($(printf "%s\n" "${lines[@]}" | sort -t$'\t' -k1,1V))
 gpu_idx=0
-for line in "${sorted[@]}"; do
-    IFS=$'\t' read -r slot_name pci gpu_name serial gen_cur gen_max width_cur width_max link_speed link_width status <<<"$line"
+while IFS=$'\t' read -r slot_name pci gpu_name serial gen_cur gen_max width_cur width_max link_speed link_width status; do
     printf "%-6s %-25s %-20s %-30s %-20s %-12s %-8s %-15s %-10s %-15s %-15s %-10b\n" \
         "$gpu_idx" "$slot_name" "$pci" "$gpu_name" "$serial" "$gen_cur" "$gen_max" "$width_cur" "$width_max" "$link_speed" "$link_width" "$status"
+    sorted_lines[$gpu_idx]="$slot_name|$pci|$gpu_name|$serial|$gen_cur|$gen_max|$width_cur|$width_max|$link_speed|$link_width|$status"
     ((gpu_idx++))
-done
+done < <(sort -t$'\t' -k1,1V "$lines_file")
 
 # Write CSV
 if [[ -n "$csv_file" ]]; then
-    for line in "${sorted[@]}"; do
-        IFS=$'\t' read -r slot_name pci gpu_name serial gen_cur gen_max width_cur width_max link_speed link_width status <<<"$line"
+    for idx in "${!sorted_lines[@]}"; do
+        IFS='|' read -r slot_name pci gpu_name serial gen_cur gen_max width_cur width_max link_speed link_width status <<<"${sorted_lines[$idx]}"
         csv_status=$([[ "$status" == *"Degraded"* ]] && echo "Degraded" || echo "OK")
-        echo "\"$slot_name\",\"$pci\",\"$gpu_name\",\"$serial\",\"$gen_cur\",\"$gen_max\",\"$width_cur\",\"$width_max\",\"$link_speed\",\"$link_width\",\"$csv_status\"" >> "$csv_file"
+        echo "\"$idx\",\"$slot_name\",\"$pci\",\"$gpu_name\",\"$serial\",\"$gen_cur\",\"$gen_max\",\"$width_cur\",\"$width_max\",\"$link_speed\",\"$link_width\",\"$csv_status\"" >> "$csv_file"
     done
 fi
 
-rm -f "$slot_file"
+rm -f "$slot_file" "$lines_file"

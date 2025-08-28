@@ -147,7 +147,7 @@ line_fmt="%-4s %-12s %-30s %-46s %-14s %-6s %-9s %-9s %-10s %-4s\n"
 printf "$header_fmt" "GPU#" "PCI-ADDR" "SLOT" "MODEL" "PCI-IDS" "CLASS" "CUR_GEN/x" "MAX_GEN/x" "CUR_SPEED" "NUMA"
 printf "%s\n" "--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
 
-lines=()
+lines_file=$(mktemp)
 for addr in "${gpu_addrs[@]}"; do
   model="$(get_model "$addr")"; [[ -z "$model" ]] && model="-"
   class="$(get_class "$addr")"
@@ -163,22 +163,20 @@ for addr in "${gpu_addrs[@]}"; do
   if [[ "$cur_w" =~ ^[0-9]+$ && "$max_w" =~ ^[0-9]+$ && "$cur_w" -lt "$max_w" ]]; then degrade="(WIDTH↓)"; fi
   if [[ "$cur_gen" =~ ^Gen([0-9]+)$ && "$max_gen" =~ ^Gen([0-9]+)$ && "${BASH_REMATCH[1]}" -lt "${max_gen#Gen}" ]]; then degrade="${degrade:+$degrade }(GEN↓)"; fi
 
-  # Store all fields as a tab-separated line for sorting
-  lines+=("$addr"$'\t'"$slot"$'\t'"$(clip "$model" 46)"$'\t'"$ids"$'\t'"$class"$'\t'"${cur_gen:-?}/${cur_w:-?}${degrade:+*}"$'\t'"${max_gen:-?}/${max_w:-?}"$'\t'"${speed_gts:-?}"$'\t'"${numa:-?}")
+  # Write all fields as a tab-separated line for sorting
+  echo -e "$addr\t$slot\t$(clip "$model" 46)\t$ids\t$class\t${cur_gen:-?}/${cur_w:-?}${degrade:+*}\t${max_gen:-?}/${max_w:-?}\t${speed_gts:-?}\t${numa:-?}" >> "$lines_file"
 done
 
-# Sort by SLOT (2nd field), then enumerate and print
-IFS=$'\n' sorted=($(printf "%s\n" "${lines[@]}" | sort -t$'\t' -k2,2V))
 gpu_idx=0
-for line in "${sorted[@]}"; do
-  IFS=$'\t' read -r addr slot model ids class cur max speed numa <<<"$line"
+while IFS=$'\t' read -r addr slot model ids class cur max speed numa; do
   printf "$line_fmt" "$gpu_idx" "$addr" "$slot" "$model" "$ids" "$class" "$cur" "$max" "$speed" "$numa"
   if [[ -n "$csv_file" ]]; then
-    # Write CSV row (quote fields, no color, no special chars)
     echo "\"$gpu_idx\",\"$addr\",\"$slot\",\"$model\",\"$ids\",\"$class\",\"$cur\",\"$max\",\"$speed\",\"$numa\"" >> "$csv_file"
   fi
   ((gpu_idx++))
-done
+done < <(sort -t$'\t' -k2,2V "$lines_file")
+
+rm -f "$lines_file"
 
 if [[ "$DEBUG" == "1" ]]; then
   echo -e "\n[DEBUG] First GPU chain (endpoint → root):" >&2
