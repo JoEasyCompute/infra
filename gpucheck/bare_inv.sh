@@ -134,20 +134,13 @@ for d in /sys/bus/pci/devices/*; do
 done
 [[ ${#gpu_addrs[@]} -eq 0 ]] && { echo "No NVIDIA GPU-class PCI devices found." >&2; exit 0; }
 
-csv_file="${1:-}"
-
-# CSV Header
-if [[ -n "$csv_file" ]]; then
-  echo "GPU#,PCI-ADDR,SLOT,MODEL,PCI-IDS,CLASS,CUR_GEN/x,MAX_GEN/x,CUR_SPEED,NUMA" > "$csv_file"
-fi
-
-header_fmt="%-4s %-12s %-30s %-46s %-14s %-6s %-9s %-9s %-10s %-4s\n"
-line_fmt="%-4s %-12s %-30s %-46s %-14s %-6s %-9s %-9s %-10s %-4s\n"
-
-printf "$header_fmt" "GPU#" "PCI-ADDR" "SLOT" "MODEL" "PCI-IDS" "CLASS" "CUR_GEN/x" "MAX_GEN/x" "CUR_SPEED" "NUMA"
+# --- Output (fixed widths; model clipped) ---
+printf "%-5s %-12s %-30s %-46s %-14s %-6s %-9s %-9s %-10s %-4s\n" \
+  "IDX" "PCI-ADDR" "SLOT" "MODEL" "PCI-IDS" "CLASS" "CUR_GEN/x" "MAX_GEN/x" "CUR_SPEED" "NUMA"
 printf "%s\n" "--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
 
-lines_file=$(mktemp)
+# Buffer rows as tab-separated for robust sorting/rehydration
+rows=()
 for addr in "${gpu_addrs[@]}"; do
   model="$(get_model "$addr")"; [[ -z "$model" ]] && model="-"
   class="$(get_class "$addr")"
@@ -163,20 +156,26 @@ for addr in "${gpu_addrs[@]}"; do
   if [[ "$cur_w" =~ ^[0-9]+$ && "$max_w" =~ ^[0-9]+$ && "$cur_w" -lt "$max_w" ]]; then degrade="(WIDTH↓)"; fi
   if [[ "$cur_gen" =~ ^Gen([0-9]+)$ && "$max_gen" =~ ^Gen([0-9]+)$ && "${BASH_REMATCH[1]}" -lt "${max_gen#Gen}" ]]; then degrade="${degrade:+$degrade }(GEN↓)"; fi
 
-  # Write all fields as a tab-separated line for sorting
-  echo -e "$addr\t$slot\t$(clip "$model" 46)\t$ids\t$class\t${cur_gen:-?}/${cur_w:-?}${degrade:+*}\t${max_gen:-?}/${max_w:-?}\t${speed_gts:-?}\t${numa:-?}" >> "$lines_file"
+  # Store as TSV: SLOT, ADDR, MODEL, IDS, CLASS, CUR, MAX, SPEED, NUMA
+  cur_field="${cur_gen:-?}/${cur_w:-?}${degrade:+*}"
+  max_field="${max_gen:-?}/${max_w:-?}"
+  rows+=("$slot"$'\t'"$addr"$'\t'"$(clip "$model" 46)"$'\t'"$ids"$'\t'"$class"$'\t'"$cur_field"$'\t'"$max_field"$'\t'"${speed_gts:-?}"$'\t'"${numa:-?}")
 done
 
-gpu_idx=0
-while IFS=$'\t' read -r addr slot model ids class cur max speed numa; do
-  printf "$line_fmt" "$gpu_idx" "$addr" "$slot" "$model" "$ids" "$class" "$cur" "$max" "$speed" "$numa"
-  if [[ -n "$csv_file" ]]; then
-    echo "\"$gpu_idx\",\"$addr\",\"$slot\",\"$model\",\"$ids\",\"$class\",\"$cur\",\"$max\",\"$speed\",\"$numa\"" >> "$csv_file"
-  fi
-  ((gpu_idx++))
-done < <(sort -t$'\t' -k2,2V "$lines_file")
-
-rm -f "$lines_file"
+# Sort by first integer found in SLOT label; unknown/no-integer slots go last
+# Then reassign index sequentially during final print for stable, post-sort IDX.
+if ((${#rows[@]} > 0)); then
+  printf "%s\n" "${rows[@]}" | \
+    awk -F'\t' -v OFS='\t' '
+      function firstnum(s,    r){ if (match(s, /[0-9]+/)) return substr(s, RSTART, RLENGTH); else return 2147483647 }  # push "-" or non-numeric to end
+      { print firstnum($1), $0 }
+    ' | sort -t$'\t' -k1,1n -k2,2 | cut -f2- | \
+    awk -F'\t' -v OFS='\t' '
+      BEGIN{ idx=0 }
+      { idx++; printf "%-5s %-12s %-30s %-46s %-14s %-6s %-9s %-9s %-10s %-4s\n", \
+          idx, $2, $1, $3, $4, $5, $6, $7, $8, $9
+      }'
+fi
 
 if [[ "$DEBUG" == "1" ]]; then
   echo -e "\n[DEBUG] First GPU chain (endpoint → root):" >&2
