@@ -16,7 +16,7 @@
 #
 # Flags:
 #   --user <name>        Linux account to configure (default: ezc)
-#   --driver <ver>       570 | 575 | 580 (default: 580)
+#   --driver <ver>       570 | 575 | 580 (default: 575)
 #   --mode <type>        headless | desktop (default: headless)
 #   --no-docker          Skip Docker + NVIDIA Container Toolkit
 #   --no-autologin       Skip tty1 autologin configuration
@@ -28,7 +28,7 @@ set -euo pipefail
 
 # -------------------------- Defaults & CLI ------------------------------------
 USER_NAME="ezc"
-DRIVER_VER="580"
+DRIVER_VER="575"
 DRIVER_MODE="headless"
 INSTALL_DOCKER=1
 DO_AUTOLOGIN=1
