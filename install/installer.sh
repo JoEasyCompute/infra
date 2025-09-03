@@ -34,6 +34,7 @@ INSTALL_DOCKER=1
 DO_AUTOLOGIN=1
 DO_SUDOERS=1
 DO_GPU_BURN=1
+DO_GPUD=1
 APT_NONINTERACTIVE=0
 
 while [[ $# -gt 0 ]]; do
@@ -45,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --no-autologin) DO_AUTOLOGIN=0; shift ;;
     --no-sudoers) DO_SUDOERS=0; shift ;;
     --no-gpuburn) DO_GPU_BURN=0; shift ;;
+    --no-gpud) DO_GPUD=0; shift ;;
     --noninteractive) APT_NONINTERACTIVE=1; shift ;;
     -h|--help)
       grep -E '^# ' "$0" | sed 's/^# //'; exit 0 ;;
@@ -143,7 +145,7 @@ log "Installing base toolchain and dependencies"
 require_pkgs software-properties-common \
              apt-transport-https ca-certificates curl gnupg lsb-release \
              git cmake build-essential dkms alsa-utils ipmitool \
-             gcc-12 g++-12
+             gcc-12 g++-12 gnupg lsb-release ipmitool jq pciutils iproute2 util-linux dmidecode lshw coreutils
 
 # PPA for graphics drivers (safe to re-run)
 log "Adding Graphics Drivers PPA"
@@ -250,6 +252,20 @@ if [[ $DO_GPU_BURN -eq 1 ]]; then
     fi
     cd ~/gpu-burn
     make
+  '"
+fi
+
+if [( $DO_GPUD -eq 1)]; then
+  log "Installing gpud"
+  # Build under target user's $HOME if possible
+  TARGET_HOME=$(eval echo "~${USER_NAME}") || TARGET_HOME="/root"
+  install -d -m 0755 "${TARGET_HOME}/gpu-burn"
+  chown -R "${USER_NAME}:${USER_NAME}" "${TARGET_HOME}/gpu-burn"
+
+  # Clone/build as that user to avoid root-owned artifacts in home
+  su - "$USER_NAME" -c "bash -lc '
+    set -e
+    curl -fsSL https://pkg.gpud.dev/install.sh | sh
   '"
 fi
 
