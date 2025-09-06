@@ -5,20 +5,19 @@ sudo add-apt-repository ppa:graphics-drivers/ppa
 sudo apt update
 sudo apt install git apt-transport-https ca-certificates curl software-properties-common cmake build-essential dkms -y
 
+# remove old nvidia drivers if any
+# sudo apt purge '^nvidia.*' '^libnvidia.*' '^cuda.*'
+# sudo apt autoremove
+# sudo apt autoclean
+# install nvidia keyring
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+
 # install kernel 6.8
 sudo apt install --install-recommends linux-generic-hwe-22.04 -y
 
 # reboot once
 sudo reboot now
-
-# remove old nvidia drivers if any
-# sudo apt purge '^nvidia.*' '^libnvidia.*' '^cuda.*'
-# sudo apt autoremove
-# sudo apt autoclean
-
-# install nvidia keyring
-wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-sudo dpkg -i cuda-keyring_1.1-1_all.deb
 
 sudo apt install gcc-12 g++-12
 sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 11
@@ -58,6 +57,15 @@ sudo lvcreate -L 3000G -n runpoddata ubuntu-vg
 
 # update all packages
 sudo apt-get update && sudo apt-get upgrade -y
+git clone https://github.com/joeasycompute/infra.git
+infra/install.sh
 
 # reboot once
 sudo reboot now
+
+## on Hydra
+## umount /data0
+## edit fstab to remove /data0 mount
+
+sudo resize2fs /dev/vg0/lv--0 120G   # shrink FS to 2TB
+sudo lvreduce -L 120G /dev/vg0/lv--0
