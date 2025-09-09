@@ -360,12 +360,25 @@ if [[ "$(echo "$INSTALL_DOCKER" | tr '[:lower:]' '[:upper:]')" == "Y" ]]; then
 
   log "Installing NVIDIA Container Toolkit"
   if [[ -n "$SUDO" ]]; then
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | $SUDO gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit.gpg
-    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-      sed -e 's#signed-by=.*#signed-by=/usr/share/keyrings/nvidia-container-toolkit.gpg#g' | \
-      $SUDO tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
-    apt_retry $SUDO apt-get update -y
-    apt_retry $SUDO apt-get install -y nvidia-container-toolkit
+    # --- NVIDIA Container Toolkit repo (hardened) ---
+    # Nuke stale list(s) that may lack 'signed-by'
+    rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+    # Install/refresh keyring
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+      | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    chmod 0644 /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+
+    # Write repo list with explicit signed-by and resolved arch
+    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+      | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#' \
+      | sed 's/\$(ARCH)/amd64/g' \
+      >> /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    chmod 0644 /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+    apt_retry apt-get update -y
+    apt_retry apt-get install $APT_FLAGS nvidia-container-toolkit
+
     $SUDO nvidia-ctk runtime configure --runtime=docker || true
     $SUDO systemctl restart docker || true
     $SUDO usermod -aG docker "$TARGET_USER"
