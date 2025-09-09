@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# basic-stack-interactive-v2.sh
+# basic-stack-interactive-v3.sh
 # Interactive, sudo-aware bootstrap for Ubuntu 22.04/24.04 GPU nodes.
+# - Actions: Install/Configure OR Roll back tinygrad P2P → official 570.148.08
 # - Consolidated driver-choice menu (mutually exclusive): 570 stock / 570 tinygrad P2P / 575 / 580 / None
 # - Uses sudo internally; you do NOT need to run this script with sudo.
-# - Supports Docker + NVIDIA CTK, CUDA toolkit, gpu-burn, gpud, autologin, sudoers.
-#
-# Usage:
-#   bash basic-stack-interactive-v2.sh
-#
+# - Supports Docker + NVIDIA CTK (with hardened keyring/repo setup), CUDA toolkit, gpu-burn, gpud, autologin, sudoers.
+
 set -euo pipefail
 
 # -------------------------- Utilities ------------------------------------------
@@ -25,7 +23,7 @@ log(){ echo "[INFO] $*"; }
 warn(){ echo "[WARN] $*" >&2; }
 die(){ echo "[FAIL] $*" >&2; exit 1; }
 
-apt_retry(){ # apt_retry <cmd...>
+apt_retry(){
   local n=0 max=5 sleep_s=5
   until "$@"; do
     n=$((n+1))
@@ -36,15 +34,14 @@ apt_retry(){ # apt_retry <cmd...>
   done
 }
 
-ask_default(){ # ask_default "Prompt" "default_value"
+ask_default(){
   local prompt="$1"; local def="$2"; local ans=""
   read -rp "$prompt [$def]: " ans || true
   if [[ -z "$ans" ]]; then echo "$def"; else echo "$ans"; fi
 }
 
-ask_yes_no(){ # ask_yes_no "Prompt" "Y|N"
-  local prompt="$1"; local def="${2^^}"
-  local ans=""
+ask_yes_no(){
+  local prompt="$1"; local def="${2^^}"; local ans=""
   while true; do
     read -rp "$prompt [${def}]: " ans || true
     ans="${ans:-$def}"; ans="${ans^^}"
@@ -71,6 +68,14 @@ ensure_user(){
   id -u "$u" >/dev/null 2>&1 || die "User '$u' does not exist. Create it first."
 }
 
+unload_nvidia(){
+  for m in nvidia_drm nvidia_modeset nvidia_uvm nvidia_fs nvidia; do
+    if lsmod | grep -q "^${m}"; then
+      if [[ -n "$SUDO" ]]; then $SUDO rmmod "$m" || true; else rmmod "$m" || true; fi
+    fi
+  done
+}
+
 # -------------------------- Distro gates ---------------------------------------
 . /etc/os-release
 CODENAME="${VERSION_CODENAME:-jammy}"
@@ -80,11 +85,97 @@ fi
 CUDA_DISTRO="ubuntu2204"
 [[ "$CODENAME" == "noble" ]] && CUDA_DISTRO="ubuntu2404"
 
-# -------------------------- Interactive inputs ---------------------------------
+# -------------------------- Action choice --------------------------------------
+echo "Select action:"
+echo "  1) Install / Configure"
+echo "  2) Roll back tinygrad P2P → official 570.148.08 kernel modules"
+echo "  3) Exit"
+ACTION=$(ask_default "Select [1-3]" "1")
+
+if [[ "$ACTION" == "2" ]]; then
+  # ---------------------- Rollback path ----------------------------------------
+  secure_boot_check
+  RUNFILE_DEFAULT="/tmp/NVIDIA-Linux-x86_64-570.148.08.run"
+  RUNFILE="$(ask_default 'Path to NVIDIA 570.148.08 .run (will be downloaded if missing)' "$RUNFILE_DEFAULT")"
+  PURGE_TINYGRAD_DIR="$(ask_default 'Purge tinygrad build dir (/usr/src/tinygrad-open-gpu-kernel-modules)? (Y/N)' "N")"
+
+  # Ensure prerequisites
+  if [[ -n "$SUDO" ]]; then
+    apt_retry $SUDO apt-get update -y
+    apt_retry $SUDO apt-get install -y build-essential dkms linux-headers-$(uname -r) curl
+  else
+    apt-get update -y
+    apt-get install -y build-essential dkms linux-headers-$(uname -r) curl
+  fi
+
+  # Fetch the .run if needed
+  if [[ ! -f "$RUNFILE" ]]; then
+    URL="https://us.download.nvidia.com/tesla/570.148.08/$(basename "$RUNFILE")"
+    log "Downloading official NVIDIA .run from ${URL}"
+    if ! curl -fSL "$URL" -o "$RUNFILE"; then
+      die "Failed to download the .run file. Download it manually and re-run."
+    fi
+  fi
+  if [[ -n "$SUDO" ]]; then $SUDO chmod +x "$RUNFILE"; else chmod +x "$RUNFILE"; fi
+
+  log "Unloading current NVIDIA modules (if loaded)…"
+  unload_nvidia
+
+  log "Installing official NVIDIA 570.148.08 kernel modules from .run"
+  if [[ -n "$SUDO" ]]; then
+    $SUDO sh "$RUNFILE" --silent --no-opengl-files --no-x-check --no-nouveau-check
+  else
+    sh "$RUNFILE" --silent --no-opengl-files --no-x-check --no-nouveau-check
+  fi
+
+  log "Reloading modules"
+  if [[ -n "$SUDO" ]]; then
+    $SUDO depmod -a
+    $SUDO update-initramfs -u
+    $SUDO modprobe nvidia
+    $SUDO modprobe nvidia_uvm
+  else
+    depmod -a
+    update-initramfs -u
+    modprobe nvidia
+    modprobe nvidia_uvm
+  fi
+
+  if have nvidia-smi; then
+    if [[ -n "$SUDO" ]]; then
+      $SUDO systemctl enable nvidia-persistenced >/dev/null 2>&1 || true
+      $SUDO systemctl start nvidia-persistenced || true
+    else
+      systemctl enable nvidia-persistenced >/dev/null 2>&1 || true
+      systemctl start nvidia-persistenced || true
+    fi
+    nvidia-smi -pm 1 || true
+  fi
+
+  if [[ "${PURGE_TINYGRAD_DIR^^}" == "Y" ]]; then
+    if [[ -n "$SUDO" ]]; then
+      $SUDO rm -rf /usr/src/tinygrad-open-gpu-kernel-modules || true
+    else
+      rm -rf /usr/src/tinygrad-open-gpu-kernel-modules || true
+    fi
+    log "Removed /usr/src/tinygrad-open-gpu-kernel-modules"
+  fi
+
+  echo
+  log "Validation:"
+  if have modinfo; then modinfo nvidia | egrep -i 'filename|version' || true; fi
+  if have nvidia-smi; then nvidia-smi || true; echo; nvidia-smi topo -m || true; fi
+
+  log "Rollback complete. A reboot is recommended."
+  exit 0
+elif [[ "$ACTION" == "3" ]]; then
+  echo "No action taken."; exit 0
+fi
+
+# -------------------------- Interactive inputs (Install path) ------------------
 CURRENT_USER="${SUDO_USER:-${USER}}"
 TARGET_USER=$(ask_default "Target user to configure (docker group, autologin/sudoers)" "$CURRENT_USER")
 
-# Consolidated driver choice menu
 echo "Which NVIDIA driver path do you want?"
 echo "  1) 570 (stock, via apt)"
 echo "  2) 570 (tinygrad P2P-patched, requires 570.148.08 .run)"
@@ -359,35 +450,32 @@ if [[ "$(echo "$INSTALL_DOCKER" | tr '[:lower:]' '[:upper:]')" == "Y" ]]; then
   fi
 
   log "Installing NVIDIA Container Toolkit"
+  # --- Harden NVIDIA Container Toolkit apt repo (idempotent) ---
   if [[ -n "$SUDO" ]]; then
-    # --- NVIDIA Container Toolkit repo (hardened) ---
-    # Nuke stale list(s) that may lack 'signed-by'
-    rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list
-
-    # Install/refresh keyring
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-      | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-    chmod 0644 /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-
-    # Write repo list with explicit signed-by and resolved arch
+    $SUDO rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list || true
+    $SUDO install -m 0755 -d /usr/share/keyrings
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | $SUDO gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit.gpg
     curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
-      | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#' \
-      | sed 's/\$(ARCH)/amd64/g' \
-      >> /etc/apt/sources.list.d/nvidia-container-toolkit.list
-    chmod 0644 /etc/apt/sources.list.d/nvidia-container-toolkit.list
-
+      | sed 's#^deb .*stable/deb/#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit.gpg] https://nvidia.github.io/libnvidia-container/stable/deb/#' \
+      | $SUDO tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
+    apt_retry $SUDO apt-get update -y
+  else
+    rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list || true
+    install -m 0755 -d /usr/share/keyrings
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit.gpg
+    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+      | sed 's#^deb .*stable/deb/#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit.gpg] https://nvidia.github.io/libnvidia-container/stable/deb/#' \
+      | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
     apt_retry apt-get update -y
-    apt_retry apt-get install $APT_FLAGS nvidia-container-toolkit
+  fi
+  # --- End harden ---
 
+  if [[ -n "$SUDO" ]]; then
+    apt_retry $SUDO apt-get install -y nvidia-container-toolkit
     $SUDO nvidia-ctk runtime configure --runtime=docker || true
     $SUDO systemctl restart docker || true
     $SUDO usermod -aG docker "$TARGET_USER"
   else
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit.gpg
-    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-      sed -e 's#signed-by=.*#signed-by=/usr/share/keyrings/nvidia-container-toolkit.gpg#g' | \
-      tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
-    apt_retry apt-get update -y
     apt_retry apt-get install -y nvidia-container-toolkit
     nvidia-ctk runtime configure --runtime=docker || true
     systemctl restart docker || true
