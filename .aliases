@@ -2,7 +2,82 @@ alias 'upd-gen3-bios'='sudo /home/ezc/SuperMicro/X11DPG-OT-Gen3/sum_2.14.0_Linux
 alias 'upd-gen4-bios'='sudo /home/ezc/SuperMicro/H12DSG-O-Gen4/saa_1.2.0-p5_Linux_x86_64/saa -c UpdateBios --file /home/ezc/SuperMicro/H12DSG-O-Gen4/BIOS/BIOS_H12DSGO-1B55_20250404_3.3_STDsp.bin'
 alias 'upd-intel-NIC'='sudo /home/ezc/Intel/bootutil64e -up=combo -all -file=/home/ezc/Intel/BootIMG.FLB'
 alias 'ipmi-user'='sudo /home/ezc/IPMICFG-Linux.x86_64 -user list'
-alias 'ipmi-network-reset'='sudo /home/ezc/IPMICFG-Linux.x86_64 -dhcp on && sudo /home/ezc/IPMICFG-Linux.x86_64 -vlan off'
+alias 'ipmi-network-reset'='sudo /home/ezc/IPMICFG-Linux.x86_64 -dhcp off && sudo /home/ezc/IPMICFG-Linux.x86_64 -vlan off'
 alias 'ipmi'='sudo /home/ezc/IPMICFG-Linux.x86_64'
 alias 'inv'='sudo /home/ezc/inv.sh'
 alias 'binv'='sudo /home/ezc/bare-inv.sh'
+
+# Provision a disk for Docker root with XFS+pquota and smart-update /etc/fstab
+dockerprep() {
+    set -euo pipefail
+
+    if [ $# -lt 1 ]; then
+        echo "Usage: dockerprep <device>"
+        echo "Examples: dockerprep /dev/nvme0n1    |   dockerprep /dev/sda"
+        return 1
+    fi
+
+    local disk="$1"
+    # Derive the first partition name correctly for both NVMe (/dev/nvme0n1p1) and SATA (/dev/sda1)
+    local part
+    if [[ "$disk" =~ nvme.*n[0-9]+$ ]]; then
+        part="${disk}p1"
+    else
+        part="${disk}1"
+    fi
+
+    echo "[*] Creating GPT label on ${disk}"
+    sudo parted "${disk}" --script mklabel gpt
+
+    echo "[*] Creating primary partition (100% of disk)"
+    sudo parted -a opt "${disk}" --script mkpart primary xfs 0% 100%
+
+    echo "[*] Formatting ${part} as XFS (ftype=1)"
+    sudo mkfs.xfs -f -n ftype=1 "${part}" -L dockerdata
+
+    echo "[*] Reading UUID"
+    local uuid
+    uuid=$(sudo blkid -s UUID -o value "${part}")
+    if [ -z "${uuid}" ]; then
+        echo "ERROR: Could not read UUID for ${part}." >&2
+        return 2
+    fi
+
+    local fstab_line="UUID=${uuid} /var/lib/docker xfs defaults,pquota 0 0"
+    local ts
+    ts=$(date +%F-%H%M%S)
+
+    echo "[*] Backing up /etc/fstab -> /etc/fstab.bak-${ts}"
+    sudo cp /etc/fstab "/etc/fstab.bak-${ts}"
+
+    echo "[*] Updating /etc/fstab (add or replace /var/lib/docker entry)"
+    if grep -Eq '^[^#]*[[:space:]]/var/lib/docker[[:space:]]' /etc/fstab; then
+        # Replace existing line where the mountpoint (field 2) is /var/lib/docker
+        sudo awk -v new="$fstab_line" '
+            $2 == "/var/lib/docker" { print new; next }
+            { print }
+        ' /etc/fstab | sudo tee /etc/fstab >/dev/null
+    else
+        echo "$fstab_line" | sudo tee -a /etc/fstab >/dev/null
+    fi
+
+    echo "[*] Ensuring mountpoint exists"
+    sudo mkdir -p /var/lib/docker
+
+    echo "[*] Applying mount (will skip if currently mounted)"
+    if mountpoint -q /var/lib/docker; then
+        echo "[!] /var/lib/docker is currently mounted."
+        echo "    To apply the new options cleanly:"
+        echo "      sudo systemctl stop docker containerd || true"
+        echo "      sudo fuser -km /var/lib/docker || true"
+        echo "      sudo umount /var/lib/docker"
+        echo "      sudo mount -a"
+    else
+        sudo mount -a
+    fi
+
+    echo "[*] Current mount:"
+    mount | grep ' /var/lib/docker ' || true
+
+    echo "[✓] Done."
+}
