@@ -232,7 +232,10 @@ log "Installing base toolchain and dependencies"
 require_pkgs software-properties-common \
              apt-transport-https ca-certificates curl gnupg lsb-release \
              git cmake build-essential dkms alsa-utils ipmitool \
-             gcc-12 g++-12 jq pciutils iproute2 util-linux dmidecode lshw coreutils
+             gcc-12 g++-12 jq pciutils iproute2 util-linux dmidecode lshw coreutils chrony
+
+log "Enabling and starting chrony NTP service"
+sudo systemctl enable chrony --now
 
 log "Adding Graphics Drivers PPA (idempotent)"
 add-apt-repository -y ppa:graphics-drivers/ppa || true
