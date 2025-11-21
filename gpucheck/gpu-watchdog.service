@@ -1,0 +1,13 @@
+[Unit]
+Description=GPU watchdog (detect fallen-off-bus events and attempt recovery)
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/gpu-watchdog.sh
+# We want the script's exit code to propagate; failures are visible in systemctl status.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

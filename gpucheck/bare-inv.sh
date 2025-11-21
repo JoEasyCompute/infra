@@ -3,11 +3,14 @@
 # Deps: bash, lspci (pciutils), awk, sed, grep, cut, tr, column, readlink
 set -euo pipefail
 
+# Optional CSV output file
+csv_file="${1:-}"
+
 have(){ command -v "$1" >/dev/null 2>&1; }
 require(){ for c in "$@"; do have "$c" || { echo "ERROR: missing dependency: $c" >&2; exit 1; }; done; }
 require lspci awk sed grep cut tr column readlink
 
-DEBUG="${DEBUG:-0}"; [[ "${1:-}" == "--debug" ]] && DEBUG=1
+DEBUG="${DEBUG:-0}"; [[ "${2:-}" == "--debug" || "${1:-}" == "--debug" ]] && DEBUG=1
 logd(){ [[ "$DEBUG" == "1" ]] && echo "[DEBUG] $*" >&2 || true; }
 
 trim(){ local s="${1:-}"; s="${s#"${s%%[![:space:]]*}"}"; echo "${s%"${s##*[![:space:]]}"}"; }
@@ -98,19 +101,22 @@ get_physical_slot_via_lspci(){ lspci -s "$1" -vv 2>/dev/null | sed -n 's/.*Physi
 # --- SMBIOS upstream map (addr → slot) ---
 declare -A SLOT_BY_UPSTREAM
 if have dmidecode; then
-  [[ "$(id -u)" -ne 0 ]] && echo "WARN: run as root for full SMBIOS visibility." >&2
-  while IFS= read -r line; do
-    addr="${line%% *}"; slot="${line#* }"; addr="$(echo "$addr" | tr 'A-Z' 'a-z')"
-    [[ "$addr" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ && -n "$slot" ]] && { SLOT_BY_UPSTREAM["$addr"]="$slot"; logd "SMBIOS map: $addr -> $slot"; }
-  done < <( dmidecode -t slot 2>/dev/null | awk '
-      BEGIN{ slot=""; addr="" }
-      function emit(){ if(slot!="" && addr!=""){ printf "%s %s\n", tolower(addr), slot } slot=""; addr="" }
-      {
-        if ($0 ~ /^$/){ emit(); next }
-        if ($0 ~ /Designation:/){ sub(/^[[:space:]]*Designation:[[:space:]]*/,""); slot=$0 }
-        else if ($0 ~ /Bus Address:/){ sub(/^[[:space:]]*Bus Address:[[:space:]]*/,""); addr=$0 }
-      }
-      END{ emit() }' )
+  if [[ "$(id -u)" -ne 0 ]]; then
+     echo "NOTE: Run as root (sudo) to enable SMBIOS slot mapping." >&2
+  else
+      while IFS= read -r line; do
+        addr="${line%% *}"; slot="${line#* }"; addr="$(echo "$addr" | tr 'A-Z' 'a-z')"
+        [[ "$addr" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ && -n "$slot" ]] && { SLOT_BY_UPSTREAM["$addr"]="$slot"; logd "SMBIOS map: $addr -> $slot"; }
+      done < <( dmidecode -t slot 2>/dev/null | awk '
+          BEGIN{ slot=""; addr="" }
+          function emit(){ if(slot!="" && addr!=""){ printf "%s %s\n", tolower(addr), slot } slot=""; addr="" }
+          {
+            if ($0 ~ /^$/){ emit(); next }
+            if ($0 ~ /Designation:/){ sub(/^[[:space:]]*Designation:[[:space:]]*/,""); slot=$0 }
+            else if ($0 ~ /Bus Address:/){ sub(/^[[:space:]]*Bus Address:[[:space:]]*/,""); addr=$0 }
+          }
+          END{ emit() }' )
+  fi
 fi
 nearest_slot_for(){
   local addr="$1" path p
@@ -135,6 +141,10 @@ done
 [[ ${#gpu_addrs[@]} -eq 0 ]] && { echo "No NVIDIA GPU-class PCI devices found." >&2; exit 0; }
 
 # --- Output (fixed widths; model clipped) ---
+if [[ -n "$csv_file" && "$csv_file" != "--debug" ]]; then
+    echo "Idx,Slot,PCI Address,Model,PCI IDs,Class,Gen(Current),Width(Current),Gen(Max),Width(Max),Speed,Numa,Status" > "$csv_file"
+fi
+
 printf "%-5s %-12s %-30s %-46s %-14s %-6s %-9s %-9s %-10s %-4s\n" \
   "IDX" "PCI-ADDR" "SLOT" "MODEL" "PCI-IDS" "CLASS" "CUR_GEN/x" "MAX_GEN/x" "CUR_SPEED" "NUMA"
 printf "%s\n" "--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
@@ -153,13 +163,12 @@ for addr in "${gpu_addrs[@]}"; do
   [[ -z "$slot" ]] && slot="-"
 
   degrade=""
-  if [[ "$cur_w" =~ ^[0-9]+$ && "$max_w" =~ ^[0-9]+$ && "$cur_w" -lt "$max_w" ]]; then degrade="(WIDTH↓)"; fi
-  if [[ "$cur_gen" =~ ^Gen([0-9]+)$ && "$max_gen" =~ ^Gen([0-9]+)$ && "${BASH_REMATCH[1]}" -lt "${max_gen#Gen}" ]]; then degrade="${degrade:+$degrade }(GEN↓)"; fi
+  status="OK"
+  if [[ "$cur_w" =~ ^[0-9]+$ && "$max_w" =~ ^[0-9]+$ && "$cur_w" -lt "$max_w" ]]; then degrade="(WIDTH↓)"; status="Degraded"; fi
+  if [[ "$cur_gen" =~ ^Gen([0-9]+)$ && "$max_gen" =~ ^Gen([0-9]+)$ && "${BASH_REMATCH[1]}" -lt "${max_gen#Gen}" ]]; then degrade="${degrade:+$degrade }(GEN↓)"; status="Degraded"; fi
 
-  # Store as TSV: SLOT, ADDR, MODEL, IDS, CLASS, CUR, MAX, SPEED, NUMA
-  cur_field="${cur_gen:-?}/${cur_w:-?}${degrade:+*}"
-  max_field="${max_gen:-?}/${max_w:-?}"
-  rows+=("$slot"$'\t'"$addr"$'\t'"$(clip "$model" 46)"$'\t'"$ids"$'\t'"$class"$'\t'"$cur_field"$'\t'"$max_field"$'\t'"${speed_gts:-?}"$'\t'"${numa:-?}")
+  # Store as TSV: SLOT, ADDR, MODEL, IDS, CLASS, CUR_GEN, CUR_W, MAX_GEN, MAX_W, SPEED, NUMA, DEGRADE_MARKER, STATUS
+  rows+=("$slot"$'\t'"$addr"$'\t'"$(clip "$model" 46)"$'\t'"$ids"$'\t'"$class"$'\t'"${cur_gen:-?}"$'\t'"${cur_w:-?}"$'\t'"${max_gen:-?}"$'\t'"${max_w:-?}"$'\t'"${speed_gts:-?}"$'\t'"${numa:-?}"$'\t'"$degrade"$'\t'"$status")
 done
 
 # Sort by first integer found in SLOT label; unknown/no-integer slots go last
@@ -170,10 +179,23 @@ if ((${#rows[@]} > 0)); then
       function firstnum(s,    r){ if (match(s, /[0-9]+/)) return substr(s, RSTART, RLENGTH); else return 2147483647 }  # push "-" or non-numeric to end
       { print firstnum($1), $0 }
     ' | sort -t$'\t' -k1,1n -k2,2 | cut -f2- | \
-    awk -F'\t' -v OFS='\t' '
+    awk -F'\t' -v OFS='\t' -v csv="${csv_file:-}" '
       BEGIN{ idx=0 }
-      { idx++; printf "%-5s %-12s %-30s %-46s %-14s %-6s %-9s %-9s %-10s %-4s\n", \
-          idx, $2, $1, $3, $4, $5, $6, $7, $8, $9
+      { 
+        idx++; 
+        # Table Output
+        # Fields: 1=SLOT 2=ADDR 3=MODEL 4=IDS 5=CLASS 6=CGEN 7=CW 8=MGEN 9=MW 10=SPEED 11=NUMA 12=DEGRADE 13=STATUS
+        cur_field=$6 "/" $7 $12
+        max_field=$8 "/" $9
+        printf "%-5s %-12s %-30s %-46s %-14s %-6s %-9s %-9s %-10s %-4s\n", \
+          idx, $2, $1, $3, $4, $5, cur_field, max_field, $10, $11
+        
+        # CSV Output
+        if (csv != "" && csv != "--debug") {
+             # Idx,Slot,PCI Address,Model,PCI IDs,Class,Gen(Current),Width(Current),Gen(Max),Width(Max),Speed,Numa,Status
+             printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n", \
+             idx, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $13 >> csv
+        }
       }'
 fi
 
