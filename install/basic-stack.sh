@@ -102,14 +102,30 @@ esac
 log "OS detected: Ubuntu ${VER_RAW} (${CODENAME}); CUDA repo path: ${CUDA_DISTRO}"
 
 # -------------------------- Helpers -------------------------------------------
+wait_for_apt() {
+  local max_wait=300
+  local waited=0
+  while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+    if (( waited >= max_wait )); then
+      echo "ERROR: apt lock held for too long. Exiting." >&2
+      exit 1
+    fi
+    echo "Waiting for apt lock... (${waited}s)"
+    sleep 5
+    waited=$((waited + 5))
+  done
+}
+
 apt_retry() {
   # Transparent retry wrapper for apt-get commands
+  wait_for_apt
   local n=0 max=4
   until "$@"; do
     n=$((n+1))
     if (( n >= max )); then return 1; fi
     sleep $((2*n))
     log "Retrying: $* (attempt ${n}/${max})"
+    wait_for_apt
   done
 }
 
@@ -121,8 +137,10 @@ require_pkgs() {
 
 ensure_user() {
   if ! id -u "$USER_NAME" >/dev/null 2>&1; then
-    echo "ERROR: User '$USER_NAME' does not exist. Create it first." >&2
-    exit 1
+    log "User '$USER_NAME' not found. Creating..."
+    useradd -m -s /bin/bash "$USER_NAME"
+    echo "${USER_NAME}:${USER_NAME}" | chpasswd  # Set password same as username (insecure but standard for test/bootstrap)
+    log "User '$USER_NAME' created."
   fi
 }
 
@@ -130,14 +148,23 @@ ensure_user() {
 if [[ $DO_AUTOLOGIN -eq 1 ]]; then
   ensure_user
   log "Configuring tty1 autologin for user '${USER_NAME}'"
-  sed -i -e 's/^#\?NAutoVTs=.*/NAutoVTs=1/' \
-         -e 's/^#\?ReservedVT=.*/ReservedVT=2/' /etc/systemd/logind.conf || true
+  
+  # Use drop-in for logind.conf
+  mkdir -p /etc/systemd/logind.conf.d
+  cat >/etc/systemd/logind.conf.d/99-autologin.conf <<EOF
+[Login]
+NAutoVTs=1
+ReservedVT=2
+EOF
+
+  # Use drop-in for getty@tty1
   mkdir -p /etc/systemd/system/getty@tty1.service.d/
   cat >/etc/systemd/system/getty@tty1.service.d/override.conf <<EOF
 [Service]
 ExecStart=
 ExecStart=-/sbin/agetty --noissue --autologin ${USER_NAME} %I \$TERM
 EOF
+  
   systemctl daemon-reload
   systemctl restart systemd-logind || true
 fi
@@ -197,20 +224,26 @@ apt_retry apt-get update -y
 apt_retry apt-get upgrade $APT_FLAGS
 
 # -------------------------- NVIDIA Driver (optional track) --------------------
-if [[ "$DRIVER_MODE" == "headless" ]]; then
-  PKGS=("nvidia-headless-${DRIVER_VER}-open" "nvidia-utils-${DRIVER_VER}")
+if dpkg -l | grep -q "nvidia-driver"; then
+    log "NVIDIA driver already installed. Skipping installation to avoid conflicts."
 else
-  PKGS=("nvidia-driver-${DRIVER_VER}-open")
+    if [[ "$DRIVER_MODE" == "headless" ]]; then
+      PKGS=("nvidia-headless-${DRIVER_VER}-open" "nvidia-utils-${DRIVER_VER}")
+    else
+      PKGS=("nvidia-driver-${DRIVER_VER}-open")
+    fi
+    log "Installing NVIDIA driver packages (${DRIVER_MODE}): ${PKGS[*]}"
+    apt_retry apt-get install $APT_FLAGS "${PKGS[@]}"
 fi
-log "Installing NVIDIA driver packages (${DRIVER_MODE}): ${PKGS[*]}"
-apt_retry apt-get install $APT_FLAGS "${PKGS[@]}"
 
 # -------------------------- Docker + NVIDIA CTK (optional) --------------------
 if [[ $INSTALL_DOCKER -eq 1 ]]; then
   log "Installing Docker Engine"
   mkdir -p /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-    | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  if [[ ! -f /etc/apt/keyrings/docker.gpg ]]; then
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  fi
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${CODENAME} stable" \
     > /etc/apt/sources.list.d/docker.list
   apt_retry apt-get update -y
@@ -218,8 +251,10 @@ if [[ $INSTALL_DOCKER -eq 1 ]]; then
   systemctl enable --now docker.service containerd.service
 
   log "Installing NVIDIA Container Toolkit"
-  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-    | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+  if [[ ! -f /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg ]]; then
+      curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+        | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+  fi
   curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
     | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#' \
     > /etc/apt/sources.list.d/nvidia-container-toolkit.list
