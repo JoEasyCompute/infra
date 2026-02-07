@@ -252,18 +252,18 @@ collect_gpu(){
   local smbios_map; smbios_map="$(build_smbios_slotmap)"
 
   if have nvidia-smi && TIMEOUT nvidia-smi -L >/dev/null 2>&1; then
-    TIMEOUT nvidia-smi --query-gpu=index,name,serial,gpu_serial,bus_id,vbios_version \
+    TIMEOUT nvidia-smi --query-gpu=index,name,serial,bus_id,vbios_version,temperature.gpu,power.draw,power.limit,driver_version \
       --format=csv,noheader,nounits 2>/dev/null \
-    | awk -F', *' 'NF>=6{ s=$3; if(s=="N/A"||s=="") s=$4; gsub(/00000000:/,"",$5); tolower($5); printf("%s\t%s\t%s\t%s\t%s\n",$1,$2,s,$5,$6); }' \
-    | while IFS=$'\t' read -r idx name serial bus vbios; do
+    | awk -F', *' 'NF>=9{ s=$3; if(s=="N/A"||s=="") s=$4; gsub(/00000000:/,"",$4); tolower($4); printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",$1,$2,s,$4,$5,$6,$7,$8,$9); }' \
+    | while IFS=$'\t' read -r idx name serial bus vbios temp pwr_draw pwr_lim driver; do
         up="$(nearest_slot_for_bdf "$bus")"
         slot="$(printf '%s\n' "$smbios_map" | jq -r --arg k "${up,,}" ' .[$k] // empty ')"
         [[ -z "$slot" ]] && slot="$(get_physical_slot_via_lspci "$bus")"
         [[ -z "$slot" ]] && slot="-"
         read -r cg cw mg mw sp <<<"$(get_link_info "$bus")"
-        # EXACTLY 11 FIELDS
-        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-               "$idx" "$name" "${serial:-}" "$bus" "$slot" "${cg:-}" "${cw:-}" "${mg:-}" "${mw:-}" "${sp:-}" "${vbios:-}"
+        # 14 fields
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+               "$idx" "$name" "${serial:-}" "$bus" "$slot" "${cg:-}" "${cw:-}" "${mg:-}" "${mw:-}" "${sp:-}" "${vbios:-}" "${temp:-?}" "${pwr_draw:-?}" "${pwr_lim:-?}" "${driver:-?}"
       done \
     | jq -R -s '
         split("\n") | map(select(length>0)) | map(split("\t"))
@@ -278,7 +278,11 @@ collect_gpu(){
             max_gen:  (.[7]|select(.!="?" and .!="") // null),
             max_width:(.[8]|select(.!="?" and .!="") // null),
             cur_speed:(.[9]|select(.!="?" and .!="") // null),
-            vbios:     .[10]
+            vbios:     .[10],
+            temp_c:   (.[11]|tonumber?),
+            power_draw_w: (.[12]|tonumber?),
+            power_limit_w: (.[13]|tonumber?),
+            driver:    .[14]
           })'
   else
     lspci -Dnn | awk '/ (VGA|3D) .*NVIDIA/ {print $1"|"$0}' \
@@ -289,7 +293,7 @@ collect_gpu(){
         [[ -z "$slot" ]] && slot="$(get_physical_slot_via_lspci "$bus")"
         [[ -z "$slot" ]] && slot="-"
         read -r cg cw mg mw sp <<<"$(get_link_info "$bus")"
-        # EXACTLY 8 FIELDS
+        # For lspci fallback, we don't have temp/power/driver easily
         printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
                "$bus" "$name" "$slot" "${cg:-}" "${cw:-}" "${mg:-}" "${mw:-}" "${sp:-}"
       done \
@@ -328,7 +332,7 @@ collect_network(){
 border(){ printf '%*s\n' "${1:-80}" '' | tr ' ' '-'; }
 print_table_cpu(){ jq -r '"SOCKET\tMODEL\tSERIAL\tCORES\tTHREADS", (.[]? | [(.socket//""),(.model//""),(.serial//""),(.cores//""),(.threads//"")] | @tsv)'; }
 print_table_ram(){ jq -r '"LOCATOR\tBANK\tSIZE\tTYPE\tSPEED\tCFG_SPEED\tMFG\tPART\tSERIAL", (.[]? | [(.locator//""),(.bank//""),(.size//""),(.type//""),(.speed//""),(.cfg_speed//""),(.manufacturer//""),(.part//""),(.serial//"")] | @tsv)'; }
-print_table_gpu(){ jq -r '"INDEX\tNAME\tSERIAL\tBUS_ID\tSLOT\tCUR_GEN/x\tMAX_GEN/x\tCUR_SPEED\tVBIOS", (.[]? | [(.index//""),(.name//""),(.serial//""),(.bus_id//""),(.slot//""),(((.cur_gen//"?")+"/"+(.cur_width//"?"))),(((.max_gen//"?")+"/"+(.max_width//"?"))),(.cur_speed//""),(.vbios//"")] | @tsv)'; }
+print_table_gpu(){ jq -r '"INDEX\tNAME\tSERIAL\tBUS_ID\tSLOT\tCUR_GEN/x\tMAX_GEN/x\tCUR_SPEED\tTEMP\tPWR(D/L)\tVBIOS\tDRIVER", (.[]? | [(.index//""),(.name//""),(.serial//""),(.bus_id//""),(.slot//""),(((.cur_gen//"?")+"/"+(.cur_width//"?"))),(((.max_gen//"?")+"/"+(.max_width//"?"))),(.cur_speed//""),((.temp_c|tostring)+"C"),((.power_draw_w|tostring)+"/"+(.power_limit_w|tostring)+"W"),(.vbios//""),(.driver//"")] | @tsv)'; }
 print_table_storage(){ jq -r '"NAME\tTYPE\tSIZE\tMODEL\tSERIAL\tMOUNT\tFSTYPE\tPKNAME", (.blockdevices[]? | [(.name//""),(.type//""),(.size//""),(.model//""),(.serial//""),(.mountpoint//""),(.fstype//""),(.pkname//"")] | @tsv)'; }
 print_table_network(){ jq -r '"IFACE\tPRODUCT\tVENDOR\tSERIAL/MAC\tBUS\tSTATE\tMTU\tADDRS", (.[]? | [(.logicalname//""),(.product//""),(.vendor//""),(.serial//""),(.businfo//""),(.operstate//""),(.mtu//""), ((.addr_info//[])|map(.local)|join(","))] | @tsv)'; }
 
@@ -339,7 +343,7 @@ csv_emit(){
   case "$domain" in
     cpu)     printf '%s\n' "$json" | jq -r '(["socket","model","serial","cores","threads"]|@csv), (.[]? | [.socket,.model,.serial,.cores,.threads] | @csv)' >"$path" ;;
     ram)     printf '%s\n' "$json" | jq -r '(["locator","bank","size","type","speed","cfg_speed","manufacturer","part","serial"]|@csv), (.[]? | [.locator,.bank,.size,.type,.speed,.cfg_speed,.manufacturer,.part,.serial] | @csv)' >"$path" ;;
-    gpu)     printf '%s\n' "$json" | jq -r '(["index","name","serial","bus_id","slot","cur_gen","cur_width","max_gen","max_width","cur_speed","vbios"]|@csv), (.[]? | [.index,.name,.serial,.bus_id,.slot,.cur_gen,.cur_width,.max_gen,.max_width,.cur_speed,.vbios] | @csv)' >"$path" ;;
+    gpu)     printf '%s\n' "$json" | jq -r '(["index","name","serial","bus_id","slot","cur_gen","cur_width","max_gen","max_width","cur_speed","temp_c","pwr_draw_w","pwr_lim_w","vbios","driver"]|@csv), (.[]? | [.index,.name,.serial,.bus_id,.slot,.cur_gen,.cur_width,.max_gen,.max_width,.cur_speed,.temp_c,.power_draw_w,.power_limit_w,.vbios,.driver] | @csv)' >"$path" ;;
     storage) printf '%s\n' "$json" | jq -r '(["name","type","size","model","serial","mountpoint","fstype","pkname"]|@csv), (.blockdevices[]? | [.name,.type,.size,.model,.serial,.mountpoint,.fstype,.pkname] | @csv)' >"$path" ;;
     network) printf '%s\n' "$json" | jq -r '(["iface","product","vendor","serial","bus","state","mtu","addrs"]|@csv), (.[]? | [.logicalname,.product,.vendor,.serial,.businfo,.operstate,.mtu, ((.addr_info//[])|map(.local)|join(";"))] | @csv)' >"$path" ;;
     *) echo "WARN: unknown CSV domain '$domain'" >&2; return 1;;
@@ -404,3 +408,4 @@ main(){
 }
 
 main "$@"
+
