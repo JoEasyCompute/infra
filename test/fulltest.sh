@@ -4,8 +4,8 @@
 # Assumptions: NVIDIA drivers, CUDA 12.8+, DCGM installed; run as root or with sudo where needed
 # Git, make, gcc, pip, python3 required (install if missing: apt install git build-essential python3-pip)
 # Added installation of libnccl2 and libnccl-dev for NCCL tests
-# Modified to always build nccl-tests to handle previous failed builds
-# Use 'make clean || true' to ignore clean errors
+# Build only if binaries not present; use per-sample build for cuda-samples (CMake/Makefile per dir)
+# Adjusted cuda-samples to build specific samples using their Makefiles
 
 set -e  # Exit on error
 
@@ -39,16 +39,16 @@ install_nccl_tests() {
     if [ ! -d "nccl-tests" ]; then
         git clone https://github.com/NVIDIA/nccl-tests.git
     fi
-    cd nccl-tests
-    make clean || true  # Clean previous build artifacts, ignore error
-    make -j
-    cd ..
+    if [ ! -f "nccl-tests/build/all_reduce_perf" ]; then
+        cd nccl-tests
+        make clean || true  # Clean previous build artifacts, ignore error
+        make -j
+        cd ..
+    fi
 }
 
 run_nccl_test() {
-    cd nccl-tests
-    ./build/all_reduce_perf -b 8 -e 1G -f 2 -g $NUM_GPUS
-    cd ..
+    ./nccl-tests/build/all_reduce_perf -b 8 -e 1G -f 2 -g $NUM_GPUS
 }
 
 install_nccl_tests
@@ -59,18 +59,36 @@ install_cuda_samples() {
     if [ ! -d "cuda-samples" ]; then
         git clone https://github.com/NVIDIA/cuda-samples.git
     fi
-    cd cuda-samples
-    make clean || true  # Ignore if no clean target
-    make -j
-    cd ..
+
+    # Build deviceQuery if not built
+    if [ ! -f "cuda-samples/Samples/1_Utilities/deviceQuery/deviceQuery" ]; then
+        cd cuda-samples/Samples/1_Utilities/deviceQuery
+        make clean || true
+        make -j
+        cd ../../../../..
+    fi
+
+    # Build bandwidthTest if not built
+    if [ ! -f "cuda-samples/Samples/1_Utilities/bandwidthTest/bandwidthTest" ]; then
+        cd cuda-samples/Samples/1_Utilities/bandwidthTest
+        make clean || true
+        make -j
+        cd ../../../../..
+    fi
+
+    # Build p2pBandwidthLatencyTest if not built (in 0_Simple)
+    if [ ! -f "cuda-samples/Samples/0_Simple/p2pBandwidthLatencyTest/p2pBandwidthLatencyTest" ]; then
+        cd cuda-samples/Samples/0_Simple/p2pBandwidthLatencyTest
+        make clean || true
+        make -j
+        cd ../../../../..
+    fi
 }
 
 run_cuda_samples() {
-    cd cuda-samples/bin/x86_64/linux/release
-    ./deviceQuery
-    ./bandwidthTest --device=all --memory=pinned
-    ./p2pBandwidthLatencyTest
-    cd ../../../..
+    ./cuda-samples/Samples/1_Utilities/deviceQuery/deviceQuery
+    ./cuda-samples/Samples/1_Utilities/bandwidthTest/bandwidthTest --device=all --memory=pinned
+    ./cuda-samples/Samples/0_Simple/p2pBandwidthLatencyTest/p2pBandwidthLatencyTest
 }
 
 install_cuda_samples
@@ -120,10 +138,12 @@ install_cuda_memtest() {
     if [ ! -d "cuda_memtest" ]; then
         git clone https://github.com/ComputationalRadiationPhysics/cuda_memtest.git
     fi
-    cd cuda_memtest
-    make clean || true
-    make -j
-    cd ..
+    if [ ! -f "cuda_memtest/cuda_memtest" ]; then
+        cd cuda_memtest
+        make clean || true
+        make -j
+        cd ..
+    fi
 }
 
 run_cuda_memtest() {
@@ -138,10 +158,12 @@ install_gpu_burn() {
     if [ ! -d "gpu-burn" ]; then
         git clone https://github.com/wilicc/gpu-burn.git
     fi
-    cd gpu-burn
-    make clean || true
-    make -j
-    cd ..
+    if [ ! -f "gpu-burn/gpu-burn" ]; then
+        cd gpu-burn
+        make clean || true
+        make -j
+        cd ..
+    fi
 }
 
 run_gpu_burn() {
