@@ -347,6 +347,7 @@ torch.cuda.synchronize()
 if local_rank == 0:
     world = dist.get_world_size()
     print(f"PyTorch multi-GPU test completed on {world} GPU(s).")
+dist.destroy_process_group()
 PYEOF
 
     # torchrun installs to ~/.local/bin which may not be on PATH — find it explicitly
@@ -376,10 +377,15 @@ install_cuda_memtest() {
         git clone https://github.com/ComputationalRadiationPhysics/cuda_memtest.git \
             "$ROOT_DIR/cuda_memtest"
     fi
-    if [ ! -f "$ROOT_DIR/cuda_memtest/cuda_memtest" ]; then
+    # cuda_memtest uses CMake only (no plain Makefile); binary lands in build/
+    if [ ! -f "$ROOT_DIR/cuda_memtest/build/cuda_memtest" ]; then
         cd "$ROOT_DIR/cuda_memtest"
-        make clean || true
-        make -j"$(nproc)" CUDA_PATH="$CUDA_HOME_DIR"
+        rm -rf build && mkdir -p build && cd build
+        ARCHS_CMAKE=$(echo "$CUDA_ARCH_LIST" | tr ' ' ';')
+        cmake .. \
+            -DCMAKE_CUDA_COMPILER="$NVCC_PATH" \
+            -DCMAKE_CUDA_ARCHITECTURES="$ARCHS_CMAKE"
+        make -j"$(nproc)"
         cd "$ROOT_DIR"
     else
         echo "  cuda_memtest already built."
@@ -387,7 +393,7 @@ install_cuda_memtest() {
 }
 
 run_cuda_memtest() {
-    "$ROOT_DIR/cuda_memtest/cuda_memtest" --stress --num_passes 10 --devices all
+    "$ROOT_DIR/cuda_memtest/build/cuda_memtest" --stress --num_passes 10 --devices all
 }
 
 install_cuda_memtest
