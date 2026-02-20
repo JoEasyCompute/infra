@@ -27,13 +27,6 @@ echo "  GPUs detected       : $NUM_GPUS"
 GPU_NAMES=$(nvidia-smi --query-gpu=name --format=csv,noheader | sort -u | tr '\n' ',' | sed 's/,$//')
 echo "  GPU model(s)        : $GPU_NAMES"
 
-# Collect all unique compute capabilities across all GPUs
-# e.g. "8.6" → "86"; mixed systems get space-separated list
-CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | sort -u | tr -d '.' | tr '\n' ' ' | xargs)
-# CMake wants semicolon-separated for multi-arch builds
-CUDA_ARCHS_CMAKE=$(echo "$CUDA_ARCH_LIST" | tr ' ' ';')
-echo "  CUDA architecture(s): $CUDA_ARCH_LIST"
-
 # Detect nvcc — check PATH first, then common install locations
 NVCC_PATH=""
 for candidate in "$(command -v nvcc 2>/dev/null)" \
@@ -48,13 +41,124 @@ if [ -z "$NVCC_PATH" ]; then
     echo "ERROR: nvcc not found. Install CUDA toolkit or add nvcc to PATH."
     exit 1
 fi
-CUDA_HOME_DIR=$(dirname "$(dirname "$NVCC_PATH")")  # e.g. /usr/local/cuda
+CUDA_HOME_DIR=$(dirname "$(dirname "$NVCC_PATH")")
 CUDA_VERSION=$("$NVCC_PATH" --version | grep -oP 'release \K[0-9]+\.[0-9]+')
 echo "  nvcc path           : $NVCC_PATH"
 echo "  CUDA home           : $CUDA_HOME_DIR"
 echo "  CUDA version        : $CUDA_VERSION"
 
-# Derive PyTorch wheel suffix from installed CUDA version
+# ── CUDA Architecture Detection ──────────────────────────────────────────────
+#
+# nvidia-smi --query-gpu=compute_cap is unreliable for newer architectures:
+# older nvidia-smi versions report Blackwell (SM 12.x) as "11.0".
+#
+# Detection priority:
+#   1. nvcc __CUDA_ARCH__ probe   — most accurate, works for any installed GPU
+#   2. deviceQuery (if pre-built) — parses "CUDA Capability Major/Minor"
+#   3. nvidia-smi compute_cap     — fast but may be wrong on new architectures
+#   4. Hardcoded GPU-name map     — last resort fallback
+#
+# We then validate: if nvidia-smi says 11.x but nvcc says 12.x, trust nvcc.
+# ─────────────────────────────────────────────────────────────────────────────
+
+detect_arch_nvcc() {
+    # Compile a tiny CUDA program that prints __CUDA_ARCH__ for every GPU
+    # This requires nvcc and a writable temp dir; returns e.g. "86 120"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    cat > "$tmpdir/arch_probe.cu" << 'CU'
+#include <stdio.h>
+int main() {
+    int n; cudaGetDeviceCount(&n);
+    for (int i = 0; i < n; i++) {
+        cudaDeviceProp p; cudaGetDeviceProperties(&p, i);
+        printf("%d%d\n", p.major, p.minor);
+    }
+    return 0;
+}
+CU
+    # Try to compile; if it fails (e.g. no GPU at compile time), return empty
+    if "$NVCC_PATH" -o "$tmpdir/arch_probe" "$tmpdir/arch_probe.cu" \
+           -lcudart 2>/dev/null; then
+        "$tmpdir/arch_probe" 2>/dev/null | sort -u | tr '\n' ' ' | xargs
+    fi
+    rm -rf "$tmpdir"
+}
+
+detect_arch_devicequery() {
+    local dq_bin
+    dq_bin=$(find "$ROOT_DIR/cuda-samples" -type f -name "deviceQuery" 2>/dev/null | head -1)
+    [ -z "$dq_bin" ] && return
+    "$dq_bin" 2>/dev/null \
+        | grep -oP 'CUDA Capability Major/Minor version number:\s+\K[0-9]+\.[0-9]+' \
+        | tr -d '.' | sort -u | tr '\n' ' ' | xargs
+}
+
+detect_arch_smi() {
+    nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+        | sort -u | tr -d '.' | tr '\n' ' ' | xargs
+}
+
+# GPU-name → known SM arch fallback table
+detect_arch_name_map() {
+    local arch=""
+    while IFS= read -r name; do
+        case "$name" in
+            *"RTX 50"*|*"GB2"*)         arch="$arch 120" ;;  # Blackwell
+            *"RTX 49"*|*"RTX 40"*|*"Ada"*|*"L40"*) arch="$arch 89" ;;  # Ada Lovelace (some are 89)
+            *"RTX 49"*|*"4090"*|*"4080"*|*"4070"*|*"4060"*) arch="$arch 89" ;;
+            *"A100"*|*"A30"*|*"A800"*)  arch="$arch 80" ;;  # Ampere data center
+            *"RTX 30"*|*"A40"*|*"A10"*|*"A16"*|*"A2"*) arch="$arch 86" ;;  # Ampere
+            *"A4000"*|*"A5000"*|*"A6000"*) arch="$arch 86" ;;
+            *"RTX 20"*|*"T4"*)          arch="$arch 75" ;;  # Turing
+            *"V100"*)                   arch="$arch 70" ;;  # Volta
+            *"H100"*|*"H200"*)          arch="$arch 90" ;;  # Hopper
+            *)                          arch="$arch 86" ;;  # safe default
+        esac
+    done < <(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null)
+    echo "$arch" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs
+}
+
+echo "  Detecting CUDA architecture..."
+
+# Try each method in priority order
+CUDA_ARCH_LIST=$(detect_arch_nvcc)
+ARCH_METHOD="nvcc probe"
+
+if [ -z "$CUDA_ARCH_LIST" ]; then
+    CUDA_ARCH_LIST=$(detect_arch_devicequery)
+    ARCH_METHOD="deviceQuery"
+fi
+
+if [ -z "$CUDA_ARCH_LIST" ]; then
+    SMI_ARCH=$(detect_arch_smi)
+    CUDA_ARCH_LIST="$SMI_ARCH"
+    ARCH_METHOD="nvidia-smi (may be inaccurate for new GPUs)"
+fi
+
+if [ -z "$CUDA_ARCH_LIST" ]; then
+    CUDA_ARCH_LIST=$(detect_arch_name_map)
+    ARCH_METHOD="GPU name map (fallback)"
+fi
+
+# Cross-validate: if smi says 11x but any other method says 12x, trust non-smi
+SMI_ARCH=$(detect_arch_smi)
+if echo "$SMI_ARCH" | grep -qP '^11'; then
+    NVCC_ARCH=$(detect_arch_nvcc)
+    if echo "$NVCC_ARCH" | grep -qP '^12'; then
+        echo "  WARNING: nvidia-smi reports arch '$SMI_ARCH' but nvcc probe reports '$NVCC_ARCH'."
+        echo "           nvidia-smi is outdated for this GPU. Using nvcc result."
+        CUDA_ARCH_LIST="$NVCC_ARCH"
+        ARCH_METHOD="nvcc probe (overriding stale nvidia-smi)"
+    fi
+fi
+
+# CMake wants semicolon-separated list for multi-arch
+CUDA_ARCHS_CMAKE=$(echo "$CUDA_ARCH_LIST" | tr ' ' ';')
+
+echo "  CUDA architecture(s): $CUDA_ARCH_LIST  [via $ARCH_METHOD]"
+
+# Derive PyTorch CUDA wheel suffix from installed CUDA version
 CUDA_MAJOR=$(echo "$CUDA_VERSION" | cut -d. -f1)
 CUDA_MINOR=$(echo "$CUDA_VERSION" | cut -d. -f2)
 case "$CUDA_MAJOR" in
@@ -65,7 +169,7 @@ case "$CUDA_MAJOR" in
         else TORCH_CUDA="cu128"
         fi
         ;;
-    *)  TORCH_CUDA="cu128" ;;  # fallback for future CUDA versions
+    *)  TORCH_CUDA="cu128" ;;
 esac
 echo "  PyTorch wheel       : https://download.pytorch.org/whl/$TORCH_CUDA"
 
@@ -96,8 +200,6 @@ skip_test() {
     echo ""
 }
 
-# Build a CUDA sample in its own build/ subdirectory using CMake
-# Usage: cmake_build <src_dir> <expected_binary_name>
 cmake_build() {
     local src="$1"
     local bin="$2"
@@ -117,7 +219,6 @@ cmake_build() {
     fi
 }
 
-# Find a compiled binary anywhere under a base directory
 find_binary() {
     find "$1" -type f -name "$2" 2>/dev/null | head -1
 }
@@ -127,7 +228,6 @@ find_binary() {
 # ─────────────────────────────────────────────
 
 install_nccl() {
-    # Works on Debian/Ubuntu; on RHEL/Rocky use dnf install libnccl-devel
     if command -v dpkg &>/dev/null; then
         if ! dpkg -l 2>/dev/null | grep -q libnccl-dev; then
             echo "  Installing libnccl2 and libnccl-dev..."
@@ -179,26 +279,15 @@ install_cuda_samples() {
         git clone https://github.com/NVIDIA/cuda-samples.git "$ROOT_DIR/cuda-samples"
     fi
 
-    # deviceQuery
     local dq_src="$ROOT_DIR/cuda-samples/Samples/1_Utilities/deviceQuery"
-    if [ -d "$dq_src" ]; then
-        cmake_build "$dq_src" "deviceQuery"
-    else
-        echo "  WARNING: deviceQuery source not found."
-    fi
+    [ -d "$dq_src" ] && cmake_build "$dq_src" "deviceQuery" \
+        || echo "  WARNING: deviceQuery source not found."
 
-    # bandwidthTest
     local bw_src="$ROOT_DIR/cuda-samples/Samples/1_Utilities/bandwidthTest"
-    if [ -d "$bw_src" ]; then
-        cmake_build "$bw_src" "bandwidthTest"
-    else
-        echo "  WARNING: bandwidthTest source not found."
-    fi
+    [ -d "$bw_src" ] && cmake_build "$bw_src" "bandwidthTest" \
+        || echo "  WARNING: bandwidthTest source not found."
 
-    # p2pBandwidthLatencyTest — path changed across repo versions:
-    #   pre-2023 : Samples/0_Simple/p2pBandwidthLatencyTest
-    #   2023+    : Samples/5_Domain_Specific/p2pBandwidthLatencyTest
-    # Use find to handle any future moves transparently
+    # p2p location varies by repo version — use find to handle any future moves
     local p2p_src
     p2p_src=$(find "$ROOT_DIR/cuda-samples/Samples" -maxdepth 3 \
         -type d -name "p2pBandwidthLatencyTest" 2>/dev/null | head -1)
@@ -288,7 +377,7 @@ install_pytorch
 run_test "PyTorch Multi-GPU Benchmark" run_ai_benchmark
 
 # ─────────────────────────────────────────────
-# 5. cuda_memtest (GPU memory stress)
+# 5. cuda_memtest
 # ─────────────────────────────────────────────
 
 install_cuda_memtest() {
@@ -314,7 +403,7 @@ install_cuda_memtest
 run_test "cuda_memtest (GPU Memory Stress)" run_cuda_memtest
 
 # ─────────────────────────────────────────────
-# 6. gpu-burn (sustained compute stress)
+# 6. gpu-burn
 # ─────────────────────────────────────────────
 
 install_gpu_burn() {
@@ -324,7 +413,6 @@ install_gpu_burn() {
     if [ ! -f "$ROOT_DIR/gpu-burn/gpu-burn" ]; then
         cd "$ROOT_DIR/gpu-burn"
         make clean || true
-        # gpu-burn uses COMPUTE=sm_XX — derive from first detected arch
         FIRST_ARCH=$(echo "$CUDA_ARCH_LIST" | awk '{print $1}')
         COMPUTE="sm_${FIRST_ARCH}" make -j"$(nproc)"
         cd "$ROOT_DIR"
@@ -334,15 +422,12 @@ install_gpu_burn() {
 }
 
 run_gpu_burn() {
-    # -d = double precision, -tc = use tensor cores if available, 300 = seconds
     "$ROOT_DIR/gpu-burn/gpu-burn" -d -tc -m 300
 }
 
 install_gpu_burn
 run_test "gpu-burn (Sustained Compute Stress, 5 min)" run_gpu_burn
 
-# ─────────────────────────────────────────────
-# Summary
 # ─────────────────────────────────────────────
 
 echo "========================================"
