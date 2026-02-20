@@ -7,7 +7,7 @@
 # DCGM is optional — tests are skipped gracefully if not installed
 # Run from any directory; all artifacts are placed under ROOT_DIR
 
-set -e
+set -o pipefail  # catch pipe failures but continue on individual test errors
 
 ROOT_DIR=$(pwd)
 
@@ -87,13 +87,26 @@ echo ""
 # Helpers
 # ─────────────────────────────────────────────
 
+# Result tracking — populated by run_test and skip_test
+RESULTS_PASS=()
+RESULTS_FAIL=()
+RESULTS_SKIP=()
+
 run_test() {
-    echo "========================================"
-    echo "Running: $1"
-    echo "========================================"
+    local name="$1"
     shift
-    "$@"
-    echo "Test completed."
+    echo "========================================"
+    echo "Running: $name"
+    echo "========================================"
+    local rc=0
+    "$@" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        echo "[ PASS ] $name"
+        RESULTS_PASS+=("$name")
+    else
+        echo "[ FAIL ] $name (exit code $rc)"
+        RESULTS_FAIL+=("$name")
+    fi
     echo ""
 }
 
@@ -102,6 +115,7 @@ skip_test() {
     echo "SKIPPED: $1"
     echo "Reason : $2"
     echo "========================================"
+    RESULTS_SKIP+=("$1 — $2")
     echo ""
 }
 
@@ -413,11 +427,35 @@ run_test "cuda_memtest (GPU Memory Stress)" run_cuda_memtest
 # ─────────────────────────────────────────────
 # 7. Sustained Compute Stress
 #    Primary:  HuggingFace gpu-fryer (Rust binary, no CUDA compile, CUDA 13 safe)
+#    Secondary: wilicc/gpu-burn (classic tool; fallback when gpu-fryer unavailable)
 #    Fallback: PyTorch cuBLAS stress loop (always available since PyTorch is installed)
 #
-#    NOTE: wilicc/gpu-burn is NOT used — it fails to build on CUDA 13 due to a
-#    cuCtxCreate API change in driver 580. gpu-fryer is the maintained replacement.
+#    COMPUTE format for gpu-burn must be "X.Y" (e.g. "12.0") — the Makefile does
+#    -arch=compute_$(subst .,,${COMPUTE}), so "12.0" → "compute_120". Passing
+#    "sm_120" would produce the broken "compute_sm_120".
 # ─────────────────────────────────────────────
+
+install_gpu_burn() {
+    if [ -f "$ROOT_DIR/gpu-burn/gpu-burn" ]; then
+        echo "  gpu-burn already built."
+        return 0
+    fi
+
+    if [ ! -d "$ROOT_DIR/gpu-burn" ]; then
+        git clone https://github.com/wilicc/gpu-burn.git "$ROOT_DIR/gpu-burn"
+    fi
+
+    cd "$ROOT_DIR/gpu-burn"
+    make clean || true
+    # COMPUTE must be "X.Y" format — Makefile strips the dot internally
+    FIRST_ARCH_DOT=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader         | tr -d "\r" | sort -u | head -1)
+    make -j"$(nproc)" COMPUTE="$FIRST_ARCH_DOT" CUDAPATH="$CUDA_HOME_DIR"
+    cd "$ROOT_DIR"
+}
+
+run_gpu_burn() {
+    "$ROOT_DIR/gpu-burn/gpu-burn" -d -tc 300
+}
 
 install_gpu_fryer() {
     if [ -f "$ROOT_DIR/gpu-fryer/gpu-fryer" ]; then
@@ -500,23 +538,61 @@ PYEOF
 run_stress_test() {
     if [ -f "$ROOT_DIR/gpu-fryer/gpu-fryer" ]; then
         run_gpu_fryer
+    elif [ -f "$ROOT_DIR/gpu-burn/gpu-burn" ]; then
+        run_gpu_burn
     else
-        echo "  gpu-fryer unavailable — using PyTorch cuBLAS stress fallback."
+        echo "  gpu-fryer and gpu-burn unavailable — using PyTorch cuBLAS stress fallback."
         run_pytorch_stress
     fi
 }
 
-if install_gpu_fryer 2>&1; then
+# Try gpu-fryer first (works on all CUDA versions)
+# Fall through to gpu-burn (CUDA 12 only) or PyTorch fallback
+if install_gpu_fryer; then
     run_test "Sustained Compute Stress / gpu-fryer (5 min)" run_stress_test
+elif install_gpu_burn; then
+    run_test "Sustained Compute Stress / gpu-burn (5 min)" run_stress_test
 else
     run_test "Sustained Compute Stress / PyTorch fallback (5 min)" run_pytorch_stress
 fi
 
 # ─────────────────────────────────────────────
 
+echo ""
 echo "========================================"
-echo "All tests completed successfully."
+echo "TEST SUMMARY"
+echo "========================================"
 echo "  GPUs     : $GPU_NAMES"
 echo "  Arch(es) : $CUDA_ARCH_LIST"
 echo "  CUDA     : $CUDA_VERSION"
-echo "========================================"
+echo ""
+
+PASS_COUNT=${#RESULTS_PASS[@]}
+FAIL_COUNT=${#RESULTS_FAIL[@]}
+SKIP_COUNT=${#RESULTS_SKIP[@]}
+
+if [ "$PASS_COUNT" -gt 0 ]; then
+    echo "  PASSED ($PASS_COUNT):"
+    for r in "${RESULTS_PASS[@]}"; do echo "    ✓  $r"; done
+    echo ""
+fi
+
+if [ "$SKIP_COUNT" -gt 0 ]; then
+    echo "  SKIPPED ($SKIP_COUNT):"
+    for r in "${RESULTS_SKIP[@]}"; do echo "    -  $r"; done
+    echo ""
+fi
+
+if [ "$FAIL_COUNT" -gt 0 ]; then
+    echo "  FAILED ($FAIL_COUNT):"
+    for r in "${RESULTS_FAIL[@]}"; do echo "    ✗  $r"; done
+    echo ""
+    echo "========================================"
+    echo "  RESULT: $FAIL_COUNT test(s) FAILED"
+    echo "========================================"
+    exit 1
+else
+    echo "========================================"
+    echo "  RESULT: ALL $PASS_COUNT TESTS PASSED"
+    echo "========================================"
+fi
