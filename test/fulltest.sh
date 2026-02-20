@@ -393,7 +393,18 @@ install_cuda_memtest() {
 }
 
 run_cuda_memtest() {
-    "$ROOT_DIR/cuda_memtest/build/cuda_memtest" --stress --num_passes 10 --devices all
+    # --device takes a single index; run once per GPU in parallel
+    local pids=()
+    for i in $(seq 0 $((NUM_GPUS - 1))); do
+        "$ROOT_DIR/cuda_memtest/build/cuda_memtest" --stress --num_passes 10 --device "$i" &
+        pids+=($!)
+    done
+    # Wait for all and collect exit codes
+    local failed=0
+    for pid in "${pids[@]}"; do
+        wait "$pid" || failed=$((failed + 1))
+    done
+    [ "$failed" -eq 0 ] || { echo "ERROR: cuda_memtest failed on $failed GPU(s)"; return 1; }
 }
 
 install_cuda_memtest
