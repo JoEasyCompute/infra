@@ -46,12 +46,12 @@ echo "  nvcc path           : $NVCC_PATH"
 echo "  CUDA home           : $CUDA_HOME_DIR"
 echo "  CUDA version        : $CUDA_VERSION"
 
-# ── CUDA Architecture Detection ──────────────────────────────────────────────
-# nvidia-smi can emit \r\n line endings (even on Linux) for some driver versions.
-# Strip both \r and . from compute_cap, e.g. "12.0\r" → "120"
+# ── CUDA Architecture ────────────────────────────────────────────────────────
+# nvidia-smi can emit \r\n on Linux; strip \r before processing.
+# Also collect a numeric arch list for tools (gpu-burn, nccl-tests) that need it.
+# For CMake we use "native" — this bypasses any hardcoded arch list inside
+# the project's own CMakeLists.txt and compiles only for the GPU(s) present.
 # ─────────────────────────────────────────────────────────────────────────────
-
-echo "  Detecting CUDA architecture..."
 
 CUDA_ARCH_LIST=$(
     nvidia-smi --query-gpu=compute_cap --format=csv,noheader \
@@ -61,21 +61,8 @@ CUDA_ARCH_LIST=$(
     | tr '\n' ' ' \
     | xargs
 )
-
-# Sanity check: value must be numeric and plausible (50–200 covers sm_5.0 to future)
-for arch in $CUDA_ARCH_LIST; do
-    if ! [[ "$arch" =~ ^[0-9]+$ ]] || [ "$arch" -lt 50 ] || [ "$arch" -gt 200 ]; then
-        echo "ERROR: Implausible CUDA architecture value '$arch' detected from nvidia-smi."
-        echo "       Raw nvidia-smi output:"
-        nvidia-smi --query-gpu=compute_cap --format=csv,noheader | cat -A
-        exit 1
-    fi
-done
-
-# CMake wants semicolons for multi-arch builds
-CUDA_ARCHS_CMAKE=$(echo "$CUDA_ARCH_LIST" | tr ' ' ';')
-
 echo "  CUDA architecture(s): $CUDA_ARCH_LIST"
+echo "  CMake arch strategy : native (detects present GPU, bypasses repo arch lists)"
 
 # PyTorch wheel suffix
 CUDA_MAJOR=$(echo "$CUDA_VERSION" | cut -d. -f1)
@@ -119,6 +106,12 @@ skip_test() {
     echo ""
 }
 
+# Build a cuda-sample with CMake.
+# Uses CMAKE_CUDA_ARCHITECTURES=native so CMake auto-detects the present GPU
+# and ignores any hardcoded arch list in the project's own CMakeLists.txt.
+# Known issue: cuda-samples CMakeLists.txt hardcodes an arch list including
+# sm_110 which does not exist in CUDA 12.9+, causing build failures on any
+# GPU if the project's list is used. "native" sidesteps this entirely.
 cmake_build() {
     local src="$1"
     local bin="$2"
@@ -130,7 +123,7 @@ cmake_build() {
         cd build
         cmake .. \
             -DCMAKE_CUDA_COMPILER="$NVCC_PATH" \
-            -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCHS_CMAKE"
+            -DCMAKE_CUDA_ARCHITECTURES=native
         make -j"$(nproc)"
         cd "$ROOT_DIR"
     else
@@ -190,7 +183,7 @@ install_nccl_tests
 run_test "NCCL All-Reduce Test" run_nccl_test
 
 # ─────────────────────────────────────────────
-# 2. CUDA Samples
+# 2. CUDA Samples (deviceQuery, bandwidthTest, p2pBandwidthLatencyTest)
 # ─────────────────────────────────────────────
 
 install_cuda_samples() {
@@ -206,6 +199,7 @@ install_cuda_samples() {
     [ -d "$bw_src" ] && cmake_build "$bw_src" "bandwidthTest" \
         || echo "  WARNING: bandwidthTest source not found."
 
+    # p2p location varies by repo version — use find to handle any future moves
     local p2p_src
     p2p_src=$(find "$ROOT_DIR/cuda-samples/Samples" -maxdepth 3 \
         -type d -name "p2pBandwidthLatencyTest" 2>/dev/null | head -1)
@@ -331,6 +325,7 @@ install_gpu_burn() {
     if [ ! -f "$ROOT_DIR/gpu-burn/gpu-burn" ]; then
         cd "$ROOT_DIR/gpu-burn"
         make clean || true
+        # gpu-burn takes COMPUTE=sm_XX — use first detected arch
         FIRST_ARCH=$(echo "$CUDA_ARCH_LIST" | awk '{print $1}')
         COMPUTE="sm_${FIRST_ARCH}" make -j"$(nproc)"
         cd "$ROOT_DIR"
