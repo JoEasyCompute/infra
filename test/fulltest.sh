@@ -6,10 +6,12 @@
 # Added installation of libnccl2 and libnccl-dev for NCCL tests
 # Added -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc and -DCMAKE_CUDA_ARCHITECTURES=90 to cmake calls for CUDA detection and architecture
 # Added rm -rf build to clear stale cache before building
+# Use ROOT_DIR for absolute paths to avoid cd issues
 # Build only if binaries not present
 
 set -e  # Exit on error
 
+ROOT_DIR=$(pwd)
 NUM_GPUS=$(nvidia-smi -L | grep -c '^GPU')  # Detect number of GPUs
 echo "Detected $NUM_GPUS GPUs."
 
@@ -37,19 +39,19 @@ install_nccl() {
 # 1. NCCL Test
 install_nccl_tests() {
     install_nccl  # Install NCCL before building tests
-    if [ ! -d "nccl-tests" ]; then
+    if [ ! -d "$ROOT_DIR/nccl-tests" ]; then
         git clone https://github.com/NVIDIA/nccl-tests.git
     fi
-    if [ ! -f "nccl-tests/build/all_reduce_perf" ]; then
-        cd nccl-tests
+    if [ ! -f "$ROOT_DIR/nccl-tests/build/all_reduce_perf" ]; then
+        cd "$ROOT_DIR/nccl-tests"
         make clean || true  # Clean previous build artifacts, ignore error
         make -j
-        cd ..
+        cd "$ROOT_DIR"
     fi
 }
 
 run_nccl_test() {
-    ./nccl-tests/build/all_reduce_perf -b 8 -e 1G -f 2 -g $NUM_GPUS
+    "$ROOT_DIR/nccl-tests/build/all_reduce_perf" -b 8 -e 1G -f 2 -g $NUM_GPUS
 }
 
 install_nccl_tests
@@ -57,48 +59,48 @@ run_test "NCCL Test" run_nccl_test
 
 # 2. CUDA Samples and Bandwidth Test
 install_cuda_samples() {
-    if [ ! -d "cuda-samples" ]; then
+    if [ ! -d "$ROOT_DIR/cuda-samples" ]; then
         git clone https://github.com/NVIDIA/cuda-samples.git
     fi
 
     # Build deviceQuery
-    if [ ! -f "cuda-samples/Samples/1_Utilities/deviceQuery/build/deviceQuery" ]; then
-        cd cuda-samples/Samples/1_Utilities/deviceQuery
+    if [ ! -f "$ROOT_DIR/cuda-samples/Samples/1_Utilities/deviceQuery/build/deviceQuery" ]; then
+        cd "$ROOT_DIR/cuda-samples/Samples/1_Utilities/deviceQuery"
         rm -rf build
         mkdir -p build
         cd build
         cmake .. -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=90
         make -j
-        cd ../../../../..
+        cd "$ROOT_DIR"
     fi
 
     # Build bandwidthTest
-    if [ ! -f "cuda-samples/Samples/1_Utilities/bandwidthTest/build/bandwidthTest" ]; then
-        cd cuda-samples/Samples/1_Utilities/bandwidthTest
+    if [ ! -f "$ROOT_DIR/cuda-samples/Samples/1_Utilities/bandwidthTest/build/bandwidthTest" ]; then
+        cd "$ROOT_DIR/cuda-samples/Samples/1_Utilities/bandwidthTest"
         rm -rf build
         mkdir -p build
         cd build
         cmake .. -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=90
         make -j
-        cd ../../../../..
+        cd "$ROOT_DIR"
     fi
 
     # Build p2pBandwidthLatencyTest
-    if [ ! -f "cuda-samples/Samples/0_Simple/p2pBandwidthLatencyTest/build/p2pBandwidthLatencyTest" ]; then
-        cd cuda-samples/Samples/0_Simple/p2pBandwidthLatencyTest
+    if [ ! -f "$ROOT_DIR/cuda-samples/Samples/0_Simple/p2pBandwidthLatencyTest/build/p2pBandwidthLatencyTest" ]; then
+        cd "$ROOT_DIR/cuda-samples/Samples/0_Simple/p2pBandwidthLatencyTest"
         rm -rf build
         mkdir -p build
         cd build
         cmake .. -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=90
         make -j
-        cd ../../../../..
+        cd "$ROOT_DIR"
     fi
 }
 
 run_cuda_samples() {
-    ./cuda-samples/Samples/1_Utilities/deviceQuery/build/deviceQuery
-    ./cuda-samples/Samples/1_Utilities/bandwidthTest/build/bandwidthTest --device=all --memory=pinned
-    ./cuda-samples/Samples/0_Simple/p2pBandwidthLatencyTest/build/p2pBandwidthLatencyTest
+    "$ROOT_DIR/cuda-samples/Samples/1_Utilities/deviceQuery/build/deviceQuery"
+    "$ROOT_DIR/cuda-samples/Samples/1_Utilities/bandwidthTest/build/bandwidthTest" --device=all --memory=pinned
+    "$ROOT_DIR/cuda-samples/Samples/0_Simple/p2pBandwidthLatencyTest/build/p2pBandwidthLatencyTest"
 }
 
 install_cuda_samples
@@ -145,19 +147,19 @@ run_test "AI/ML Benchmarks (PyTorch Example)" run_ai_benchmark
 
 # 5. cuda_memtest
 install_cuda_memtest() {
-    if [ ! -d "cuda_memtest" ]; then
+    if [ ! -d "$ROOT_DIR/cuda_memtest" ]; then
         git clone https://github.com/ComputationalRadiationPhysics/cuda_memtest.git
     fi
-    if [ ! -f "cuda_memtest/cuda_memtest" ]; then
-        cd cuda_memtest
+    if [ ! -f "$ROOT_DIR/cuda_memtest/cuda_memtest" ]; then
+        cd "$ROOT_DIR/cuda_memtest"
         make clean || true
         make -j
-        cd ..
+        cd "$ROOT_DIR"
     fi
 }
 
 run_cuda_memtest() {
-    ./cuda_memtest/cuda_memtest --stress --num_passes 10 --devices all
+    "$ROOT_DIR/cuda_memtest/cuda_memtest" --stress --num_passes 10 --devices all
 }
 
 install_cuda_memtest
@@ -165,19 +167,19 @@ run_test "cuda_memtest" run_cuda_memtest
 
 # 6. gpu-burn
 install_gpu_burn() {
-    if [ ! -d "gpu-burn" ]; then
+    if [ ! -d "$ROOT_DIR/gpu-burn" ]; then
         git clone https://github.com/wilicc/gpu-burn.git
     fi
-    if [ ! -f "gpu-burn/gpu-burn" ]; then
-        cd gpu-burn
+    if [ ! -f "$ROOT_DIR/gpu-burn/gpu-burn" ]; then
+        cd "$ROOT_DIR/gpu-burn"
         make clean || true
         make -j
-        cd ..
+        cd "$ROOT_DIR"
     fi
 }
 
 run_gpu_burn() {
-    ./gpu-burn/gpu-burn -d -tc -m 300  # Run for 5 minutes
+    "$ROOT_DIR/gpu-burn/gpu-burn" -d -tc -m 300  # Run for 5 minutes
 }
 
 install_gpu_burn
