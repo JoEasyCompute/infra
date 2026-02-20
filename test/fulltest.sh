@@ -411,30 +411,106 @@ install_cuda_memtest
 run_test "cuda_memtest (GPU Memory Stress)" run_cuda_memtest
 
 # ─────────────────────────────────────────────
-# 7. gpu-burn
+# 7. Sustained Compute Stress
+#    Primary:  HuggingFace gpu-fryer (Rust binary, no CUDA compile, CUDA 13 safe)
+#    Fallback: PyTorch cuBLAS stress loop (always available since PyTorch is installed)
+#
+#    NOTE: wilicc/gpu-burn is NOT used — it fails to build on CUDA 13 due to a
+#    cuCtxCreate API change in driver 580. gpu-fryer is the maintained replacement.
 # ─────────────────────────────────────────────
 
-install_gpu_burn() {
-    if [ ! -d "$ROOT_DIR/gpu-burn" ]; then
-        git clone https://github.com/wilicc/gpu-burn.git "$ROOT_DIR/gpu-burn"
+install_gpu_fryer() {
+    if [ -f "$ROOT_DIR/gpu-fryer/gpu-fryer" ]; then
+        echo "  gpu-fryer already built."
+        return 0
     fi
-    if [ ! -f "$ROOT_DIR/gpu-burn/gpu-burn" ]; then
-        cd "$ROOT_DIR/gpu-burn"
-        make clean || true
-        FIRST_ARCH=$(echo "$CUDA_ARCH_LIST" | awk '{print $1}')
-        COMPUTE="sm_${FIRST_ARCH}" make -j"$(nproc)"
-        cd "$ROOT_DIR"
+
+    # gpu-fryer is a Rust binary — requires cargo
+    if ! command -v cargo &>/dev/null; then
+        echo "  cargo not found — installing Rust toolchain..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+        # shellcheck source=/dev/null
+        source "$HOME/.cargo/env"
+    fi
+
+    if ! command -v cargo &>/dev/null; then
+        echo "  WARNING: cargo still not available — will use PyTorch fallback."
+        return 1
+    fi
+
+    if [ ! -d "$ROOT_DIR/gpu-fryer" ]; then
+        git clone https://github.com/huggingface/gpu-fryer.git "$ROOT_DIR/gpu-fryer"
+    fi
+
+    cd "$ROOT_DIR/gpu-fryer"
+    # Point cargo to the CUDA libs so the build can find libnvidia-ml
+    export LIBRARY_PATH="$CUDA_HOME_DIR/lib64:${LIBRARY_PATH:-}"
+    cargo build --release
+    cp target/release/gpu-fryer .
+    cd "$ROOT_DIR"
+}
+
+run_gpu_fryer() {
+    # 300 seconds = 5 minutes; BF16 stresses Tensor Cores on Blackwell/Ada/Hopper
+    "$ROOT_DIR/gpu-fryer/gpu-fryer" --use-bf16 300
+}
+
+run_pytorch_stress() {
+    echo "  Running PyTorch cuBLAS stress (5 min, all GPUs)..."
+    cat << 'PYEOF' > "$ROOT_DIR/_gpu_stress.py"
+import torch
+import time
+import sys
+
+duration = 300  # seconds
+gpus = list(range(torch.cuda.device_count()))
+if not gpus:
+    print("ERROR: No CUDA GPUs found")
+    sys.exit(1)
+
+SIZE = 8192
+print(f"Stressing {len(gpus)} GPU(s) for {duration}s with {SIZE}x{SIZE} BF16 GEMM...")
+
+matrices = []
+for g in gpus:
+    with torch.cuda.device(g):
+        a = torch.randn(SIZE, SIZE, dtype=torch.bfloat16, device=f"cuda:{g}")
+        b = torch.randn(SIZE, SIZE, dtype=torch.bfloat16, device=f"cuda:{g}")
+        matrices.append((a, b))
+
+start = time.time()
+iters = 0
+while time.time() - start < duration:
+    for g, (a, b) in enumerate(matrices):
+        with torch.cuda.device(g):
+            _ = torch.mm(a, b)
+    for g in gpus:
+        torch.cuda.synchronize(g)
+    iters += 1
+    elapsed = time.time() - start
+    if iters % 50 == 0:
+        print(f"  {elapsed:.0f}s elapsed, {iters} iterations")
+
+print(f"Stress complete: {iters} iterations in {time.time()-start:.1f}s — no errors.")
+PYEOF
+    python3 "$ROOT_DIR/_gpu_stress.py"
+    rm -f "$ROOT_DIR/_gpu_stress.py"
+}
+
+run_stress_test() {
+    if [ -f "$ROOT_DIR/gpu-fryer/gpu-fryer" ]; then
+        run_gpu_fryer
     else
-        echo "  gpu-burn already built."
+        echo "  gpu-fryer unavailable — using PyTorch cuBLAS stress fallback."
+        run_pytorch_stress
     fi
 }
 
-run_gpu_burn() {
-    "$ROOT_DIR/gpu-burn/gpu-burn" -d -tc -m 300
-}
-
-install_gpu_burn
-run_test "gpu-burn (Sustained Compute Stress, 5 min)" run_gpu_burn
+if install_gpu_fryer 2>&1; then
+    run_test "Sustained Compute Stress / gpu-fryer (5 min)" run_stress_test
+else
+    run_test "Sustained Compute Stress / PyTorch fallback (5 min)" run_pytorch_stress
+fi
 
 # ─────────────────────────────────────────────
 
