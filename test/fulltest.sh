@@ -4,6 +4,7 @@
 # Assumptions: NVIDIA drivers, CUDA 12.8+, DCGM installed; run as root or with sudo where needed
 # Git, make, gcc, pip, python3 required (install if missing: apt install git build-essential python3-pip)
 # Added installation of libnccl2 and libnccl-dev for NCCL tests
+# Modified to always build nccl-tests to handle previous failed builds
 
 set -e  # Exit on error
 
@@ -36,10 +37,11 @@ install_nccl_tests() {
     install_nccl  # Install NCCL before building tests
     if [ ! -d "nccl-tests" ]; then
         git clone https://github.com/NVIDIA/nccl-tests.git
-        cd nccl-tests
-        make -j
-        cd ..
     fi
+    cd nccl-tests
+    make clean  # Clean previous build artifacts
+    make -j
+    cd ..
 }
 
 run_nccl_test() {
@@ -55,10 +57,11 @@ run_test "NCCL Test" run_nccl_test
 install_cuda_samples() {
     if [ ! -d "cuda-samples" ]; then
         git clone https://github.com/NVIDIA/cuda-samples.git
-        cd cuda-samples
-        make -j
-        cd ..
     fi
+    cd cuda-samples
+    make clean  # Optional, but to be consistent
+    make -j
+    cd ..
 }
 
 run_cuda_samples() {
@@ -115,10 +118,11 @@ run_test "AI/ML Benchmarks (PyTorch Example)" run_ai_benchmark
 install_cuda_memtest() {
     if [ ! -d "cuda_memtest" ]; then
         git clone https://github.com/ComputationalRadiationPhysics/cuda_memtest.git
-        cd cuda_memtest
-        make -j
-        cd ..
     fi
+    cd cuda_memtest
+    make clean
+    make -j
+    cd ..
 }
 
 run_cuda_memtest() {
@@ -132,10 +136,11 @@ run_test "cuda_memtest" run_cuda_memtest
 install_gpu_burn() {
     if [ ! -d "gpu-burn" ]; then
         git clone https://github.com/wilicc/gpu-burn.git
-        cd gpu-burn
-        make -j
-        cd ..
     fi
+    cd gpu-burn
+    make clean
+    make -j
+    cd ..
 }
 
 run_gpu_burn() {
