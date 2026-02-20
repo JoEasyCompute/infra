@@ -46,13 +46,7 @@ echo "  nvcc path           : $NVCC_PATH"
 echo "  CUDA home           : $CUDA_HOME_DIR"
 echo "  CUDA version        : $CUDA_VERSION"
 
-# ── CUDA Architecture ────────────────────────────────────────────────────────
-# nvidia-smi can emit \r\n on Linux; strip \r before processing.
-# Also collect a numeric arch list for tools (gpu-burn, nccl-tests) that need it.
-# For CMake we use "native" — this bypasses any hardcoded arch list inside
-# the project's own CMakeLists.txt and compiles only for the GPU(s) present.
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Detect CUDA arch — strip \r since nvidia-smi can emit Windows-style line endings
 CUDA_ARCH_LIST=$(
     nvidia-smi --query-gpu=compute_cap --format=csv,noheader \
     | tr -d '\r' \
@@ -62,7 +56,6 @@ CUDA_ARCH_LIST=$(
     | xargs
 )
 echo "  CUDA architecture(s): $CUDA_ARCH_LIST"
-echo "  CMake arch strategy : native (detects present GPU, bypasses repo arch lists)"
 
 # PyTorch wheel suffix
 CUDA_MAJOR=$(echo "$CUDA_VERSION" | cut -d. -f1)
@@ -106,24 +99,36 @@ skip_test() {
     echo ""
 }
 
-# Build a cuda-sample with CMake.
-# Uses CMAKE_CUDA_ARCHITECTURES=native so CMake auto-detects the present GPU
-# and ignores any hardcoded arch list in the project's own CMakeLists.txt.
-# Known issue: cuda-samples CMakeLists.txt hardcodes an arch list including
-# sm_110 which does not exist in CUDA 12.9+, causing build failures on any
-# GPU if the project's list is used. "native" sidesteps this entirely.
+# Patch all CMakeLists.txt files under a directory to remove sm_110.
+# The cuda-samples repo hardcodes "set(CMAKE_CUDA_ARCHITECTURES 75 80 86 87 89 90 100 110 120)"
+# inside each sample. This is a plain set(), not a CACHE variable, so it overwrites
+# any -DCMAKE_CUDA_ARCHITECTURES flag we pass on the command line. sm_110 does not
+# exist in any real GPU and was removed from CUDA 12.9's supported target list,
+# causing every build to fail. We patch it out before invoking cmake.
+patch_cmake_arch() {
+    local dir="$1"
+    while IFS= read -r f; do
+        if grep -q 'set(CMAKE_CUDA_ARCHITECTURES' "$f"; then
+            sed -i 's/\b110\b//g' "$f"   # remove sm_110
+            sed -i 's/  */ /g' "$f"       # collapse double spaces
+        fi
+    done < <(find "$dir" -name "CMakeLists.txt")
+}
+
 cmake_build() {
     local src="$1"
     local bin="$2"
     if [ ! -f "$src/build/$bin" ]; then
         echo "  Building $bin..."
+        patch_cmake_arch "$src"
         cd "$src"
         rm -rf build
         mkdir -p build
         cd build
+        ARCHS_CMAKE=$(echo "$CUDA_ARCH_LIST" | tr ' ' ';')
         cmake .. \
             -DCMAKE_CUDA_COMPILER="$NVCC_PATH" \
-            -DCMAKE_CUDA_ARCHITECTURES=native
+            -DCMAKE_CUDA_ARCHITECTURES="$ARCHS_CMAKE"
         make -j"$(nproc)"
         cd "$ROOT_DIR"
     else
@@ -183,7 +188,9 @@ install_nccl_tests
 run_test "NCCL All-Reduce Test" run_nccl_test
 
 # ─────────────────────────────────────────────
-# 2. CUDA Samples (deviceQuery, bandwidthTest, p2pBandwidthLatencyTest)
+# 2. CUDA Samples (deviceQuery, p2pBandwidthLatencyTest)
+#    Note: bandwidthTest was removed in cuda-samples 12.9 (inaccurate results).
+#    NVBandwidth is its replacement — see section 3 below.
 # ─────────────────────────────────────────────
 
 install_cuda_samples() {
@@ -194,10 +201,6 @@ install_cuda_samples() {
     local dq_src="$ROOT_DIR/cuda-samples/Samples/1_Utilities/deviceQuery"
     [ -d "$dq_src" ] && cmake_build "$dq_src" "deviceQuery" \
         || echo "  WARNING: deviceQuery source not found."
-
-    local bw_src="$ROOT_DIR/cuda-samples/Samples/1_Utilities/bandwidthTest"
-    [ -d "$bw_src" ] && cmake_build "$bw_src" "bandwidthTest" \
-        || echo "  WARNING: bandwidthTest source not found."
 
     # p2p location varies by repo version — use find to handle any future moves
     local p2p_src
@@ -217,20 +220,67 @@ run_cuda_samples() {
     bin=$(find_binary "$ROOT_DIR/cuda-samples" "deviceQuery")
     [ -n "$bin" ] && "$bin" || echo "  SKIPPED (binary not found)"
 
-    echo "--- bandwidthTest ---"
-    bin=$(find_binary "$ROOT_DIR/cuda-samples" "bandwidthTest")
-    [ -n "$bin" ] && "$bin" --device=all --memory=pinned || echo "  SKIPPED (binary not found)"
-
     echo "--- p2pBandwidthLatencyTest ---"
     bin=$(find_binary "$ROOT_DIR/cuda-samples" "p2pBandwidthLatencyTest")
     [ -n "$bin" ] && "$bin" || echo "  SKIPPED (binary not found)"
 }
 
 install_cuda_samples
-run_test "CUDA Samples (deviceQuery / bandwidthTest / p2pBandwidthLatencyTest)" run_cuda_samples
+run_test "CUDA Samples (deviceQuery / p2pBandwidthLatencyTest)" run_cuda_samples
 
 # ─────────────────────────────────────────────
-# 3. DCGM Diagnostics (optional)
+# 3. NVBandwidth — official replacement for bandwidthTest (removed in 12.9)
+#    Measures host<->device and device<->device memory bandwidth accurately.
+#    Requires: libboost-program-options-dev
+# ─────────────────────────────────────────────
+
+install_nvbandwidth() {
+    # Install boost dependency
+    if command -v dpkg &>/dev/null; then
+        if ! dpkg -l 2>/dev/null | grep -q libboost-program-options-dev; then
+            echo "  Installing libboost-program-options-dev..."
+            sudo apt-get update -qq
+            sudo apt-get install -y libboost-program-options-dev
+        else
+            echo "  libboost-program-options-dev already installed."
+        fi
+    elif command -v rpm &>/dev/null; then
+        if ! rpm -q boost-program-options &>/dev/null; then
+            echo "  Installing boost-program-options (RHEL/Rocky)..."
+            sudo dnf install -y boost-program-options
+        fi
+    fi
+
+    if [ ! -d "$ROOT_DIR/nvbandwidth" ]; then
+        git clone https://github.com/NVIDIA/nvbandwidth.git "$ROOT_DIR/nvbandwidth"
+    fi
+
+    if [ ! -f "$ROOT_DIR/nvbandwidth/nvbandwidth" ]; then
+        cd "$ROOT_DIR/nvbandwidth"
+        # NVBandwidth builds in-source (cmake .) per upstream docs
+        cmake . -DCMAKE_CUDA_COMPILER="$NVCC_PATH"
+        make -j"$(nproc)"
+        cd "$ROOT_DIR"
+    else
+        echo "  nvbandwidth already built."
+    fi
+}
+
+run_nvbandwidth() {
+    # Run the core bandwidth tests: host<->device and device<->device
+    "$ROOT_DIR/nvbandwidth/nvbandwidth" \
+        -t host_to_device_memcpy_ce \
+           device_to_host_memcpy_ce \
+           device_to_device_memcpy_read_ce \
+           device_to_device_memcpy_write_ce \
+           device_to_device_bidirectional_memcpy_read_ce
+}
+
+install_nvbandwidth
+run_test "NVBandwidth (GPU Memory Bandwidth)" run_nvbandwidth
+
+# ─────────────────────────────────────────────
+# 4. DCGM Diagnostics (optional)
 # ─────────────────────────────────────────────
 
 if command -v dcgmi &>/dev/null; then
@@ -246,7 +296,7 @@ else
 fi
 
 # ─────────────────────────────────────────────
-# 4. PyTorch Multi-GPU Benchmark
+# 5. PyTorch Multi-GPU Benchmark
 # ─────────────────────────────────────────────
 
 install_pytorch() {
@@ -289,7 +339,7 @@ install_pytorch
 run_test "PyTorch Multi-GPU Benchmark" run_ai_benchmark
 
 # ─────────────────────────────────────────────
-# 5. cuda_memtest
+# 6. cuda_memtest
 # ─────────────────────────────────────────────
 
 install_cuda_memtest() {
@@ -315,7 +365,7 @@ install_cuda_memtest
 run_test "cuda_memtest (GPU Memory Stress)" run_cuda_memtest
 
 # ─────────────────────────────────────────────
-# 6. gpu-burn
+# 7. gpu-burn
 # ─────────────────────────────────────────────
 
 install_gpu_burn() {
@@ -325,7 +375,6 @@ install_gpu_burn() {
     if [ ! -f "$ROOT_DIR/gpu-burn/gpu-burn" ]; then
         cd "$ROOT_DIR/gpu-burn"
         make clean || true
-        # gpu-burn takes COMPUTE=sm_XX — use first detected arch
         FIRST_ARCH=$(echo "$CUDA_ARCH_LIST" | awk '{print $1}')
         COMPUTE="sm_${FIRST_ARCH}" make -j"$(nproc)"
         cd "$ROOT_DIR"
