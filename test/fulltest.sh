@@ -287,7 +287,11 @@ if command -v dcgmi &>/dev/null; then
     run_dcgm_diag() {
         dcgmi discovery -l
         dcgmi diag -r 3
-        dcgmi dmon -e 1000,1001 -c 10
+        # Monitor key fields for 10 samples.
+        # Fields: 203=GPU utilization, 252=memory utilization, 150=temperature, 155=power
+        # NOTE: Hardware/stress tests skip on GeForce GPUs (Data Center GPUs only) - expected.
+        echo "--- dmon (GPU util / memory util / temperature / power) ---"
+        dcgmi dmon -e 203,252,150,155 -c 10
     }
     run_test "DCGM Diagnostics" run_dcgm_diag
 else
