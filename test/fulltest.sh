@@ -304,10 +304,10 @@ fi
 # ─────────────────────────────────────────────
 
 install_pytorch() {
-    pip3 install --upgrade pip --quiet
+    pip3 install --upgrade pip --quiet --break-system-packages
     pip3 install torch torchvision torchaudio \
-        --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}" --quiet
-    pip3 install accelerate --quiet
+        --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}" --quiet --break-system-packages
+    pip3 install accelerate --quiet --break-system-packages
 }
 
 run_ai_benchmark() {
