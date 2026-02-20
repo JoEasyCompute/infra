@@ -4,7 +4,7 @@
 # Assumptions: NVIDIA drivers, CUDA 12.8+, DCGM installed; run as root or with sudo where needed
 # Git, cmake, make, gcc, pip, python3 required (install if missing: apt install git cmake build-essential python3-pip)
 # Added installation of libnccl2 and libnccl-dev for NCCL tests
-# Added -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc to cmake calls for CUDA detection
+# Added -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc and -DCMAKE_CUDA_ARCHITECTURES=90 to cmake calls for CUDA detection and architecture
 # Build only if binaries not present
 
 set -e  # Exit on error
@@ -65,7 +65,7 @@ install_cuda_samples() {
         cd cuda-samples/Samples/1_Utilities/deviceQuery
         mkdir -p build
         cd build
-        cmake .. -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
+        cmake .. -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=90
         make -j
         cd ../../../../..
     fi
@@ -75,7 +75,7 @@ install_cuda_samples() {
         cd cuda-samples/Samples/1_Utilities/bandwidthTest
         mkdir -p build
         cd build
-        cmake .. -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
+        cmake .. -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=90
         make -j
         cd ../../../../..
     fi
@@ -85,7 +85,7 @@ install_cuda_samples() {
         cd cuda-samples/Samples/0_Simple/p2pBandwidthLatencyTest
         mkdir -p build
         cd build
-        cmake .. -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
+        cmake .. -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=90
         make -j
         cd ../../../../..
     fi
