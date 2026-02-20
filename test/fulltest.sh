@@ -5,6 +5,7 @@
 # Git, cmake, make, gcc, pip, python3 required (install if missing: apt install git cmake build-essential python3-pip)
 # Added installation of libnccl2 and libnccl-dev for NCCL tests
 # Added -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc and -DCMAKE_CUDA_ARCHITECTURES=90 to cmake calls for CUDA detection and architecture
+# Added rm -rf build to clear stale cache before building
 # Build only if binaries not present
 
 set -e  # Exit on error
@@ -63,6 +64,7 @@ install_cuda_samples() {
     # Build deviceQuery
     if [ ! -f "cuda-samples/Samples/1_Utilities/deviceQuery/build/deviceQuery" ]; then
         cd cuda-samples/Samples/1_Utilities/deviceQuery
+        rm -rf build
         mkdir -p build
         cd build
         cmake .. -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=90
@@ -73,6 +75,7 @@ install_cuda_samples() {
     # Build bandwidthTest
     if [ ! -f "cuda-samples/Samples/1_Utilities/bandwidthTest/build/bandwidthTest" ]; then
         cd cuda-samples/Samples/1_Utilities/bandwidthTest
+        rm -rf build
         mkdir -p build
         cd build
         cmake .. -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=90
@@ -83,6 +86,7 @@ install_cuda_samples() {
     # Build p2pBandwidthLatencyTest
     if [ ! -f "cuda-samples/Samples/0_Simple/p2pBandwidthLatencyTest/build/p2pBandwidthLatencyTest" ]; then
         cd cuda-samples/Samples/0_Simple/p2pBandwidthLatencyTest
+        rm -rf build
         mkdir -p build
         cd build
         cmake .. -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=90
