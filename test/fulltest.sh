@@ -5,6 +5,7 @@
 # Git, make, gcc, pip, python3 required (install if missing: apt install git build-essential python3-pip)
 # Added installation of libnccl2 and libnccl-dev for NCCL tests
 # Modified to always build nccl-tests to handle previous failed builds
+# Use 'make clean || true' to ignore clean errors
 
 set -e  # Exit on error
 
@@ -39,7 +40,7 @@ install_nccl_tests() {
         git clone https://github.com/NVIDIA/nccl-tests.git
     fi
     cd nccl-tests
-    make clean  # Clean previous build artifacts
+    make clean || true  # Clean previous build artifacts, ignore error
     make -j
     cd ..
 }
@@ -59,7 +60,7 @@ install_cuda_samples() {
         git clone https://github.com/NVIDIA/cuda-samples.git
     fi
     cd cuda-samples
-    make clean  # Optional, but to be consistent
+    make clean || true  # Ignore if no clean target
     make -j
     cd ..
 }
@@ -120,7 +121,7 @@ install_cuda_memtest() {
         git clone https://github.com/ComputationalRadiationPhysics/cuda_memtest.git
     fi
     cd cuda_memtest
-    make clean
+    make clean || true
     make -j
     cd ..
 }
@@ -138,7 +139,7 @@ install_gpu_burn() {
         git clone https://github.com/wilicc/gpu-burn.git
     fi
     cd gpu-burn
-    make clean
+    make clean || true
     make -j
     cd ..
 }
