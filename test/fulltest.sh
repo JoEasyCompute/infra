@@ -19,6 +19,12 @@ echo "========================================"
 echo "System Detection"
 echo "========================================"
 
+# Detect OS version once at the top for use throughout the script
+UBUNTU_VER=$(lsb_release -rs 2>/dev/null || echo "0")
+UBUNTU_MAJOR=$(echo "$UBUNTU_VER" | cut -d. -f1)
+OS_ID=$(lsb_release -is 2>/dev/null || echo "Unknown")
+echo "  OS                  : $OS_ID $UBUNTU_VER"
+
 NUM_GPUS=$(nvidia-smi -L | grep -c '^GPU')
 echo "  GPUs detected       : $NUM_GPUS"
 
@@ -304,10 +310,18 @@ fi
 # ─────────────────────────────────────────────
 
 install_pytorch() {
-    pip3 install --upgrade pip --quiet --break-system-packages
+    # --break-system-packages is required on Ubuntu 24.04+ (PEP 668 enforced)
+    # but not recognised on 22.04 (Python 3.10) and will cause an error there
+    if [ "$UBUNTU_MAJOR" -ge 24 ] 2>/dev/null; then
+        PIP_EXTRA="--break-system-packages"
+    else
+        PIP_EXTRA=""
+    fi
+
+    pip3 install --upgrade pip --quiet $PIP_EXTRA
     pip3 install torch torchvision torchaudio \
-        --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}" --quiet --break-system-packages
-    pip3 install accelerate --quiet --break-system-packages
+        --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}" --quiet $PIP_EXTRA
+    pip3 install accelerate --quiet $PIP_EXTRA
 }
 
 run_ai_benchmark() {
@@ -335,7 +349,18 @@ if local_rank == 0:
     print(f"PyTorch multi-GPU test completed on {world} GPU(s).")
 PYEOF
 
-    torchrun --nproc_per_node "$NUM_GPUS" "$ROOT_DIR/_pytorch_multi_gpu_test.py"
+    # torchrun installs to ~/.local/bin which may not be on PATH — find it explicitly
+    TORCHRUN=$(python3 -m torch.utils.collect_env 2>/dev/null | grep -oP 'executable.*?\K/[^ ]+' | head -1 || true)
+    if [ -z "$TORCHRUN" ]; then
+        TORCHRUN=$(find "$HOME/.local/bin" /usr/local/bin /usr/bin -name torchrun 2>/dev/null | head -1 || true)
+    fi
+    if [ -z "$TORCHRUN" ] || [ ! -x "$TORCHRUN" ]; then
+        echo "ERROR: torchrun not found after installing PyTorch."
+        rm -f "$ROOT_DIR/_pytorch_multi_gpu_test.py"
+        return 1
+    fi
+    echo "  Using torchrun: $TORCHRUN"
+    "$TORCHRUN" --nproc_per_node "$NUM_GPUS" "$ROOT_DIR/_pytorch_multi_gpu_test.py"
     rm -f "$ROOT_DIR/_pytorch_multi_gpu_test.py"
 }
 
