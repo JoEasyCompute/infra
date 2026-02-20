@@ -2,10 +2,10 @@
 
 # Updated script to install and run multi-GPU tests on Ubuntu with RTX 5090
 # Assumptions: NVIDIA drivers, CUDA 12.8+, DCGM installed; run as root or with sudo where needed
-# Git, make, gcc, pip, python3 required (install if missing: apt install git build-essential python3-pip)
+# Git, cmake, make, gcc, pip, python3 required (install if missing: apt install git cmake build-essential python3-pip)
 # Added installation of libnccl2 and libnccl-dev for NCCL tests
-# Build only if binaries not present; use per-sample build for cuda-samples (CMake/Makefile per dir)
-# Adjusted cuda-samples to build specific samples using their Makefiles
+# Switched to CMake-based build for CUDA samples as per repository instructions
+# Build only if binaries not present
 
 set -e  # Exit on error
 
@@ -60,35 +60,41 @@ install_cuda_samples() {
         git clone https://github.com/NVIDIA/cuda-samples.git
     fi
 
-    # Build deviceQuery if not built
-    if [ ! -f "cuda-samples/Samples/1_Utilities/deviceQuery/deviceQuery" ]; then
+    # Build deviceQuery
+    if [ ! -f "cuda-samples/Samples/1_Utilities/deviceQuery/build/deviceQuery" ]; then
         cd cuda-samples/Samples/1_Utilities/deviceQuery
-        make clean || true
+        mkdir -p build
+        cd build
+        cmake ..
         make -j
         cd ../../../../..
     fi
 
-    # Build bandwidthTest if not built
-    if [ ! -f "cuda-samples/Samples/1_Utilities/bandwidthTest/bandwidthTest" ]; then
+    # Build bandwidthTest
+    if [ ! -f "cuda-samples/Samples/1_Utilities/bandwidthTest/build/bandwidthTest" ]; then
         cd cuda-samples/Samples/1_Utilities/bandwidthTest
-        make clean || true
+        mkdir -p build
+        cd build
+        cmake ..
         make -j
         cd ../../../../..
     fi
 
-    # Build p2pBandwidthLatencyTest if not built (in 0_Simple)
-    if [ ! -f "cuda-samples/Samples/0_Simple/p2pBandwidthLatencyTest/p2pBandwidthLatencyTest" ]; then
+    # Build p2pBandwidthLatencyTest
+    if [ ! -f "cuda-samples/Samples/0_Simple/p2pBandwidthLatencyTest/build/p2pBandwidthLatencyTest" ]; then
         cd cuda-samples/Samples/0_Simple/p2pBandwidthLatencyTest
-        make clean || true
+        mkdir -p build
+        cd build
+        cmake ..
         make -j
         cd ../../../../..
     fi
 }
 
 run_cuda_samples() {
-    ./cuda-samples/Samples/1_Utilities/deviceQuery/deviceQuery
-    ./cuda-samples/Samples/1_Utilities/bandwidthTest/bandwidthTest --device=all --memory=pinned
-    ./cuda-samples/Samples/0_Simple/p2pBandwidthLatencyTest/p2pBandwidthLatencyTest
+    ./cuda-samples/Samples/1_Utilities/deviceQuery/build/deviceQuery
+    ./cuda-samples/Samples/1_Utilities/bandwidthTest/build/bandwidthTest --device=all --memory=pinned
+    ./cuda-samples/Samples/0_Simple/p2pBandwidthLatencyTest/build/p2pBandwidthLatencyTest
 }
 
 install_cuda_samples
