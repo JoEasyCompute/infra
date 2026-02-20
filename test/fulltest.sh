@@ -1,8 +1,9 @@
 #!/bin/bash
 
-# Script to install and run multi-GPU tests on Ubuntu with RTX 5090
+# Updated script to install and run multi-GPU tests on Ubuntu with RTX 5090
 # Assumptions: NVIDIA drivers, CUDA 12.8+, DCGM installed; run as root or with sudo where needed
 # Git, make, gcc, pip, python3 required (install if missing: apt install git build-essential python3-pip)
+# Added installation of libnccl2 and libnccl-dev for NCCL tests
 
 set -e  # Exit on error
 
@@ -19,8 +20,20 @@ run_test() {
     echo "Test completed."
 }
 
+# Install NCCL if not present
+install_nccl() {
+    if ! dpkg -l | grep -q libnccl-dev; then
+        echo "Installing libnccl2 and libnccl-dev..."
+        sudo apt update
+        sudo apt install -y libnccl2 libnccl-dev
+    else
+        echo "libnccl-dev already installed."
+    fi
+}
+
 # 1. NCCL Test
 install_nccl_tests() {
+    install_nccl  # Install NCCL before building tests
     if [ ! -d "nccl-tests" ]; then
         git clone https://github.com/NVIDIA/nccl-tests.git
         cd nccl-tests
