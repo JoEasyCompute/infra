@@ -2,9 +2,10 @@
 # =============================================================================
 # fulltest.sh — Multi-GPU test suite
 # Supports: RTX 4090/5090, A4000, A100, H100 on Ubuntu 22.04/24.04
-# Usage:  ./fulltest.sh [test...] [--list] [--clean] [--help]
-#   Tests: nccl, cuda-samples, nvbandwidth, dcgm, pytorch, memtest, stress
-#   If no tests specified, all are run.
+# Usage:  ./fulltest.sh [test...] [--burn-duration <s>] [--clean] [--list] [--help]
+#   Tests: preflight, ecc, pcie, clocks, nccl, cuda-samples, nvbandwidth,
+#          dcgm, pytorch, memtest, stress
+#   If no tests specified, all are run in the order above.
 # =============================================================================
 
 set -o pipefail
@@ -14,10 +15,10 @@ set -o pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly BUILD_DIR="$SCRIPT_DIR/build"   # all clones/binaries go here
+readonly BUILD_DIR="$SCRIPT_DIR/build"
 readonly LOG_FILE="$SCRIPT_DIR/fulltest_$(date +%Y%m%d_%H%M%S).log"
 
-CLEAN_BUILD=false   # set to true by --clean
+CLEAN_BUILD=false
 BURN_DURATION=300   # seconds; override with --burn-duration <seconds>
 
 mkdir -p "$BUILD_DIR"
@@ -50,6 +51,7 @@ CUDA_ARCH_LIST=""
 TORCH_CUDA=""
 PIP_EXTRA=""
 UBUNTU_MAJOR=""
+RESULTS_STRESS_LABEL="Sustained Compute Stress"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Utilities
@@ -58,13 +60,13 @@ UBUNTU_MAJOR=""
 log() { echo "$@" | tee -a "$LOG_FILE"; }
 log_run() { "$@" 2>&1 | tee -a "$LOG_FILE"; return "${PIPESTATUS[0]}"; }
 
-# Run a command inside a directory, always return to $SCRIPT_DIR afterward.
+# Run a command inside a directory in a subshell — no cd leakage on failure
 in_dir() {
     local dir="$1"; shift
-    (cd "$dir" && "$@")          # subshell — no cd leakage on failure
+    (cd "$dir" && "$@")
 }
 
-# apt_install — idempotent, quiet package install
+# Idempotent apt package install
 apt_install() {
     for pkg in "$@"; do
         if ! dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
@@ -74,7 +76,6 @@ apt_install() {
     done
 }
 
-# ensure_cmake — install cmake if missing
 ensure_cmake() {
     command -v cmake &>/dev/null && return 0
     log "  cmake not found — installing..."
@@ -89,16 +90,15 @@ ensure_cmake() {
 }
 
 # cmake_build <src_dir> <binary_name>
-# Builds in an out-of-source build/ subdir; patches out sm_110 first.
+# Out-of-source build; patches sm_110 out of cuda-samples CMakeLists first.
 cmake_build() {
     local src="$1" bin="$2"
-    local bdir="$src/build"
 
-    [ -f "$bdir/$bin" ] && { log "  Already built: $bin"; return 0; }
+    [ -f "$src/build/$bin" ] && { log "  Already built: $bin"; return 0; }
 
     log "  Building $bin..."
 
-    # Patch out sm_110: it was removed from CUDA 12.9 but hardcoded in cuda-samples CMakeLists.
+    # sm_110 was removed from CUDA 12.9 but hardcoded in cuda-samples CMakeLists
     find "$src" -name "CMakeLists.txt" -exec grep -l 'set(CMAKE_CUDA_ARCHITECTURES' {} \; \
     | while read -r f; do
         sed -i 's/\b110\b//g; s/  */ /g' "$f"
@@ -214,14 +214,286 @@ detect_system() {
     log "  PyTorch wheel       : https://download.pytorch.org/whl/$TORCH_CUDA"
 
     # pip flag for Ubuntu 24.04+ (PEP 668)
-    if [ "$UBUNTU_MAJOR" -ge 24 ] 2>/dev/null; then
-        PIP_EXTRA="--break-system-packages"
-    else
-        PIP_EXTRA=""
-    fi
+    [ "$UBUNTU_MAJOR" -ge 24 ] 2>/dev/null && PIP_EXTRA="--break-system-packages" || PIP_EXTRA=""
 
     [ "$NUM_GPUS" -eq 1 ] && log "  NOTE: Single GPU — multi-GPU tests run in single-GPU mode."
     log ""
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test: preflight — idle thermal baseline + persistence mode + driver state
+# Run first so we have a clean-state snapshot before anything loads the GPUs.
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_preflight() {
+    local rc=0
+
+    log "--- Persistence mode ---"
+    # Persistence mode keeps the driver loaded between jobs, avoiding multi-second
+    # cold-start latency. Should be enabled on any multi-GPU production system.
+    local gpu_idx persist_mode
+    while IFS=, read -r gpu_idx persist_mode; do
+        persist_mode=$(echo "$persist_mode" | xargs)
+        if [ "$persist_mode" = "Enabled" ]; then
+            log "  GPU $gpu_idx: persistence mode Enabled — OK"
+        else
+            log "  GPU $gpu_idx: persistence mode Disabled — recommend: sudo nvidia-smi -pm 1"
+            # Warning only, not a failure — not all environments need it
+        fi
+    done < <(nvidia-smi \
+        --query-gpu=index,persistence_mode \
+        --format=csv,noheader | tr -d '\r')
+
+    log ""
+    log "--- Idle thermal baseline ---"
+    # Snapshot temp, power, clocks, fan at idle before any test loads the GPUs.
+    # If a GPU is already throttling here, something is wrong (fan failure, blocked airflow).
+    local gpu_name temp power clk_sm clk_mem fan throttle
+    local any_hot=false
+    printf "  %-4s %-25s %6s %7s %7s %7s %5s  %s\n" \
+        "GPU" "Name" "Temp°C" "Power W" "SM MHz" "Mem MHz" "Fan%" "Throttle" \
+        | tee -a "$LOG_FILE"
+    while IFS=, read -r gpu_idx gpu_name temp power clk_sm clk_mem fan throttle; do
+        gpu_name=$(echo "$gpu_name" | xargs)
+        temp=$(echo "$temp"     | xargs)
+        power=$(echo "$power"   | xargs)
+        clk_sm=$(echo "$clk_sm" | xargs)
+        clk_mem=$(echo "$clk_mem" | xargs)
+        fan=$(echo "$fan"       | xargs)
+        throttle=$(echo "$throttle" | xargs)
+        printf "  %-4s %-25s %6s %7s %7s %7s %5s  %s\n" \
+            "$gpu_idx" "$gpu_name" "$temp" "$power" "$clk_sm" "$clk_mem" "$fan" "$throttle" \
+            | tee -a "$LOG_FILE"
+        # Warn if idle temp is already above 60°C — suggests cooling problem
+        local temp_val="${temp//[^0-9]/}"
+        if [ -n "$temp_val" ] && [ "$temp_val" -gt 60 ]; then
+            log "  WARNING: GPU $gpu_idx idle temp ${temp}°C is high — check cooling"
+            any_hot=true
+        fi
+        # Warn if any throttle reason is active at idle
+        if [ "$throttle" != "Not Active" ] && [ "$throttle" != "N/A" ]; then
+            log "  WARNING: GPU $gpu_idx throttle active at idle: $throttle"
+            rc=1
+        fi
+    done < <(nvidia-smi \
+        --query-gpu=index,name,temperature.gpu,power.draw,clocks.sm,clocks.mem,fan.speed,clocks_throttle_reasons.active \
+        --format=csv,noheader | tr -d '\r')
+
+    log ""
+    log "--- Driver version ---"
+    nvidia-smi --query-gpu=index,driver_version \
+        --format=csv,noheader | tr -d '\r' \
+        | while IFS=, read -r idx drv; do
+            log "  GPU $idx: driver $drv"
+          done
+
+    return $rc
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test: ecc — ECC error check (DC GPUs only; skip/warn gracefully on GeForce)
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_ecc() {
+    local rc=0 any_dc=false
+
+    log "  Checking ECC status per GPU..."
+    log ""
+    printf "  %-4s %-25s %-10s %-12s %s\n" \
+        "GPU" "Name" "ECC Mode" "Uncorr.Errs" "Notes" | tee -a "$LOG_FILE"
+
+    local gpu_idx gpu_name ecc_mode uncorr_errs
+    while IFS=, read -r gpu_idx gpu_name ecc_mode uncorr_errs; do
+        gpu_idx=$(echo "$gpu_idx"     | xargs)
+        gpu_name=$(echo "$gpu_name"   | xargs)
+        ecc_mode=$(echo "$ecc_mode"   | xargs)
+        uncorr_errs=$(echo "$uncorr_errs" | xargs)
+
+        local note=""
+        case "$ecc_mode" in
+            Enabled)
+                any_dc=true
+                if [ "$uncorr_errs" = "[N/A]" ] || [ -z "$uncorr_errs" ]; then
+                    note="ECC on, no error count available"
+                elif [ "$uncorr_errs" -gt 0 ] 2>/dev/null; then
+                    note="*** UNCORRECTED ERRORS — replace GPU ***"
+                    rc=1
+                else
+                    note="OK — 0 uncorrected errors"
+                fi
+                ;;
+            Disabled)
+                any_dc=true
+                note="ECC supported but disabled — enable with: sudo nvidia-smi -e 1 && reboot"
+                ;;
+            "[N/A]"|"N/A"|"")
+                note="ECC not supported (GeForce/consumer GPU — expected)"
+                ;;
+            *)
+                note="Unknown ECC state: $ecc_mode"
+                ;;
+        esac
+
+        printf "  %-4s %-25s %-10s %-12s %s\n" \
+            "$gpu_idx" "$gpu_name" "$ecc_mode" "$uncorr_errs" "$note" \
+            | tee -a "$LOG_FILE"
+    done < <(nvidia-smi \
+        --query-gpu=index,name,ecc.mode.current,ecc.errors.uncorrected.volatile.total \
+        --format=csv,noheader | tr -d '\r')
+
+    log ""
+    if [ "$any_dc" = false ]; then
+        log "  All GPUs are consumer grade — ECC not applicable. (PASS)"
+    fi
+
+    return $rc
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test: pcie — PCIe link width and generation check
+# A GPU silently degraded to x1 or Gen2 passes every other test at low BW.
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_pcie() {
+    local rc=0
+
+    log "  Checking PCIe link width and generation per GPU..."
+    log ""
+    printf "  %-4s %-25s %8s %8s %8s %8s  %s\n" \
+        "GPU" "Name" "CurGen" "MaxGen" "CurWidth" "MaxWidth" "Status" \
+        | tee -a "$LOG_FILE"
+
+    local gpu_idx gpu_name cur_gen max_gen cur_width max_width
+    while IFS=, read -r gpu_idx gpu_name cur_gen max_gen cur_width max_width; do
+        gpu_idx=$(echo "$gpu_idx"       | xargs)
+        gpu_name=$(echo "$gpu_name"     | xargs)
+        cur_gen=$(echo "$cur_gen"       | xargs)
+        max_gen=$(echo "$max_gen"       | xargs)
+        cur_width=$(echo "$cur_width"   | xargs)
+        max_width=$(echo "$max_width"   | xargs)
+
+        local status="OK"
+        # Flag if running below max gen or width — could be slot, riser, or hardware fault
+        if [ "$cur_gen" != "$max_gen" ] && \
+           [ "$cur_gen" != "[N/A]" ] && [ "$max_gen" != "[N/A]" ]; then
+            status="WARN: running Gen${cur_gen} but capable of Gen${max_gen}"
+            rc=1
+        fi
+        if [ "$cur_width" != "$max_width" ] && \
+           [ "$cur_width" != "[N/A]" ] && [ "$max_width" != "[N/A]" ]; then
+            status="WARN: running x${cur_width} but capable of x${max_width}"
+            rc=1
+        fi
+
+        printf "  %-4s %-25s %8s %8s %8s %8s  %s\n" \
+            "$gpu_idx" "$gpu_name" \
+            "Gen$cur_gen" "Gen$max_gen" "x$cur_width" "x$max_width" \
+            "$status" | tee -a "$LOG_FILE"
+    done < <(nvidia-smi \
+        --query-gpu=index,name,pcie.link.gen.current,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max \
+        --format=csv,noheader | tr -d '\r')
+
+    log ""
+    if [ "$rc" -ne 0 ]; then
+        log "  One or more GPUs are running below their maximum PCIe link speed."
+        log "  Causes: riser cable, slot limitation, BIOS setting, or hardware fault."
+        log "  Check: nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.width.current --format=csv"
+    fi
+
+    return $rc
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test: clocks — clock speed verification under load
+# Runs a brief 30s GEMM load and samples SM/memory clocks + throttle reasons.
+# Distinguishes thermal throttle vs power throttle vs SW throttle.
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_clocks() {
+    local rc=0
+
+    # Check max boost clocks at idle first
+    log "  Max advertised boost clocks (idle):"
+    printf "  %-4s %-25s %10s %10s\n" "GPU" "Name" "MaxSM MHz" "MaxMem MHz" \
+        | tee -a "$LOG_FILE"
+    local gpu_idx gpu_name max_sm max_mem
+    while IFS=, read -r gpu_idx gpu_name max_sm max_mem; do
+        printf "  %-4s %-25s %10s %10s\n" \
+            "$(echo "$gpu_idx" | xargs)" \
+            "$(echo "$gpu_name" | xargs)" \
+            "$(echo "$max_sm" | xargs)" \
+            "$(echo "$max_mem" | xargs)" | tee -a "$LOG_FILE"
+    done < <(nvidia-smi \
+        --query-gpu=index,name,clocks.max.sm,clocks.max.mem \
+        --format=csv,noheader | tr -d '\r')
+
+    log ""
+    log "  Running 30s load to measure sustained clocks..."
+
+    # Kick off a background GEMM load on all GPUs via Python
+    local load_script="$BUILD_DIR/_clock_load.py"
+    cat > "$load_script" << 'PYEOF'
+import torch, time, sys
+gpus = list(range(torch.cuda.device_count()))
+SIZE = 4096
+matrices = [
+    (torch.randn(SIZE, SIZE, dtype=torch.float16, device=f"cuda:{g}"),
+     torch.randn(SIZE, SIZE, dtype=torch.float16, device=f"cuda:{g}"))
+    for g in gpus
+]
+end = time.time() + 30
+while time.time() < end:
+    for g, (a, b) in enumerate(matrices):
+        with torch.cuda.device(g): torch.mm(a, b)
+    for g in gpus: torch.cuda.synchronize(g)
+PYEOF
+
+    python3 "$load_script" &
+    local load_pid=$!
+
+    # Sample clocks and throttle reasons every 3 seconds for 30 seconds
+    log "  Sampling clocks under load (every 3s for 30s):"
+    printf "  %-6s %-4s %-10s %-10s %s\n" \
+        "Time" "GPU" "SM MHz" "Mem MHz" "ThrottleReasons" | tee -a "$LOG_FILE"
+
+    local sample=0 any_throttle=false
+    while [ "$sample" -lt 10 ]; do
+        sleep 3
+        local elapsed=$(( (sample + 1) * 3 ))
+        local gpu_idx clk_sm clk_mem throttle
+        while IFS=, read -r gpu_idx clk_sm clk_mem throttle; do
+            gpu_idx=$(echo "$gpu_idx" | xargs)
+            clk_sm=$(echo "$clk_sm"   | xargs)
+            clk_mem=$(echo "$clk_mem" | xargs)
+            throttle=$(echo "$throttle" | xargs)
+            printf "  %-6s %-4s %-10s %-10s %s\n" \
+                "${elapsed}s" "$gpu_idx" "$clk_sm" "$clk_mem" "$throttle" \
+                | tee -a "$LOG_FILE"
+            if [ "$throttle" != "Not Active" ] && [ "$throttle" != "N/A" ]; then
+                any_throttle=true
+            fi
+        done < <(nvidia-smi \
+            --query-gpu=index,clocks.sm,clocks.mem,clocks_throttle_reasons.active \
+            --format=csv,noheader | tr -d '\r')
+        sample=$((sample + 1))
+    done
+
+    wait "$load_pid" 2>/dev/null || true
+    rm -f "$load_script"
+
+    log ""
+    if [ "$any_throttle" = true ]; then
+        log "  WARNING: Clock throttling detected under load."
+        log "  Common causes:"
+        log "    SW_Power_Cap  → power limit set below TDP (nvidia-smi -pl to check)"
+        log "    HW_Thermal    → GPU overheating — check fans, airflow, thermal paste"
+        log "    HW_Power      → PSU or power connector insufficient for load"
+        rc=1
+    else
+        log "  No throttling detected — clocks sustained at full speed."
+    fi
+
+    return $rc
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -277,7 +549,6 @@ install_nccl_tests_bin() {
         git clone https://github.com/NVIDIA/nccl-tests.git "$BUILD_DIR/nccl-tests"
 
     if [ -f "$perf" ]; then
-        # Verify binary links against the current system libnccl
         local linked_nccl system_nccl
         linked_nccl=$(ldd "$perf" 2>/dev/null | awk '/libnccl/{print $3}')
         system_nccl=$(ldconfig -p 2>/dev/null | awk '/libnccl\.so\.2 /{print $NF}' | head -1)
@@ -384,12 +655,10 @@ test_nvbandwidth() {
         log "  nvbandwidth already built: $nvb_bin"
     fi
 
-    if [ -z "$nvb_bin" ] || [ ! -x "$nvb_bin" ]; then
-        log "ERROR: nvbandwidth binary not found after build."
-        return 1
-    fi
+    [ -n "$nvb_bin" ] && [ -x "$nvb_bin" ] || \
+        { log "ERROR: nvbandwidth binary not found after build."; return 1; }
 
-    # device-to-device tests are expected to be skipped on single-GPU systems
+    # device-to-device tests are waived on single-GPU systems
     "$nvb_bin" \
         -t host_to_device_memcpy_ce \
            device_to_host_memcpy_ce \
@@ -616,9 +885,6 @@ test_stress() {
     fi
 }
 
-# Need label variable accessible outside function
-RESULTS_STRESS_LABEL="Sustained Compute Stress"
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────────────────────────
@@ -666,14 +932,18 @@ print_summary() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Argument parsing and main
+# Argument parsing
 # ─────────────────────────────────────────────────────────────────────────────
 
 usage() {
     cat << EOF
-Usage: $(basename "$0") [test...] [--clean] [--list] [--help]
+Usage: $(basename "$0") [test...] [--burn-duration <s>] [--clean] [--list] [--help]
 
 Available tests (run in this order if none specified):
+  preflight     Idle thermal baseline, persistence mode, driver state
+  ecc           ECC error check (DC GPUs: fail on errors; GeForce: skip gracefully)
+  pcie          PCIe link width/gen check — detects silent link degradation
+  clocks        Clock speed under 30s load — detects thermal/power throttling
   nccl          NCCL all-reduce communication test
   cuda-samples  deviceQuery + p2pBandwidthLatencyTest
   nvbandwidth   Host<->device and device<->device memory bandwidth
@@ -684,51 +954,34 @@ Available tests (run in this order if none specified):
 
 Options:
   --burn-duration <seconds>  Duration for stress test (default: 300 = 5 min)
-  --clean                    Delete all build artifacts and exit (re-clone and rebuild on next run)
+  --clean                    Delete all build artifacts and exit
   --list                     List available test names and exit
   --help, -h                 Show this help
 
 Examples:
-  ./fulltest.sh                         # run all tests (5 min stress)
-  ./fulltest.sh nccl pytorch            # run only NCCL and PyTorch tests
-  ./fulltest.sh stress --burn-duration 3600  # stress test for 1 hour
-  ./fulltest.sh --burn-duration 1800    # all tests, 30 min stress
-  ./fulltest.sh --clean                 # wipe build/ directory
-  ./fulltest.sh --clean nccl            # clean then immediately run nccl
-  ./fulltest.sh --list                  # list available tests
+  ./fulltest.sh                              # run all tests
+  ./fulltest.sh preflight ecc pcie clocks    # hardware health checks only
+  ./fulltest.sh nccl pytorch                 # communication + framework only
+  ./fulltest.sh stress --burn-duration 3600  # 1 hour stress test
+  ./fulltest.sh --clean                      # wipe build/ and exit
+  ./fulltest.sh --clean nccl                 # clean then run nccl
 EOF
 }
 
-ALL_TESTS=(nccl cuda-samples nvbandwidth dcgm pytorch memtest stress)
+ALL_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch memtest stress)
 SELECTED_TESTS=()
 
+# Two-pass parse: first pass handles --help/--list which exit immediately,
+# second pass (index-based) handles --burn-duration which needs a lookahead value.
 for arg in "$@"; do
     case "$arg" in
         --help|-h) usage; exit 0 ;;
-        --list)
-            echo "Available tests: ${ALL_TESTS[*]}"
-            exit 0
-            ;;
-        --clean)
-            CLEAN_BUILD=true
-            ;;
-        --burn-duration)
-            # handled by next iteration via shift-style lookahead below
-            ;;
-        nccl|cuda-samples|nvbandwidth|dcgm|pytorch|memtest|stress)
-            SELECTED_TESTS+=("$arg") ;;
-        *)
-            echo "Unknown argument: $arg" >&2
-            usage >&2
-            exit 1
-            ;;
+        --list) echo "Available tests: ${ALL_TESTS[*]}"; exit 0 ;;
     esac
 done
 
-# Re-parse with index to handle --burn-duration <value>
 args=("$@")
 i=0
-SELECTED_TESTS=()
 while [ "$i" -lt "${#args[@]}" ]; do
     arg="${args[$i]}"
     case "$arg" in
@@ -744,24 +997,20 @@ while [ "$i" -lt "${#args[@]}" ]; do
             fi
             BURN_DURATION="$val"
             ;;
-        nccl|cuda-samples|nvbandwidth|dcgm|pytorch|memtest|stress)
+        preflight|ecc|pcie|clocks|nccl|cuda-samples|nvbandwidth|dcgm|pytorch|memtest|stress)
             SELECTED_TESTS+=("$arg") ;;
         *)
-            echo "Unknown argument: $arg" >&2
-            usage >&2
-            exit 1
-            ;;
+            echo "Unknown argument: $arg" >&2; usage >&2; exit 1 ;;
     esac
     i=$((i + 1))
 done
 
-# Handle --clean: remove build directory, then continue if tests were also requested
+# Handle --clean
 if [ "$CLEAN_BUILD" = true ]; then
     echo "Cleaning build directory: $BUILD_DIR"
     rm -rf "$BUILD_DIR"
     mkdir -p "$BUILD_DIR"
     echo "Done."
-    # If --clean was the only argument, exit here
     [ "${#SELECTED_TESTS[@]}" -eq 0 ] && exit 0
     echo "Proceeding with tests: ${SELECTED_TESTS[*]}"
     echo ""
@@ -769,15 +1018,19 @@ fi
 
 [ "${#SELECTED_TESTS[@]}" -eq 0 ] && SELECTED_TESTS=("${ALL_TESTS[@]}")
 
-# ─── Run ───────────────────────────────────────────────────────────────────
+# ─── Run ─────────────────────────────────────────────────────────────────────
 
 detect_system
 
 for test in "${SELECTED_TESTS[@]}"; do
     case "$test" in
-        nccl)         run_test "NCCL All-Reduce Test"                          test_nccl         ;;
-        cuda-samples) run_test "CUDA Samples (deviceQuery / p2pBandwidthLatencyTest)" test_cuda_samples ;;
-        nvbandwidth)  run_test "NVBandwidth (GPU Memory Bandwidth)"            test_nvbandwidth  ;;
+        preflight)    run_test "Preflight (Thermal Baseline / Persistence / Driver)"  test_preflight   ;;
+        ecc)          run_test "ECC Error Check"                                       test_ecc         ;;
+        pcie)         run_test "PCIe Link Width / Generation"                          test_pcie        ;;
+        clocks)       run_test "Clock Speed Under Load"                                test_clocks      ;;
+        nccl)         run_test "NCCL All-Reduce Test"                                  test_nccl        ;;
+        cuda-samples) run_test "CUDA Samples (deviceQuery / p2pBandwidthLatencyTest)"  test_cuda_samples ;;
+        nvbandwidth)  run_test "NVBandwidth (GPU Memory Bandwidth)"                    test_nvbandwidth ;;
         dcgm)
             if command -v dcgmi &>/dev/null; then
                 run_test "DCGM Diagnostics" test_dcgm
@@ -785,12 +1038,12 @@ for test in "${SELECTED_TESTS[@]}"; do
                 skip_test "DCGM Diagnostics" "dcgmi not found — install DCGM if needed (https://developer.nvidia.com/dcgm)"
             fi
             ;;
-        pytorch)      run_test "PyTorch Multi-GPU Benchmark"                   test_pytorch      ;;
-        memtest)      run_test "cuda_memtest (GPU Memory Stress)"              test_memtest      ;;
+        pytorch)      run_test "PyTorch Multi-GPU Benchmark"                           test_pytorch     ;;
+        memtest)      run_test "cuda_memtest (GPU Memory Stress)"                      test_memtest     ;;
         stress)
             local stress_min
             stress_min=$(echo "scale=1; $BURN_DURATION / 60" | bc)
-            run_test "$RESULTS_STRESS_LABEL (${stress_min} min)" test_stress
+            run_test "$RESULTS_STRESS_LABEL (${stress_min} min)"                       test_stress
             ;;
     esac
 done
