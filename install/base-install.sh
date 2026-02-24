@@ -119,17 +119,39 @@ preflight_checks() {
     fi
 
     # ── Network reachability ─────────────────────────────────
-    if curl -sf --max-time 10 https://developer.download.nvidia.com > /dev/null; then
-        success "Network: NVIDIA repo reachable"
-    else
-        error "Cannot reach https://developer.download.nvidia.com — check network/firewall/proxy"
-    fi
+    # curl may not be installed yet on a fresh node — use ping as primary check,
+    # curl as a secondary HTTPS check only if available
+    check_host_reachable() {
+        local host="$1"
+        local label="$2"
+        local is_required="$3"   # "error" or "warn"
 
-    if curl -sf --max-time 10 https://github.com > /dev/null; then
-        success "Network: GitHub reachable"
-    else
-        warn "Cannot reach GitHub — git clone steps may fail"
-    fi
+        if ping -c 1 -W 5 "${host}" &>/dev/null; then
+            # Host is reachable at network level — now verify HTTPS if curl available.
+            # Use -L to follow CDN redirects (e.g. Akamai), -k only for reachability test
+            # (ca-certificates may not be installed yet on a fresh node).
+            if command -v curl &>/dev/null; then
+                if curl -sfL --max-time 10 "https://${host}" -o /dev/null 2>/dev/null; then
+                    success "Network: ${label} reachable (HTTPS OK)"
+                elif curl -sfLk --max-time 10 "https://${host}" -o /dev/null 2>/dev/null; then
+                    warn "Network: ${label} reachable but TLS verification failed — ca-certificates may need update (will be fixed during base package install)"
+                else
+                    warn "Network: ${label} pingable but HTTPS check failed — continuing (apt will surface real errors)"
+                fi
+            else
+                success "Network: ${label} reachable (ping OK — curl not yet installed)"
+            fi
+        else
+            if [[ "${is_required}" == "error" ]]; then
+                error "Cannot reach ${host} — host is not pingable, check network/firewall"
+            else
+                warn "Cannot reach ${host} — related steps may fail"
+            fi
+        fi
+    }
+
+    check_host_reachable "developer.download.nvidia.com" "NVIDIA repo" "error"
+    check_host_reachable "github.com"                    "GitHub"      "warn"
 
     # ── Secure Boot ──────────────────────────────────────────
     if command -v mokutil &>/dev/null; then
