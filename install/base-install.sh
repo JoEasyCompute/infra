@@ -4,32 +4,25 @@
 # base-install.sh — GPU Node Base Installation Script
 # Supports: Ubuntu 22.04 / 24.04 (x86_64)
 # Installs: NVIDIA drivers, CUDA toolkit, cuDNN, DCGM, gpu-burn
-# Version:  1.5 (2026-02-24)
+# Version:  1.6 (2026-02-24)
 # ═══════════════════════════════════════════════════════════════
 
-# ─── Logging: re-exec through 'script' for clean tee without ──
-# breaking stdin. On first run LOGGING_ACTIVE is unset, so we
-# re-launch ourselves via 'script -q -c' which records everything
-# to the log file while keeping stdin/stdout fully functional.
+# No set -e — we use explicit error checking so nothing dies silently.
+# set -u catches unbound variables. set -o pipefail catches pipe failures.
+set -uo pipefail
+
+# ─── Logging ──────────────────────────────────────────────────
+# Simple approach: tee to file, keep stdin untouched.
+# We don't redirect stdin at all — read prompts work normally.
 LOG_DIR="/var/log/gpu-node-install"
-sudo mkdir -p "${LOG_DIR}"
-sudo chmod 777 "${LOG_DIR}"
+sudo mkdir -p "${LOG_DIR}" && sudo chmod 777 "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
 
-if [[ -z "${LOGGING_ACTIVE:-}" ]]; then
-    export LOGGING_ACTIVE=1
-    export LOG_FILE
-    echo "Log: ${LOG_FILE}"
-    # Re-exec this script under 'script' which handles tty/stdin correctly
-    exec script -q -c "bash $(realpath "$0") $*" "${LOG_FILE}"
-fi
-
-# ── From here down we are inside the 'script' session ──────────
-set -euo pipefail
-trap 'echo -e "\n\033[0;31m[ERROR]\033[0m  Script failed at line ${LINENO} (exit $?) — check: ${LOG_FILE}" >&2' ERR
+# Only redirect stdout/stderr — stdin is left alone
+exec > >(tee -a "${LOG_FILE}") 2> >(tee -a "${LOG_FILE}" >&2)
 
 echo "════════════════════════════════════════════════════════"
-echo " GPU Node Installation Script  (v1.5 — 2026-02-24)"
+echo " GPU Node Installation Script  (v1.6 — 2026-02-24)"
 echo " Log: ${LOG_FILE}"
 echo " Started: $(date)"
 echo "════════════════════════════════════════════════════════"
@@ -41,7 +34,7 @@ CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 info()    { echo -e "${CYAN}[INFO]${NC}    $*"; }
 success() { echo -e "${GREEN}[OK]${NC}      $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}    $*"; }
-error()   { echo -e "${RED}[ERROR]${NC}   $*" >&2; exit 1; }
+error()   { echo -e "${RED}[ERROR]${NC}   $*"; exit 1; }
 section() { echo -e "\n${BOLD}${CYAN}── $* ──${NC}"; }
 
 # ─── CLI argument parsing ──────────────────────────────────────
@@ -77,13 +70,21 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# ─── Helper: run a command and exit on failure with clear message ──
+run() {
+    local desc="$1"; shift
+    info "Running: $*"
+    if ! "$@"; then
+        error "Failed at step: ${desc}\n  Command: $*\n  Check log: ${LOG_FILE}"
+    fi
+}
+
 # ═══════════════════════════════════════════════════════════════
 # STEP 1 — Detect Ubuntu Version
 # ═══════════════════════════════════════════════════════════════
 detect_ubuntu() {
     section "Detecting OS"
     [[ -f /etc/os-release ]] || error "Cannot detect OS — /etc/os-release not found"
-    # shellcheck source=/dev/null
     source /etc/os-release
     [[ "${ID}" == "ubuntu" ]] || error "This script requires Ubuntu. Detected: ${ID}"
     case "${VERSION_ID}" in
@@ -100,110 +101,97 @@ detect_ubuntu() {
 # ═══════════════════════════════════════════════════════════════
 preflight_checks() {
     section "Pre-flight Checks"
-    local errors=0
+    local warnings=0
 
-    # ── Sudo access ──────────────────────────────────────────
+    # Sudo
     if sudo -n true 2>/dev/null; then
         success "Sudo access: OK"
     else
-        error "Script requires sudo access. Run as a sudoer or with sudo."
+        error "Script requires sudo access."
     fi
 
-    # ── Architecture ─────────────────────────────────────────
+    # Architecture
     local arch; arch=$(uname -m)
     [[ "${arch}" == "x86_64" ]] && success "Architecture: ${arch}" \
-        || error "Unsupported architecture: ${arch}. Only x86_64 is supported."
+        || error "Unsupported architecture: ${arch}. Only x86_64 supported."
 
-    # ── Disk space ───────────────────────────────────────────
+    # Disk space
     local free_gb
     free_gb=$(df --output=avail -BG /usr | tail -1 | tr -d 'G ')
     if (( free_gb >= 15 )); then
-        success "Disk space: ${free_gb}GB free on /usr (need 15GB+)"
+        success "Disk space: ${free_gb}GB free on /usr"
     else
-        error "Insufficient disk space: ${free_gb}GB free on /usr — need at least 15GB"
+        error "Insufficient disk space: ${free_gb}GB free on /usr — need 15GB+"
     fi
 
-    # ── Network reachability ─────────────────────────────────
-    check_host_reachable() {
-        local host="$1" label="$2" is_required="$3"
+    # Network
+    check_host() {
+        local host="$1" label="$2" required="$3"
         if ping -c 1 -W 5 "${host}" &>/dev/null; then
             if command -v curl &>/dev/null; then
                 if curl -sfL --max-time 10 "https://${host}" -o /dev/null 2>/dev/null; then
-                    success "Network: ${label} reachable (HTTPS OK)"
+                    success "Network: ${label} (HTTPS OK)"
                 elif curl -sfLk --max-time 10 "https://${host}" -o /dev/null 2>/dev/null; then
-                    warn "Network: ${label} reachable — TLS cert untrusted (ca-certificates will be updated)"
+                    warn "Network: ${label} — TLS untrusted (ca-certificates will be updated)"
                 else
-                    warn "Network: ${label} pingable but HTTPS check failed — continuing"
+                    warn "Network: ${label} pingable, HTTPS check failed — continuing"
                 fi
             else
-                success "Network: ${label} reachable (ping OK)"
+                success "Network: ${label} (ping OK)"
             fi
         else
-            [[ "${is_required}" == "error" ]] \
-                && error "Cannot reach ${host} — not pingable, check network/firewall" \
-                || warn "Cannot reach ${host} — related steps may fail"
+            [[ "${required}" == "hard" ]] \
+                && error "Cannot reach ${host} — check network/firewall" \
+                || warn "Cannot reach ${host} — some steps may fail"
         fi
     }
-    check_host_reachable "developer.download.nvidia.com" "NVIDIA repo" "error"
-    check_host_reachable "github.com"                    "GitHub"      "warn"
+    check_host "developer.download.nvidia.com" "NVIDIA repo" "hard"
+    check_host "github.com" "GitHub" "soft"
 
-    # ── Secure Boot ──────────────────────────────────────────
-    if command -v mokutil &>/dev/null; then
-        if mokutil --sb-state 2>/dev/null | grep -q "enabled"; then
-            warn "Secure Boot is ENABLED — DKMS/nvidia-open modules may fail to load after reboot"
-            warn "Disable Secure Boot in BIOS, or enroll the MOK key post-install"
-            if [[ "${NON_INTERACTIVE}" == false ]]; then
-                read -rp "  Continue anyway? [y/N]: " sb_confirm
-                [[ "${sb_confirm,,}" == "y" ]] || error "Aborted by user (Secure Boot concern)."
-            else
-                warn "Non-interactive mode — continuing despite Secure Boot"
-            fi
-        else
-            success "Secure Boot: disabled (OK for DKMS)"
+    # Secure Boot
+    if command -v mokutil &>/dev/null && mokutil --sb-state 2>/dev/null | grep -q "enabled"; then
+        warn "Secure Boot ENABLED — DKMS modules may fail to load. Disable in BIOS."
+        if [[ "${NON_INTERACTIVE}" == false ]]; then
+            read -rp "  Continue anyway? [y/N]: " sb_confirm
+            [[ "${sb_confirm,,}" == "y" ]] || error "Aborted."
         fi
     else
-        info "mokutil not found — skipping Secure Boot check"
+        success "Secure Boot: disabled (OK)"
     fi
 
-    # ── Existing NVIDIA packages ──────────────────────────────
+    # Existing NVIDIA
     if dpkg -l 2>/dev/null | grep -qP '^ii\s+(nvidia-driver|libnvidia-compute|cuda-)'; then
-        warn "Existing NVIDIA/CUDA packages detected:"
-        dpkg -l 2>/dev/null | grep -P '^ii\s+(nvidia|cuda|cudnn)' | awk '{printf "    %-45s %s\n", $2, $3}' || true
-        warn "These may conflict. To purge: sudo apt purge ~nnvidia ~ncuda && sudo apt autoremove"
+        warn "Existing NVIDIA/CUDA packages found — may conflict:"
+        dpkg -l 2>/dev/null | grep -P '^ii\s+(nvidia|cuda|cudnn)' | awk '{printf "    %s %s\n", $2, $3}' || true
         if [[ "${NON_INTERACTIVE}" == false ]]; then
             read -rp "  Continue anyway? [y/N]: " purge_confirm
-            [[ "${purge_confirm,,}" == "y" ]] || error "Aborted by user (existing NVIDIA packages)."
-        else
-            warn "Non-interactive mode — continuing despite existing packages"
+            [[ "${purge_confirm,,}" == "y" ]] || error "Aborted."
         fi
     else
-        success "No conflicting NVIDIA/CUDA packages found"
+        success "No conflicting NVIDIA/CUDA packages"
     fi
 
-    # ── Kernel headers ───────────────────────────────────────
-    local kernel_ver; kernel_ver=$(uname -r)
-    if apt-cache show "linux-headers-${kernel_ver}" &>/dev/null; then
-        success "Kernel headers available for: ${kernel_ver}"
+    # Kernel headers
+    local kver; kver=$(uname -r)
+    if apt-cache show "linux-headers-${kver}" &>/dev/null; then
+        success "Kernel headers: available for ${kver}"
     else
-        warn "linux-headers-${kernel_ver} not found in apt cache — DKMS build may fail"
-        (( errors++ )) || true
+        warn "linux-headers-${kver} not in apt cache — DKMS build may fail"
+        (( warnings++ )) || true
     fi
 
-    (( errors > 0 )) \
-        && warn "${errors} pre-flight warning(s) — review above" \
-        || success "All pre-flight checks passed"
+    (( warnings > 0 )) && warn "${warnings} warning(s) above" || success "All pre-flight checks passed"
 }
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 3 — Select Driver and CUDA versions
+# STEP 3 — Version Selection
 # ═══════════════════════════════════════════════════════════════
 select_driver_version() {
     if [[ -n "${DRIVER_VERSION}" ]]; then
         case "${DRIVER_VERSION}" in
-            575|580|590) success "Driver version (from args): ${DRIVER_VERSION}" ;;
-            *) error "Invalid --driver value: ${DRIVER_VERSION}. Valid: 575, 580, 590" ;;
+            575|580|590) success "Driver version (--driver arg): ${DRIVER_VERSION}" ; return ;;
+            *) error "Invalid --driver: ${DRIVER_VERSION}. Valid: 575, 580, 590" ;;
         esac
-        return
     fi
     if [[ "${NON_INTERACTIVE}" == true ]]; then
         DRIVER_VERSION="580"; success "Driver version (default): ${DRIVER_VERSION}"; return
@@ -228,13 +216,13 @@ select_cuda_version() {
         case "${CUDA_VERSION}" in
             "12-9") CUDA_TOOLKIT_VERSION="12-9"; CUDA_MAJOR="12" ;;
             "13")   CUDA_TOOLKIT_VERSION="13";   CUDA_MAJOR="13" ;;
-            *) error "Invalid --cuda value: ${CUDA_VERSION}. Valid: 12-9, 13" ;;
+            *) error "Invalid --cuda: ${CUDA_VERSION}. Valid: 12-9, 13" ;;
         esac
-        success "CUDA toolkit version (from args): ${CUDA_TOOLKIT_VERSION}"; return
+        success "CUDA version (--cuda arg): ${CUDA_TOOLKIT_VERSION}"; return
     fi
     if [[ "${NON_INTERACTIVE}" == true ]]; then
         CUDA_TOOLKIT_VERSION="12-9"; CUDA_MAJOR="12"
-        success "CUDA toolkit version (default): ${CUDA_TOOLKIT_VERSION}"; return
+        success "CUDA version (default): ${CUDA_TOOLKIT_VERSION}"; return
     fi
     echo ""
     echo -e "${BOLD}Select CUDA Toolkit Version:${NC}"
@@ -246,22 +234,22 @@ select_cuda_version() {
         2) CUDA_TOOLKIT_VERSION="13"; CUDA_MAJOR="13" ;;
         *) CUDA_TOOLKIT_VERSION="12-9"; CUDA_MAJOR="12" ;;
     esac
-    success "CUDA toolkit version: ${CUDA_TOOLKIT_VERSION}"
+    success "CUDA version: ${CUDA_TOOLKIT_VERSION}"
 }
 
 validate_combination() {
     if [[ "${CUDA_MAJOR}" == "13" && "${DRIVER_VERSION}" == "575" ]]; then
         warn "Driver 575 + CUDA 13 may have compatibility issues. Recommended: 580 or 590."
         if [[ "${NON_INTERACTIVE}" == false ]]; then
-            read -rp "  Continue anyway? [y/N]: " confirm
-            [[ "${confirm,,}" == "y" ]] || error "Aborted by user."
+            read -rp "  Continue anyway? [y/N]: " yn
+            [[ "${yn,,}" == "y" ]] || error "Aborted."
         fi
     fi
-    success "Combination validated: Driver ${DRIVER_VERSION} + CUDA ${CUDA_TOOLKIT_VERSION}"
+    success "Combination: Driver ${DRIVER_VERSION} + CUDA ${CUDA_TOOLKIT_VERSION}"
 }
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 4 — Confirm before installing
+# STEP 4 — Confirm
 # ═══════════════════════════════════════════════════════════════
 confirm_install() {
     echo ""
@@ -276,30 +264,30 @@ confirm_install() {
     if [[ "${NON_INTERACTIVE}" == false ]]; then
         read -rp "Proceed with installation? [Y/n]: " proceed
         [[ "${proceed,,}" == "n" ]] && error "Aborted by user."
+        info "Starting installation..."
     else
-        info "Non-interactive mode — proceeding automatically"
+        info "Non-interactive mode — starting installation..."
     fi
 }
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 5 — Base system packages
+# STEP 5 — Base packages
 # ═══════════════════════════════════════════════════════════════
 install_base_packages() {
     section "Base System Packages"
 
-    # Bootstrap prerequisites for add-apt-repository first
-    info "Bootstrapping apt prerequisites..."
-    sudo apt-get update -q
+    info "Bootstrapping prerequisites (software-properties-common etc)..."
+    sudo apt-get update -q \
+        || error "apt-get update failed"
     sudo apt-get install -y \
-        software-properties-common \
-        apt-transport-https \
-        ca-certificates \
-        curl \
-        gnupg
+        software-properties-common apt-transport-https ca-certificates curl gnupg \
+        || error "Bootstrap package install failed"
 
     info "Adding graphics-drivers PPA..."
-    sudo add-apt-repository -y ppa:graphics-drivers/ppa
-    sudo apt-get update -q
+    sudo add-apt-repository -y ppa:graphics-drivers/ppa \
+        || error "Failed to add graphics-drivers PPA"
+    sudo apt-get update -q \
+        || error "apt-get update after PPA failed"
 
     info "Installing base packages..."
     sudo apt-get install -y \
@@ -307,9 +295,11 @@ install_base_packages() {
         gcc-11 g++-11 gcc-12 g++-12 lsb-release \
         ipmitool jq pciutils iproute2 util-linux dmidecode lshw \
         coreutils chrony nvme-cli bpytop mokutil \
-        python3 python3-pip python3-venv
+        python3 python3-pip python3-venv \
+        || error "Base package install failed"
 
-    sudo systemctl enable --now chrony
+    sudo systemctl enable --now chrony \
+        || warn "Failed to enable chrony"
     success "Base packages installed"
 }
 
@@ -326,7 +316,7 @@ configure_gcc_alternatives() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 7 — CUDA repo keyring
+# STEP 7 — CUDA keyring
 # ═══════════════════════════════════════════════════════════════
 install_cuda_keyring() {
     section "CUDA Repository Keyring"
@@ -335,30 +325,34 @@ install_cuda_keyring() {
     local url="https://developer.download.nvidia.com/compute/cuda/repos/${UBUNTU_CODENAME}/x86_64/${deb}"
 
     if [[ -f "${keyring_gpg}" ]]; then
-        info "CUDA keyring already installed — skipping"
+        info "CUDA keyring already present — skipping"
     else
-        info "Downloading CUDA keyring from: ${url}"
-        wget -q --show-progress -O "/tmp/${deb}" "${url}"
-        sudo dpkg -i "/tmp/${deb}"
+        info "Downloading: ${url}"
+        wget -q --show-progress -O "/tmp/${deb}" "${url}" \
+            || error "Failed to download CUDA keyring from ${url}"
+        sudo dpkg -i "/tmp/${deb}" \
+            || error "Failed to install CUDA keyring"
         rm "/tmp/${deb}"
         success "CUDA keyring installed"
     fi
-    sudo apt-get update -q
-    sudo apt-get upgrade -y
+
+    sudo apt-get update -q || error "apt-get update after CUDA keyring failed"
+    sudo apt-get upgrade -y || warn "apt-get upgrade had warnings (non-fatal)"
 }
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 8 — NVIDIA driver, CUDA toolkit, cuDNN, nvtop
+# STEP 8 — NVIDIA stack
 # ═══════════════════════════════════════════════════════════════
 install_nvidia_stack() {
     section "NVIDIA Driver + CUDA Stack"
-    info "Installing: driver=${DRIVER_VERSION}, cuda=${CUDA_TOOLKIT_VERSION}, cudnn=cudnn9-cuda-${CUDA_MAJOR}"
+    info "Installing driver=${DRIVER_VERSION}, cuda=${CUDA_TOOLKIT_VERSION}, cudnn=cudnn9-cuda-${CUDA_MAJOR}"
     sudo apt-get install -V -y \
         "cuda-toolkit-${CUDA_TOOLKIT_VERSION}" \
         "libnvidia-compute-${DRIVER_VERSION}" \
         "nvidia-dkms-${DRIVER_VERSION}-open" \
         "cudnn9-cuda-${CUDA_MAJOR}" \
-        nvtop
+        nvtop \
+        || error "NVIDIA stack install failed — check apt output above"
     success "NVIDIA stack installed"
 }
 
@@ -371,7 +365,8 @@ install_dcgm() {
         local live_cuda_major
         live_cuda_major=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[0-9]+' || echo "${CUDA_MAJOR}")
         info "Installing datacenter-gpu-manager-4-cuda${live_cuda_major}..."
-        sudo apt-get install -y "datacenter-gpu-manager-4-cuda${live_cuda_major}"
+        sudo apt-get install -y "datacenter-gpu-manager-4-cuda${live_cuda_major}" \
+            || error "DCGM install failed"
         sudo systemctl enable --now nvidia-dcgm
         success "DCGM installed and enabled"
     else
@@ -380,7 +375,7 @@ install_dcgm() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 10 — Clone repos and build gpu-burn
+# STEP 10 — Repos & gpu-burn
 # ═══════════════════════════════════════════════════════════════
 setup_repos() {
     section "Repos & gpu-burn"
@@ -389,31 +384,33 @@ setup_repos() {
 
     if [[ -d "${infra_dir}" ]]; then
         info "infra repo exists — pulling latest"
-        git -C "${infra_dir}" pull --ff-only || warn "Could not pull infra (local changes?)"
+        git -C "${infra_dir}" pull --ff-only || warn "git pull infra failed (local changes?)"
     else
-        git clone https://github.com/joeasycompute/infra.git "${infra_dir}"
+        git clone https://github.com/joeasycompute/infra.git "${infra_dir}" \
+            || error "Failed to clone infra repo"
         success "Cloned infra → ${infra_dir}"
     fi
 
     if [[ -d "${gpuburn_dir}" ]]; then
         info "gpu-burn repo exists — pulling latest"
-        git -C "${gpuburn_dir}" pull --ff-only || warn "Could not pull gpu-burn (local changes?)"
+        git -C "${gpuburn_dir}" pull --ff-only || warn "git pull gpu-burn failed"
     else
-        git clone https://github.com/wilicc/gpu-burn.git "${gpuburn_dir}"
+        git clone https://github.com/wilicc/gpu-burn.git "${gpuburn_dir}" \
+            || error "Failed to clone gpu-burn repo"
         success "Cloned gpu-burn → ${gpuburn_dir}"
     fi
 
     if command -v nvcc &>/dev/null; then
         info "Building gpu-burn..."
-        (cd "${gpuburn_dir}" && make)
+        (cd "${gpuburn_dir}" && make) || warn "gpu-burn build failed"
         success "gpu-burn built: ${gpuburn_dir}/gpu_burn"
     else
-        warn "nvcc not in PATH — skipping gpu-burn build (reboot first, then re-run)"
+        warn "nvcc not in PATH — gpu-burn build deferred (reboot first, then re-run)"
     fi
 }
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 11 — Post-install validation
+# STEP 11 — Validation
 # ═══════════════════════════════════════════════════════════════
 validate_install() {
     section "Post-install Validation"
@@ -431,7 +428,7 @@ validate_install() {
     if command -v nvcc &>/dev/null; then
         success "nvcc: $(nvcc --version | grep -oP 'release \K[0-9.]+')"
     else
-        warn "nvcc not in PATH (reboot or PATH reload needed)"; (( warnings++ )) || true
+        warn "nvcc not in PATH"; (( warnings++ )) || true
     fi
 
     systemctl is-active --quiet nvidia-dcgm 2>/dev/null \
@@ -440,24 +437,24 @@ validate_install() {
 
     systemctl is-active --quiet chrony \
         && success "chrony: running" \
-        || { warn "chrony: not running"; (( warnings++ )) || true; }
+        || { warn "chrony not running"; (( warnings++ )) || true; }
 
     [[ -f "${HOME}/gpu-burn/gpu_burn" ]] \
-        && success "gpu-burn: built and ready" \
-        || { warn "gpu-burn: not built (reboot first, then re-run)"; (( warnings++ )) || true; }
+        && success "gpu-burn: ready" \
+        || { warn "gpu-burn: not built"; (( warnings++ )) || true; }
 
     [[ -d "${HOME}/infra" ]] \
         && success "infra repo: present" \
-        || { warn "infra repo: not found"; (( warnings++ )) || true; }
+        || { warn "infra repo: missing"; (( warnings++ )) || true; }
 
     echo ""
     (( warnings > 0 )) \
-        && warn "${warnings} item(s) need attention — most resolve after reboot" \
-        || success "All validation checks passed — node is ready"
+        && warn "${warnings} item(s) pending — most resolve after reboot" \
+        || success "All checks passed — node is ready"
 }
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 12 — Reboot prompt
+# STEP 12 — Reboot
 # ═══════════════════════════════════════════════════════════════
 offer_reboot() {
     echo ""
@@ -470,7 +467,7 @@ offer_reboot() {
 
     if ! (command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null); then
         if [[ "${NON_INTERACTIVE}" == true ]]; then
-            info "Non-interactive mode — reboot manually to load NVIDIA kernel modules."
+            info "Non-interactive — reboot manually to activate NVIDIA kernel modules."
         else
             read -rp "Reboot now to load NVIDIA kernel modules? [Y/n]: " do_reboot
             if [[ "${do_reboot,,}" != "n" ]]; then
@@ -478,7 +475,7 @@ offer_reboot() {
                 sleep 5
                 sudo reboot
             else
-                warn "Remember to reboot before running GPU workloads or gpu-burn"
+                warn "Remember to reboot before running GPU workloads"
             fi
         fi
     else
