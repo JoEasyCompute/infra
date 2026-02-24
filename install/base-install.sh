@@ -1,25 +1,33 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-# Trap unexpected errors and report line number before exiting
-trap 'echo -e "\n${RED:-\033[0;31m}[ERROR]${NC:-\033[0m}   Script failed at line ${LINENO} — check log: ${LOG_FILE:-/var/log/gpu-node-install/}" >&2' ERR
 
 # ═══════════════════════════════════════════════════════════════
 # base-install.sh — GPU Node Base Installation Script
 # Supports: Ubuntu 22.04 / 24.04 (x86_64)
 # Installs: NVIDIA drivers, CUDA toolkit, cuDNN, DCGM, gpu-burn
+# Version:  1.4 (2026-02-24)
 # ═══════════════════════════════════════════════════════════════
 
 # ─── Logging setup ────────────────────────────────────────────
+# Must happen BEFORE set -e. The tee subshell is backgrounded with
+# disown so its exit code never triggers set -e. stdin is preserved
+# via fd 3 so interactive read prompts still work after exec.
 LOG_DIR="/var/log/gpu-node-install"
 LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
 sudo mkdir -p "${LOG_DIR}"
 sudo chmod 777 "${LOG_DIR}"
-# Tee all stdout+stderr to log file and terminal
+
+# Save original stdin on fd 3 before redirecting stdout/stderr
+exec 3<&0
+# Redirect stdout+stderr through tee into log file
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
+set -euo pipefail
+
+# Trap unexpected errors — print line number so silent failures are visible
+trap 'echo -e "\n\033[0;31m[ERROR]\033[0m  Script failed at line ${LINENO} (exit $?) — check: ${LOG_FILE}" >&2' ERR
+
 echo "════════════════════════════════════════════════════════"
-echo " GPU Node Installation Script"
+echo " GPU Node Installation Script  (v1.4 — 2026-02-24)"
 echo " Log: ${LOG_FILE}"
 echo " Started: $(date)"
 echo "════════════════════════════════════════════════════════"
@@ -122,31 +130,26 @@ preflight_checks() {
     fi
 
     # ── Network reachability ─────────────────────────────────
-    # curl may not be installed yet on a fresh node — use ping as primary check,
-    # curl as a secondary HTTPS check only if available
+    # Use ping as primary check; curl -L follows CDN redirects (Akamai).
+    # -k fallback handles fresh nodes where ca-certificates isn't updated yet.
     check_host_reachable() {
-        local host="$1"
-        local label="$2"
-        local is_required="$3"   # "error" or "warn"
+        local host="$1" label="$2" is_required="$3"
 
         if ping -c 1 -W 5 "${host}" &>/dev/null; then
-            # Host is reachable at network level — now verify HTTPS if curl available.
-            # Use -L to follow CDN redirects (e.g. Akamai), -k only for reachability test
-            # (ca-certificates may not be installed yet on a fresh node).
             if command -v curl &>/dev/null; then
                 if curl -sfL --max-time 10 "https://${host}" -o /dev/null 2>/dev/null; then
                     success "Network: ${label} reachable (HTTPS OK)"
                 elif curl -sfLk --max-time 10 "https://${host}" -o /dev/null 2>/dev/null; then
-                    warn "Network: ${label} reachable but TLS verification failed — ca-certificates may need update (will be fixed during base package install)"
+                    warn "Network: ${label} reachable — TLS cert untrusted (ca-certificates will be updated during install)"
                 else
                     warn "Network: ${label} pingable but HTTPS check failed — continuing (apt will surface real errors)"
                 fi
             else
-                success "Network: ${label} reachable (ping OK — curl not yet installed)"
+                success "Network: ${label} reachable (ping OK)"
             fi
         else
             if [[ "${is_required}" == "error" ]]; then
-                error "Cannot reach ${host} — host is not pingable, check network/firewall"
+                error "Cannot reach ${host} — not pingable, check network/firewall"
             else
                 warn "Cannot reach ${host} — related steps may fail"
             fi
@@ -162,7 +165,7 @@ preflight_checks() {
             warn "Secure Boot is ENABLED — DKMS/nvidia-open modules may fail to load after reboot"
             warn "Disable Secure Boot in BIOS, or enroll the MOK key post-install"
             if [[ "${NON_INTERACTIVE}" == false ]]; then
-                read -rp "  Continue anyway? [y/N]: " sb_confirm
+                read -rp "  Continue anyway? [y/N]: " sb_confirm <&3
                 [[ "${sb_confirm,,}" == "y" ]] || error "Aborted by user (Secure Boot concern)."
             else
                 warn "Non-interactive mode — continuing despite Secure Boot"
@@ -181,7 +184,7 @@ preflight_checks() {
         warn "These may conflict with the new install."
         warn "To purge: sudo apt purge ~nnvidia ~ncuda && sudo apt autoremove"
         if [[ "${NON_INTERACTIVE}" == false ]]; then
-            read -rp "  Continue anyway? [y/N]: " purge_confirm
+            read -rp "  Continue anyway? [y/N]: " purge_confirm <&3
             [[ "${purge_confirm,,}" == "y" ]] || error "Aborted by user (existing NVIDIA packages)."
         else
             warn "Non-interactive mode — continuing despite existing packages"
@@ -213,7 +216,6 @@ preflight_checks() {
 # ═══════════════════════════════════════════════════════════════
 select_driver_version() {
     if [[ -n "${DRIVER_VERSION}" ]]; then
-        # Validate CLI-provided value
         case "${DRIVER_VERSION}" in
             575|580|590) success "Driver version (from args): ${DRIVER_VERSION}" ;;
             *) error "Invalid --driver value: ${DRIVER_VERSION}. Valid: 575, 580, 590" ;;
@@ -233,7 +235,7 @@ select_driver_version() {
     echo "  2) 580  — recommended [default]"
     echo "  3) 590  — latest/beta"
     echo ""
-    read -rp "Enter choice [1-3, default=2]: " driver_choice
+    read -rp "Enter choice [1-3, default=2]: " driver_choice <&3
     case "${driver_choice}" in
         1) DRIVER_VERSION="575" ;;
         3) DRIVER_VERSION="590" ;;
@@ -265,7 +267,7 @@ select_cuda_version() {
     echo "  1) 12-9  — stable [default]"
     echo "  2) 13    — latest"
     echo ""
-    read -rp "Enter choice [1-2, default=1]: " cuda_choice
+    read -rp "Enter choice [1-2, default=1]: " cuda_choice <&3
     case "${cuda_choice}" in
         2) CUDA_TOOLKIT_VERSION="13"; CUDA_MAJOR="13" ;;
         *) CUDA_TOOLKIT_VERSION="12-9"; CUDA_MAJOR="12" ;;
@@ -274,11 +276,10 @@ select_cuda_version() {
 }
 
 validate_combination() {
-    # CUDA 13 is safest with driver 580+
     if [[ "${CUDA_MAJOR}" == "13" && "${DRIVER_VERSION}" == "575" ]]; then
         warn "Driver 575 + CUDA 13 may have compatibility issues. Recommended: driver 580 or 590."
         if [[ "${NON_INTERACTIVE}" == false ]]; then
-            read -rp "  Continue anyway? [y/N]: " confirm
+            read -rp "  Continue anyway? [y/N]: " confirm <&3
             [[ "${confirm,,}" == "y" ]] || error "Aborted by user."
         else
             warn "Non-interactive mode — continuing with potentially incompatible combination"
@@ -302,7 +303,7 @@ confirm_install() {
     echo ""
 
     if [[ "${NON_INTERACTIVE}" == false ]]; then
-        read -rp "Proceed with installation? [Y/n]: " proceed
+        read -rp "Proceed with installation? [Y/n]: " proceed <&3
         [[ "${proceed,,}" == "n" ]] && error "Aborted by user."
     else
         info "Non-interactive mode — proceeding automatically"
@@ -316,8 +317,7 @@ install_base_packages() {
     section "Base System Packages"
 
     # Bootstrap: install prerequisites for add-apt-repository BEFORE calling it.
-    # On a fresh node these may not be present yet — set -e will kill the script
-    # silently if add-apt-repository runs without software-properties-common.
+    # On a fresh node software-properties-common may not be present yet.
     info "Bootstrapping apt prerequisites..."
     sudo apt-get update -q
     sudo apt-get install -y \
@@ -458,19 +458,16 @@ validate_install() {
     section "Post-install Validation"
     local warnings=0
 
-    # nvidia-smi
     if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
-        local gpu_name
+        local gpu_name gpu_count
         gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
-        local gpu_count
         gpu_count=$(nvidia-smi --query-gpu=count --format=csv,noheader | head -1)
         success "nvidia-smi: ${gpu_count}x ${gpu_name}"
     else
-        warn "nvidia-smi not operational (expected after fresh driver install — reboot required)"
+        warn "nvidia-smi not operational (reboot required)"
         (( warnings++ )) || true
     fi
 
-    # nvcc
     if command -v nvcc &>/dev/null; then
         success "nvcc: $(nvcc --version | grep -oP 'release \K[0-9.]+')"
     else
@@ -478,37 +475,21 @@ validate_install() {
         (( warnings++ )) || true
     fi
 
-    # nvidia-dcgm
-    if systemctl is-active --quiet nvidia-dcgm 2>/dev/null; then
-        success "nvidia-dcgm: running"
-    else
-        warn "nvidia-dcgm: not running (expected before reboot)"
-        (( warnings++ )) || true
-    fi
+    systemctl is-active --quiet nvidia-dcgm 2>/dev/null \
+        && success "nvidia-dcgm: running" \
+        || { warn "nvidia-dcgm: not running (expected before reboot)"; (( warnings++ )) || true; }
 
-    # chrony
-    if systemctl is-active --quiet chrony; then
-        success "chrony: running"
-    else
-        warn "chrony: not running"
-        (( warnings++ )) || true
-    fi
+    systemctl is-active --quiet chrony \
+        && success "chrony: running" \
+        || { warn "chrony: not running"; (( warnings++ )) || true; }
 
-    # gpu-burn binary
-    if [[ -f "${HOME}/gpu-burn/gpu_burn" ]]; then
-        success "gpu-burn: built and ready"
-    else
-        warn "gpu-burn: not built (expected if nvcc was missing pre-reboot)"
-        (( warnings++ )) || true
-    fi
+    [[ -f "${HOME}/gpu-burn/gpu_burn" ]] \
+        && success "gpu-burn: built and ready" \
+        || { warn "gpu-burn: not built (reboot first, then re-run)"; (( warnings++ )) || true; }
 
-    # infra repo
-    if [[ -d "${HOME}/infra" ]]; then
-        success "infra repo: present"
-    else
-        warn "infra repo: not found"
-        (( warnings++ )) || true
-    fi
+    [[ -d "${HOME}/infra" ]] \
+        && success "infra repo: present" \
+        || { warn "infra repo: not found"; (( warnings++ )) || true; }
 
     echo ""
     if (( warnings > 0 )); then
@@ -534,7 +515,7 @@ offer_reboot() {
         if [[ "${NON_INTERACTIVE}" == true ]]; then
             info "Non-interactive mode — skipping reboot. Reboot manually to load kernel modules."
         else
-            read -rp "Reboot now to load NVIDIA kernel modules? [Y/n]: " do_reboot
+            read -rp "Reboot now to load NVIDIA kernel modules? [Y/n]: " do_reboot <&3
             if [[ "${do_reboot,,}" != "n" ]]; then
                 info "Rebooting in 5 seconds... (Ctrl+C to cancel)"
                 sleep 5
