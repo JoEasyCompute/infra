@@ -863,26 +863,170 @@ PYEOF
     return $rc
 }
 
+# Thresholds for thermal flagging during burn
+readonly TEMP_WARN=87      # °C — flag as potential issue
+readonly FAN_WARN=100      # % — flag as maxed out
+
+# run_burn_monitor <burn_pid>
+# Polls nvidia-smi every 5s while the burn PID is alive.
+# Tracks per-GPU peak temp, peak fan, throttle events.
+# Writes a formatted summary and sets BURN_THERMAL_RC=1 if any threshold crossed.
+BURN_THERMAL_RC=0
+run_burn_monitor() {
+    local burn_pid="$1"
+    local sample_interval=5
+    local telemetry_file="$BUILD_DIR/_burn_telemetry.csv"
+
+    # Header for the live telemetry log
+    log ""
+    log "  Thermal monitor (sample every ${sample_interval}s):"
+    printf "  %-8s %-4s %-6s %-8s %-7s %-8s %s\n" \
+        "Elapsed" "GPU" "Temp°C" "Power W" "Fan %" "SM MHz" "Throttle" \
+        | tee -a "$LOG_FILE"
+
+    # Per-GPU tracking arrays (indexed by GPU index)
+    declare -A peak_temp peak_fan peak_power throttle_seen
+    local gpu_idx
+    for gpu_idx in $(nvidia-smi --query-gpu=index --format=csv,noheader | tr -d '\r'); do
+        peak_temp[$gpu_idx]=0
+        peak_fan[$gpu_idx]=0
+        peak_power[$gpu_idx]=0
+        throttle_seen[$gpu_idx]="None"
+    done
+
+    local start_time
+    start_time=$(date +%s)
+
+    while kill -0 "$burn_pid" 2>/dev/null; do
+        local now elapsed
+        now=$(date +%s)
+        elapsed=$(( now - start_time ))
+
+        while IFS=, read -r gpu_idx temp power fan clk_sm throttle; do
+            gpu_idx=$(echo "$gpu_idx" | xargs)
+            temp=$(echo "$temp"       | xargs)
+            power=$(echo "$power"     | xargs)
+            fan=$(echo "$fan"         | xargs)
+            clk_sm=$(echo "$clk_sm"   | xargs)
+            throttle=$(echo "$throttle" | xargs)
+
+            printf "  %-8s %-4s %-6s %-8s %-7s %-8s %s\n" \
+                "${elapsed}s" "$gpu_idx" "$temp" "$power" "$fan" "$clk_sm" "$throttle" \
+                | tee -a "$LOG_FILE"
+
+            # Track peaks — strip units (°C, W, %) for numeric comparison
+            local temp_val power_val fan_val
+            temp_val="${temp//[^0-9]/}"
+            power_val="${power//[^0-9.]/}"
+            fan_val="${fan//[^0-9]/}"
+
+            if [ -n "$temp_val" ] && [ "$temp_val" -gt "${peak_temp[$gpu_idx]:-0}" ] 2>/dev/null; then
+                peak_temp[$gpu_idx]=$temp_val
+            fi
+            if [ -n "$fan_val" ] && [ "$fan_val" -gt "${peak_fan[$gpu_idx]:-0}" ] 2>/dev/null; then
+                peak_fan[$gpu_idx]=$fan_val
+            fi
+            if [ "$throttle" != "Not Active" ] && [ "$throttle" != "N/A" ]; then
+                throttle_seen[$gpu_idx]="$throttle"
+            fi
+        done < <(nvidia-smi \
+            --query-gpu=index,temperature.gpu,power.draw,fan.speed,clocks.sm,clocks_throttle_reasons.active \
+            --format=csv,noheader | tr -d '\r')
+
+        sleep "$sample_interval"
+    done
+
+    # Print per-GPU peak summary
+    log ""
+    log "  ── Burn thermal summary ──────────────────────────────────────────"
+    printf "  %-4s %-25s %8s %8s %s\n" \
+        "GPU" "Name" "PeakTemp" "PeakFan" "Issues" | tee -a "$LOG_FILE"
+
+    local gpu_name issues
+    while IFS=, read -r gpu_idx gpu_name; do
+        gpu_idx=$(echo "$gpu_idx"   | xargs)
+        gpu_name=$(echo "$gpu_name" | xargs)
+        issues=""
+
+        local pt="${peak_temp[$gpu_idx]:-0}"
+        local pf="${peak_fan[$gpu_idx]:-0}"
+        local ts="${throttle_seen[$gpu_idx]:-None}"
+
+        [ "$pt" -ge "$TEMP_WARN" ] 2>/dev/null && \
+            issues+="TEMP ${pt}°C >= ${TEMP_WARN}°C (check thermal paste/airflow)  "
+        [ "$pf" -ge "$FAN_WARN" ] 2>/dev/null && \
+            issues+="FAN at ${pf}% (cooling at limit)  "
+        [ "$ts" != "None" ] && \
+            issues+="THROTTLE: $ts"
+
+        [ -z "$issues" ] && issues="OK"
+
+        printf "  %-4s %-25s %8s %8s %s\n" \
+            "$gpu_idx" "$gpu_name" "${pt}°C" "${pf}%" "$issues" | tee -a "$LOG_FILE"
+
+        # Set thermal RC if any GPU crossed a threshold
+        if [[ "$issues" != "OK" ]]; then
+            BURN_THERMAL_RC=1
+        fi
+    done < <(nvidia-smi --query-gpu=index,name --format=csv,noheader | tr -d '\r')
+
+    log "  ─────────────────────────────────────────────────────────────────"
+    if [ "$BURN_THERMAL_RC" -eq 1 ]; then
+        log "  WARNING: One or more GPUs exceeded thermal thresholds during burn."
+        log "           Temp flag: >= ${TEMP_WARN}°C   Fan flag: >= ${FAN_WARN}%"
+        log "           System passed compute test but cooling should be investigated."
+    else
+        log "  All GPUs within thermal limits during burn."
+    fi
+    log ""
+}
+
 test_stress() {
     local label="Sustained Compute Stress"
-    local duration_min
+    local duration_min burn_rc=0
     duration_min=$(echo "scale=1; $BURN_DURATION / 60" | bc)
+    BURN_THERMAL_RC=0
+
+    # Launch the burn tool in the background, monitor thermals alongside it,
+    # then wait for it to finish and collect both the compute RC and thermal RC.
 
     if build_gpu_fryer && [ -f "$BUILD_DIR/gpu-fryer/gpu-fryer" ]; then
         log "  Using gpu-fryer (BF16, ${duration_min} min)"
         RESULTS_STRESS_LABEL="$label / gpu-fryer"
-        "$BUILD_DIR/gpu-fryer/gpu-fryer" --use-bf16 "$BURN_DURATION" 2>&1 | tee -a "$LOG_FILE"
+        "$BUILD_DIR/gpu-fryer/gpu-fryer" --use-bf16 "$BURN_DURATION" \
+            2>&1 | tee -a "$LOG_FILE" &
+        local burn_pid=$!
 
     elif build_gpu_burn && [ -f "$BUILD_DIR/gpu-burn/gpu-burn" ]; then
         log "  Using gpu-burn (FP64, ${duration_min} min)"
         RESULTS_STRESS_LABEL="$label / gpu-burn"
-        "$BUILD_DIR/gpu-burn/gpu-burn" -d -tc "$BURN_DURATION" 2>&1 | tee -a "$LOG_FILE"
+        "$BUILD_DIR/gpu-burn/gpu-burn" -d -tc "$BURN_DURATION" \
+            2>&1 | tee -a "$LOG_FILE" &
+        local burn_pid=$!
 
     else
         log "  gpu-fryer and gpu-burn unavailable — using PyTorch cuBLAS fallback."
         RESULTS_STRESS_LABEL="$label / PyTorch fallback"
-        run_pytorch_stress
+        run_pytorch_stress 2>&1 | tee -a "$LOG_FILE" &
+        local burn_pid=$!
     fi
+
+    # Run thermal monitor alongside the burn; it exits when burn_pid dies
+    run_burn_monitor "$burn_pid"
+
+    # Collect burn tool exit code
+    wait "$burn_pid" 2>/dev/null || burn_rc=$?
+
+    # Fail if compute failed OR if thermal thresholds were crossed
+    if [ "$burn_rc" -ne 0 ]; then
+        log "  ERROR: Burn tool exited with code $burn_rc"
+        return 1
+    fi
+    if [ "$BURN_THERMAL_RC" -ne 0 ]; then
+        log "  Compute: PASS  |  Thermals: WARNING (see summary above)"
+        return 1   # flag as failure so it shows in summary and gets attention
+    fi
+    return 0
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
