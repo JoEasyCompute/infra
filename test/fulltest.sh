@@ -398,31 +398,70 @@ test_ecc() {
 test_pcie() {
     local rc=0
 
-    log "  Checking PCIe link width and generation per GPU..."
+    # PCIe Active State Power Management (ASPM) legitimately drops the link from
+    # Gen3/Gen4 down to Gen1 at idle to save power — this is correct behaviour,
+    # not a fault. nvidia-smi pcie.link.gen.current is an instantaneous read, so
+    # sampling at idle gives a false Gen1 result on any system with ASPM enabled.
+    #
+    # Strategy: always spin up a brief GPU load first to force all links to full
+    # speed, then sample. Width mismatches (x8 vs x16) are hard failures because
+    # lane width never power-gates. Gen mismatches are warnings only, because even
+    # under load some platforms briefly drop before re-negotiating.
+
+    local aspm_policy
+    aspm_policy=$(cat /sys/module/pcie_aspm/parameters/policy 2>/dev/null || echo "unknown")
+    log "  PCIe ASPM policy : $aspm_policy"
+    log "  Spinning up GPU load to force links to full speed before sampling..."
+
+    # Run load on all GPUs for 10 seconds, sample in the middle while it's active
+    python3 - << 'PYEOF' &
+import torch, time
+gpus = list(range(torch.cuda.device_count()))
+if not gpus:
+    import sys; sys.exit(0)
+m = [torch.randn(4096, 4096, device=f"cuda:{g}") for g in gpus]
+end = time.time() + 15
+while time.time() < end:
+    for g, a in enumerate(m):
+        with torch.cuda.device(g): torch.mm(a, a)
+    for g in gpus: torch.cuda.synchronize(g)
+PYEOF
+    local load_pid=$!
+    sleep 5   # let links negotiate up
+
     log ""
+    log "  PCIe link width and generation per GPU (sampled under load):"
     printf "  %-4s %-25s %8s %8s %8s %8s  %s\n" \
         "GPU" "Name" "CurGen" "MaxGen" "CurWidth" "MaxWidth" "Status" \
         | tee -a "$LOG_FILE"
 
+    local any_gen_warn=false any_width_fail=false
     local gpu_idx gpu_name cur_gen max_gen cur_width max_width
     while IFS=, read -r gpu_idx gpu_name cur_gen max_gen cur_width max_width; do
-        gpu_idx=$(echo "$gpu_idx"       | xargs)
-        gpu_name=$(echo "$gpu_name"     | xargs)
-        cur_gen=$(echo "$cur_gen"       | xargs)
-        max_gen=$(echo "$max_gen"       | xargs)
-        cur_width=$(echo "$cur_width"   | xargs)
-        max_width=$(echo "$max_width"   | xargs)
+        gpu_idx=$(echo "$gpu_idx"     | xargs)
+        gpu_name=$(echo "$gpu_name"   | xargs)
+        cur_gen=$(echo "$cur_gen"     | xargs)
+        max_gen=$(echo "$max_gen"     | xargs)
+        cur_width=$(echo "$cur_width" | xargs)
+        max_width=$(echo "$max_width" | xargs)
 
         local status="OK"
-        # Flag if running below max gen or width — could be slot, riser, or hardware fault
+
+        # Gen mismatch: warning only — ASPM or platform policy can legitimately
+        # keep links at Gen1/Gen2 even under load on some motherboards.
         if [ "$cur_gen" != "$max_gen" ] && \
            [ "$cur_gen" != "[N/A]" ] && [ "$max_gen" != "[N/A]" ]; then
-            status="WARN: running Gen${cur_gen} but capable of Gen${max_gen}"
-            rc=1
+            status="WARN: Gen${cur_gen} < Gen${max_gen} (may be BIOS/ASPM — see below)"
+            any_gen_warn=true
+            # Warning, not a hard failure
         fi
+
+        # Width mismatch: hard failure — lane count never power-gates.
+        # x8 when capable of x16 means a physical slot or riser limitation.
         if [ "$cur_width" != "$max_width" ] && \
            [ "$cur_width" != "[N/A]" ] && [ "$max_width" != "[N/A]" ]; then
-            status="WARN: running x${cur_width} but capable of x${max_width}"
+            status="FAIL: x${cur_width} < x${max_width} (physical slot/riser limitation)"
+            any_width_fail=true
             rc=1
         fi
 
@@ -434,11 +473,25 @@ test_pcie() {
         --query-gpu=index,name,pcie.link.gen.current,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max \
         --format=csv,noheader | tr -d '\r')
 
+    # Stop background load
+    kill "$load_pid" 2>/dev/null; wait "$load_pid" 2>/dev/null || true
+
     log ""
-    if [ "$rc" -ne 0 ]; then
-        log "  One or more GPUs are running below their maximum PCIe link speed."
-        log "  Causes: riser cable, slot limitation, BIOS setting, or hardware fault."
-        log "  Check: nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.width.current --format=csv"
+    if [ "$any_gen_warn" = true ]; then
+        log "  NOTE: Generation mismatch detected (warning only — not a failure)."
+        log "  Gen speed can legitimately stay low due to:"
+        log "    • ASPM (power saving) — disable in BIOS or set policy to performance:"
+        log "        sudo sh -c 'echo performance > /sys/module/pcie_aspm/parameters/policy'"
+        log "    • BIOS PCIe speed forced to Gen1/Gen2 — set to Auto or Gen3/Gen4"
+        log "    • 'Above 4G Decoding' disabled in BIOS (required for 8-GPU systems)"
+        log "  If NVBandwidth host<->device numbers look normal, this is not a real issue."
+    fi
+    if [ "$any_width_fail" = true ]; then
+        log "  FAIL: Width mismatch detected — lane count does not power-gate."
+        log "  Likely causes: GPU in x8 physical slot, damaged riser, or shared PCIe lanes."
+    fi
+    if [ "$rc" -eq 0 ] && [ "$any_gen_warn" = false ]; then
+        log "  All PCIe links running at full width and generation."
     fi
 
     return $rc
