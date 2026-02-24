@@ -166,13 +166,51 @@ find_binary() {
 
 install_nccl() {
     if command -v dpkg &>/dev/null; then
-        if ! dpkg -l 2>/dev/null | grep -q libnccl-dev; then
-            echo "  Installing libnccl2 and libnccl-dev..."
-            sudo apt-get update -qq
-            sudo apt-get install -y libnccl2 libnccl-dev
-        else
-            echo "  libnccl-dev already installed."
+        # Derive the major CUDA version from the toolkit (e.g. 12.9 -> "12")
+        local cuda_major
+        cuda_major=$(echo "$CUDA_VERSION" | cut -d. -f1)
+
+        # Check if libnccl is already installed AND matches our CUDA major version.
+        # If the wrong cuda variant is installed (e.g. +cuda13.1 when we have cuda12),
+        # remove it and reinstall the correct one to avoid the
+        # "CUDA driver version is insufficient" runtime mismatch.
+        local installed_nccl
+        installed_nccl=$(dpkg -l 2>/dev/null | awk "/libnccl2 /{print \$3}" | head -1)
+
+        if [ -n "$installed_nccl" ]; then
+            # Extract the cuda suffix from the installed version (e.g. "2.29.3-1+cuda13.1" -> "13")
+            local installed_cuda_major
+            installed_cuda_major=$(echo "$installed_nccl" | grep -oP '\+cuda\K[0-9]+')
+            if [ "$installed_cuda_major" != "$cuda_major" ]; then
+                echo "  WARNING: libnccl2 $installed_nccl is built for CUDA ${installed_cuda_major}.x"
+                echo "           but toolkit is CUDA ${CUDA_VERSION} — reinstalling matching version..."
+                sudo apt-get remove -y libnccl2 libnccl-dev 2>/dev/null || true
+                installed_nccl=""
+            else
+                echo "  libnccl2 $installed_nccl matches CUDA ${cuda_major}.x — OK."
+            fi
         fi
+
+        if [ -z "$installed_nccl" ]; then
+            echo "  Installing libnccl2/libnccl-dev for CUDA ${cuda_major}.x..."
+            sudo apt-get update -qq
+
+            # Try exact cuda version first (e.g. cuda12.9), then fall back to cuda12
+            local exact_ver
+            exact_ver=$(apt-cache madison libnccl2 2>/dev/null                 | grep "+cuda${CUDA_VERSION}" | head -1 | awk '{print $3}')
+            local major_ver
+            major_ver=$(apt-cache madison libnccl2 2>/dev/null                 | grep "+cuda${cuda_major}\." | sort -t. -k2 -rn | head -1 | awk '{print $3}')
+
+            local target_ver="${exact_ver:-$major_ver}"
+            if [ -n "$target_ver" ]; then
+                echo "  Pinning to libnccl2=$target_ver"
+                sudo apt-get install -y "libnccl2=$target_ver" "libnccl-dev=$target_ver"
+            else
+                echo "  WARNING: No cuda${cuda_major}.x NCCL build found — installing latest (may mismatch)."
+                sudo apt-get install -y libnccl2 libnccl-dev
+            fi
+        fi
+
     elif command -v rpm &>/dev/null; then
         if ! rpm -q libnccl-devel &>/dev/null; then
             echo "  Installing libnccl-devel (RHEL/Rocky)..."
@@ -190,18 +228,45 @@ install_nccl_tests() {
     if [ ! -d "$ROOT_DIR/nccl-tests" ]; then
         git clone https://github.com/NVIDIA/nccl-tests.git "$ROOT_DIR/nccl-tests"
     fi
+    # Always rebuild if libnccl was just reinstalled (binary may be stale/mismatched)
     if [ ! -f "$ROOT_DIR/nccl-tests/build/all_reduce_perf" ]; then
+        echo "  Building nccl-tests..."
         cd "$ROOT_DIR/nccl-tests"
         make clean || true
         make -j"$(nproc)" CUDA_HOME="$CUDA_HOME_DIR"
         cd "$ROOT_DIR"
     else
-        echo "  nccl-tests already built."
+        # Verify the existing binary links against the correct libnccl
+        local linked_nccl
+        linked_nccl=$(ldd "$ROOT_DIR/nccl-tests/build/all_reduce_perf" 2>/dev/null             | grep libnccl | awk '{print $3}')
+        local system_nccl="/usr/lib/x86_64-linux-gnu/libnccl.so.2"
+        if [ -n "$linked_nccl" ] && [ "$linked_nccl" != "$system_nccl" ]; then
+            echo "  nccl-tests links against $linked_nccl but system has $system_nccl — rebuilding..."
+            cd "$ROOT_DIR/nccl-tests"
+            make clean || true
+            make -j"$(nproc)" CUDA_HOME="$CUDA_HOME_DIR"
+            cd "$ROOT_DIR"
+        else
+            echo "  nccl-tests already built and libnccl matches."
+        fi
     fi
 }
 
 run_nccl_test() {
-    "$ROOT_DIR/nccl-tests/build/all_reduce_perf" -b 8 -e 1G -f 2 -g "$NUM_GPUS"
+    local perf="$ROOT_DIR/nccl-tests/build/all_reduce_perf"
+
+    # First run normally
+    if "$perf" -b 8 -e 1G -f 2 -g "$NUM_GPUS"; then
+        return 0
+    fi
+
+    # On failure, re-run with NCCL_DEBUG=INFO to capture diagnostic detail
+    echo ""
+    echo "  NCCL test failed — re-running with NCCL_DEBUG=INFO for diagnostics:"
+    echo "  (look for lines starting with NCCL INFO or WARN below)"
+    echo ""
+    NCCL_DEBUG=INFO "$perf" -b 8 -e 32M -f 2 -g "$NUM_GPUS" 2>&1 |         grep -E "^(NCCL|#|ezc|.*error|.*Error|.*WARN|.*fatal)" | head -60
+    return 1
 }
 
 install_nccl_tests
@@ -255,6 +320,20 @@ run_test "CUDA Samples (deviceQuery / p2pBandwidthLatencyTest)" run_cuda_samples
 # ─────────────────────────────────────────────
 
 install_nvbandwidth() {
+    # Ensure cmake is available — it may not be installed on minimal systems
+    if ! command -v cmake &>/dev/null; then
+        echo "  cmake not found — installing..."
+        if command -v apt-get &>/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y cmake
+        elif command -v dnf &>/dev/null; then
+            sudo dnf install -y cmake
+        else
+            echo "ERROR: Cannot install cmake — unknown package manager."
+            return 1
+        fi
+    fi
+
     # Install boost dependency
     if command -v dpkg &>/dev/null; then
         if ! dpkg -l 2>/dev/null | grep -q libboost-program-options-dev; then
@@ -275,29 +354,39 @@ install_nvbandwidth() {
         git clone https://github.com/NVIDIA/nvbandwidth.git "$ROOT_DIR/nvbandwidth"
     fi
 
-    if [ ! -f "$ROOT_DIR/nvbandwidth/nvbandwidth" ]; then
+    NVB_BIN=$(find "$ROOT_DIR/nvbandwidth" -maxdepth 2 -type f -name "nvbandwidth"         ! -name "*.cmake" ! -name "*.cpp" 2>/dev/null | head -1)
+
+    if [ -z "$NVB_BIN" ]; then
+        echo "  Building nvbandwidth..."
         cd "$ROOT_DIR/nvbandwidth"
-        # NVBandwidth builds in-source (cmake .) per upstream docs
         cmake . -DCMAKE_CUDA_COMPILER="$NVCC_PATH"
         make -j"$(nproc)"
         cd "$ROOT_DIR"
+        NVB_BIN=$(find "$ROOT_DIR/nvbandwidth" -maxdepth 2 -type f -name "nvbandwidth"             ! -name "*.cmake" ! -name "*.cpp" 2>/dev/null | head -1)
     else
-        echo "  nvbandwidth already built."
+        echo "  nvbandwidth already built: $NVB_BIN"
+    fi
+
+    if [ -z "$NVB_BIN" ] || [ ! -x "$NVB_BIN" ]; then
+        echo "ERROR: nvbandwidth binary not found after build."
+        return 1
     fi
 }
 
 run_nvbandwidth() {
-    # Run the core bandwidth tests: host<->device and device<->device
-    "$ROOT_DIR/nvbandwidth/nvbandwidth" \
-        -t host_to_device_memcpy_ce \
-           device_to_host_memcpy_ce \
-           device_to_device_memcpy_read_ce \
-           device_to_device_memcpy_write_ce \
-           device_to_device_bidirectional_memcpy_read_ce
+    NVB_BIN=$(find "$ROOT_DIR/nvbandwidth" -maxdepth 2 -type f -name "nvbandwidth"         ! -name "*.cmake" ! -name "*.cpp" 2>/dev/null | head -1)
+
+    if [ -z "$NVB_BIN" ] || [ ! -x "$NVB_BIN" ]; then
+        echo "ERROR: nvbandwidth binary not found — build may have failed."
+        return 1
+    fi
+
+    # Run core bandwidth tests; device-to-device tests are waived on single GPU — expected
+    "$NVB_BIN"         -t host_to_device_memcpy_ce            device_to_host_memcpy_ce            device_to_device_memcpy_read_ce            device_to_device_memcpy_write_ce            device_to_device_bidirectional_memcpy_read_ce
 }
 
-install_nvbandwidth
-run_test "NVBandwidth (GPU Memory Bandwidth)" run_nvbandwidth
+install_nvbandwidth && run_test "NVBandwidth (GPU Memory Bandwidth)" run_nvbandwidth \
+    || { RESULTS_FAIL+=("NVBandwidth (GPU Memory Bandwidth)"); echo "[ FAIL ] NVBandwidth build failed"; }
 
 # ─────────────────────────────────────────────
 # 4. DCGM Diagnostics (optional)
