@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Trap unexpected errors and report line number before exiting
+trap 'echo -e "\n${RED:-\033[0;31m}[ERROR]${NC:-\033[0m}   Script failed at line ${LINENO} — check log: ${LOG_FILE:-/var/log/gpu-node-install/}" >&2' ERR
+
 # ═══════════════════════════════════════════════════════════════
 # base-install.sh — GPU Node Base Installation Script
 # Supports: Ubuntu 22.04 / 24.04 (x86_64)
@@ -312,15 +315,26 @@ confirm_install() {
 install_base_packages() {
     section "Base System Packages"
 
+    # Bootstrap: install prerequisites for add-apt-repository BEFORE calling it.
+    # On a fresh node these may not be present yet — set -e will kill the script
+    # silently if add-apt-repository runs without software-properties-common.
+    info "Bootstrapping apt prerequisites..."
+    sudo apt-get update -q
+    sudo apt-get install -y \
+        software-properties-common \
+        apt-transport-https \
+        ca-certificates \
+        curl \
+        gnupg
+
     info "Adding graphics-drivers PPA..."
     sudo add-apt-repository -y ppa:graphics-drivers/ppa
     sudo apt-get update -q
 
     info "Installing base packages..."
     sudo apt-get install -y \
-        git apt-transport-https ca-certificates curl software-properties-common \
-        cmake build-essential dkms alsa-utils \
-        gcc-11 g++-11 gcc-12 g++-12 gnupg lsb-release \
+        git cmake build-essential dkms alsa-utils \
+        gcc-11 g++-11 gcc-12 g++-12 lsb-release \
         ipmitool jq pciutils iproute2 util-linux dmidecode lshw \
         coreutils chrony nvme-cli bpytop mokutil \
         python3 python3-pip python3-venv
