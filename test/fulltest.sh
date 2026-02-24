@@ -120,6 +120,43 @@ find_binary() {
     find "$1" -type f -name "$2" ! -name "*.cmake" ! -name "*.cpp" 2>/dev/null | head -1
 }
 
+# decode_throttle <hex_bitmask>
+# Translates nvidia-smi clocks_throttle_reasons.active hex bitmask into
+# human-readable labels, returning only the bits that represent real problems.
+#
+# Bitmask reference:
+#   0x001  gpu_idle                  — normal idle clock-down, ignore
+#   0x002  applications_clocks       — app clock setting, ignore
+#   0x004  sw_power_cap              — driver idle power saving, ignore
+#   0x008  hw_slowdown               — REAL: HW thermal or power event
+#   0x010  sync_boost                — normal multi-GPU sync, ignore
+#   0x020  sw_thermal_slowdown       — REAL: SW thermal limit hit
+#   0x040  hw_power_brake_slowdown   — REAL: external power brake signal
+#   0x080  display_clocks            — normal display setting, ignore
+#
+# Prints "Not Active" if no problem bits set, or a comma-separated list of
+# problem names. Exits 1 if any problem bits are set.
+decode_throttle() {
+    local raw="$1"
+    # Strip leading 0x and parse as hex
+    local val
+    val=$(printf '%d' "$raw" 2>/dev/null) || { echo "unknown"; return 0; }
+
+    local problems=()
+    (( val & 0x008 )) && problems+=("HW_Slowdown")
+    (( val & 0x020 )) && problems+=("SW_Thermal")
+    (( val & 0x040 )) && problems+=("HW_PowerBrake")
+
+    if [ "${#problems[@]}" -eq 0 ]; then
+        echo "Not Active"
+        return 0
+    else
+        local IFS=','
+        echo "${problems[*]}"
+        return 1
+    fi
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Result tracking
 # ─────────────────────────────────────────────────────────────────────────────
@@ -261,8 +298,12 @@ test_preflight() {
         clk_mem=$(echo "$clk_mem" | xargs)
         fan=$(echo "$fan"       | xargs)
         throttle=$(echo "$throttle" | xargs)
+        # Decode raw hex bitmask — only flag bits that represent real problems
+        # (0x4 sw_power_cap at idle is normal clock-down, not a fault)
+        local throttle_decoded
+        throttle_decoded=$(decode_throttle "$throttle")
         printf "  %-4s %-25s %6s %7s %7s %7s %5s  %s\n" \
-            "$gpu_idx" "$gpu_name" "$temp" "$power" "$clk_sm" "$clk_mem" "$fan" "$throttle" \
+            "$gpu_idx" "$gpu_name" "$temp" "$power" "$clk_sm" "$clk_mem" "$fan" "$throttle_decoded" \
             | tee -a "$LOG_FILE"
         # Warn if idle temp is already above 60°C — suggests cooling problem
         local temp_val="${temp//[^0-9]/}"
@@ -270,9 +311,9 @@ test_preflight() {
             log "  WARNING: GPU $gpu_idx idle temp ${temp}°C is high — check cooling"
             any_hot=true
         fi
-        # Warn if any throttle reason is active at idle
-        if [ "$throttle" != "Not Active" ] && [ "$throttle" != "N/A" ]; then
-            log "  WARNING: GPU $gpu_idx throttle active at idle: $throttle"
+        # Only flag throttle reasons that indicate real hardware problems
+        if [ "$throttle_decoded" != "Not Active" ] && [ "$throttle_decoded" != "unknown" ]; then
+            log "  WARNING: GPU $gpu_idx has active throttle at idle: $throttle_decoded"
             rc=1
         fi
     done < <(nvidia-smi \
@@ -466,10 +507,12 @@ PYEOF
             clk_sm=$(echo "$clk_sm"   | xargs)
             clk_mem=$(echo "$clk_mem" | xargs)
             throttle=$(echo "$throttle" | xargs)
+            local throttle_decoded
+            throttle_decoded=$(decode_throttle "$throttle")
             printf "  %-6s %-4s %-10s %-10s %s\n" \
-                "${elapsed}s" "$gpu_idx" "$clk_sm" "$clk_mem" "$throttle" \
+                "${elapsed}s" "$gpu_idx" "$clk_sm" "$clk_mem" "$throttle_decoded" \
                 | tee -a "$LOG_FILE"
-            if [ "$throttle" != "Not Active" ] && [ "$throttle" != "N/A" ]; then
+            if [ "$throttle_decoded" != "Not Active" ] && [ "$throttle_decoded" != "unknown" ]; then
                 any_throttle=true
             fi
         done < <(nvidia-smi \
@@ -909,9 +952,11 @@ run_burn_monitor() {
             fan=$(echo "$fan"         | xargs)
             clk_sm=$(echo "$clk_sm"   | xargs)
             throttle=$(echo "$throttle" | xargs)
+            local throttle_decoded
+            throttle_decoded=$(decode_throttle "$throttle")
 
             printf "  %-8s %-4s %-6s %-8s %-7s %-8s %s\n" \
-                "${elapsed}s" "$gpu_idx" "$temp" "$power" "$fan" "$clk_sm" "$throttle" \
+                "${elapsed}s" "$gpu_idx" "$temp" "$power" "$fan" "$clk_sm" "$throttle_decoded" \
                 | tee -a "$LOG_FILE"
 
             # Track peaks — strip units (°C, W, %) for numeric comparison
@@ -926,8 +971,8 @@ run_burn_monitor() {
             if [ -n "$fan_val" ] && [ "$fan_val" -gt "${peak_fan[$gpu_idx]:-0}" ] 2>/dev/null; then
                 peak_fan[$gpu_idx]=$fan_val
             fi
-            if [ "$throttle" != "Not Active" ] && [ "$throttle" != "N/A" ]; then
-                throttle_seen[$gpu_idx]="$throttle"
+            if [ "$throttle_decoded" != "Not Active" ] && [ "$throttle_decoded" != "unknown" ]; then
+                throttle_seen[$gpu_idx]="$throttle_decoded"
             fi
         done < <(nvidia-smi \
             --query-gpu=index,temperature.gpu,power.draw,fan.speed,clocks.sm,clocks_throttle_reasons.active \
