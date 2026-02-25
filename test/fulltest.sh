@@ -58,7 +58,10 @@ RESULTS_STRESS_LABEL="Sustained Compute Stress"
 # ─────────────────────────────────────────────────────────────────────────────
 
 log() { echo "$@" | tee -a "$LOG_FILE"; }
-log_run() { "$@" 2>&1 | tee -a "$LOG_FILE"; return "${PIPESTATUS[0]}"; }
+# log_run: execute a function, letting it write to stdout (and log via log()/tee calls
+# inside it). We do NOT wrap with tee here — test functions handle their own output.
+# This prevents double-writing when a function uses log() or explicit tee -a internally.
+log_run() { "$@"; return $?; }
 
 # Run a command inside a directory in a subshell — no cd leakage on failure
 in_dir() {
