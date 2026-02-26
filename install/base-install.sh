@@ -294,7 +294,7 @@ install_base_packages() {
         git cmake build-essential dkms alsa-utils \
         gcc-11 g++-11 gcc-12 g++-12 lsb-release \
         ipmitool jq pciutils iproute2 util-linux dmidecode lshw \
-        coreutils chrony nvme-cli smartmontools bpytop mokutil \
+        coreutils chrony nvme-cli smartmontools fio ioping bpytop mokutil \
         python3 python3-pip python3-venv \
         || error "Base package install failed"
 
