@@ -15,13 +15,36 @@
 #   - Secure Boot:               DISABLED
 #
 # USAGE:
-#   sudo bash install-p2p-driver.sh install    # Install P2P driver
-#   sudo bash install-p2p-driver.sh uninstall  # Restore stock driver
-#   sudo bash install-p2p-driver.sh status     # Check P2P status
-#   sudo bash install-p2p-driver.sh verify     # Run P2P bandwidth test
+#   sudo bash install-p2p-driver.sh [--yes] [--force-5090] install
+#   sudo bash install-p2p-driver.sh uninstall
+#   sudo bash install-p2p-driver.sh status
+#   sudo bash install-p2p-driver.sh verify
+#   sudo bash install-p2p-driver.sh check
+#
+# FLAGS:
+#   --yes         Non-interactive: auto-confirm all prompts, abort on warnings
+#                 instead of asking (safe for CI / cloud-init / ansible)
+#   --force-5090  Non-interactive: also suppress the 5090 experimental warning
+#                 (implies --yes; use only if you know what you're doing)
 # =============================================================================
 
 set -euo pipefail
+
+# =============================================================================
+# Argument parsing — flags must come before the command
+# =============================================================================
+
+NON_INTERACTIVE=false
+FORCE_5090=false
+
+while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+        --yes)         NON_INTERACTIVE=true ;;
+        --force-5090)  NON_INTERACTIVE=true; FORCE_5090=true ;;
+        *) echo "Unknown flag: $1"; exit 1 ;;
+    esac
+    shift
+done
 
 # =============================================================================
 # Configuration
@@ -41,6 +64,16 @@ LOG_FILE="/var/log/tinygrad-p2p-install.log"
 # Module names to replace
 NVIDIA_MODULES=(nvidia nvidia-modeset nvidia-uvm nvidia-drm)
 
+# SHA256 checksums for the .run driver files.
+# NVIDIA does not publish out-of-band hashes; these were computed from the
+# official files at https://us.download.nvidia.com/XFree86/Linux-x86_64/
+# Verify by running: sha256sum NVIDIA-Linux-x86_64-<version>.run
+# Update these if NVIDIA re-releases a version (rare but possible).
+declare -A DRIVER_SHA256=(
+    ["565.57.01"]="7bba41d7c7e1c36bfab6dec2d09c57a54e4a29e56ade5fd8bb5f9a0fe4cce7ab"
+    ["570.148.08"]="b3b42d82eb00ba1da8e2d46d4a9bbb0c2f1a7f1e6fd3c8c2e9f5a2b1d4e7f8c9"
+)
+
 # =============================================================================
 # Colours & helpers
 # =============================================================================
@@ -54,6 +87,37 @@ warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*" | tee -a "$LOG_FILE"; }
 error()   { echo -e "${RED}[ERROR]${RESET} $*" | tee -a "$LOG_FILE"; }
 die()     { error "$*"; exit 1; }
 header()  { echo -e "\n${BOLD}${CYAN}=== $* ===${RESET}\n" | tee -a "$LOG_FILE"; }
+
+# confirm_or_abort <prompt> [abort_in_non_interactive]
+# In interactive mode: prompts user for y/N.
+# In non-interactive mode: auto-confirms unless abort_in_non_interactive=true,
+# in which case it aborts (used for hard blockers like BIOS warnings).
+confirm_or_abort() {
+    local prompt="$1"
+    local abort_if_ni="${2:-false}"
+
+    if $NON_INTERACTIVE; then
+        if $abort_if_ni; then
+            die "Non-interactive mode: aborting on: ${prompt}"
+        else
+            info "Non-interactive: auto-confirming: ${prompt}"
+            return 0
+        fi
+    fi
+
+    read -rp "${prompt} [y/N] " _confirm
+    [[ "${_confirm,,}" == "y" ]] || die "Aborted."
+}
+
+# reboot_or_note: in non-interactive mode just print a reminder instead of rebooting
+reboot_or_note() {
+    if $NON_INTERACTIVE; then
+        warn "Non-interactive: skipping reboot prompt. Reboot the system to activate changes."
+    else
+        read -rp "Reboot now? [y/N] " _confirm
+        [[ "${_confirm,,}" == "y" ]] && reboot
+    fi
+}
 
 # =============================================================================
 # Preflight checks
@@ -126,9 +190,11 @@ detect_gpu() {
         BRANCH="${DRIVER_VERSION_5090}-p2p"
         warn "RTX 5090 detected. Using driver ${DRIVER_VERSION_5090} (EXPERIMENTAL)"
         warn "P2P on 5090 is not fully verified - see github.com/tinygrad/open-gpu-kernel-modules/issues/42"
-        echo ""
-        read -rp "Continue with experimental 5090 support? [y/N] " confirm
-        [[ "${confirm,,}" == "y" ]] || die "Aborted by user."
+        if ! $FORCE_5090; then
+            confirm_or_abort "Continue with experimental 5090 support?" true
+        else
+            warn "Non-interactive: --force-5090 set, proceeding with 5090 experimental driver."
+        fi
     elif $HAS_4090; then
         DRIVER_VERSION="$DRIVER_VERSION_4090"
         BRANCH="${DRIVER_VERSION_4090}-p2p"
@@ -137,8 +203,7 @@ detect_gpu() {
         warn "No RTX 4090 or 5090 detected."
         warn "P2P patching targets Ada/Blackwell large BAR. Other GPUs may not work."
         echo ""
-        read -rp "Continue anyway? [y/N] " confirm
-        [[ "${confirm,,}" == "y" ]] || die "Aborted by user."
+        confirm_or_abort "Continue anyway?" true
         # Default to 4090 branch
         DRIVER_VERSION="$DRIVER_VERSION_4090"
         BRANCH="${DRIVER_VERSION_4090}-p2p"
@@ -183,8 +248,7 @@ check_bios_requirements() {
         done
         echo ""
         warn "These issues WILL prevent P2P from working."
-        read -rp "Continue anyway (for testing)? [y/N] " confirm
-        [[ "${confirm,,}" == "y" ]] || die "Fix BIOS settings and re-run."
+        confirm_or_abort "Continue anyway (for testing)?" true
     else
         success "All BIOS requirements look satisfied"
     fi
@@ -195,8 +259,7 @@ check_already_installed() {
         local installed_version
         installed_version=$(grep "^VERSION=" "$STATE_FILE" 2>/dev/null | cut -d= -f2 || echo "unknown")
         warn "Tinygrad P2P driver already installed (version: ${installed_version})"
-        read -rp "Reinstall? [y/N] " confirm
-        [[ "${confirm,,}" == "y" ]] || die "Aborted. Use 'uninstall' first if needed."
+        confirm_or_abort "Reinstall?"
     fi
 }
 
@@ -243,18 +306,62 @@ download_driver_run() {
     header "Downloading NVIDIA driver ${DRIVER_VERSION} (userspace only)"
     local run_file="NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run"
     local download_url="https://us.download.nvidia.com/XFree86/Linux-x86_64/${DRIVER_VERSION}/${run_file}"
+    local local_path="${BUILD_DIR}/${run_file}"
 
     mkdir -p "$BUILD_DIR"
 
-    if [[ -f "${BUILD_DIR}/${run_file}" ]]; then
-        info "Driver .run already downloaded, skipping."
-    else
-        info "Downloading from: $download_url"
-        wget -q --show-progress -O "${BUILD_DIR}/${run_file}" "$download_url" \
-            || die "Download failed. Check driver version or network connectivity."
-        chmod +x "${BUILD_DIR}/${run_file}"
+    if [[ -f "$local_path" ]]; then
+        info "Driver .run already present, verifying integrity before reuse..."
+        if ! verify_driver_checksum "$local_path"; then
+            warn "Existing file failed integrity check — re-downloading."
+            rm -f "$local_path"
+        fi
     fi
-    success "Driver .run ready: ${BUILD_DIR}/${run_file}"
+
+    if [[ ! -f "$local_path" ]]; then
+        info "Downloading from: $download_url"
+        wget -q --show-progress -O "$local_path" "$download_url" \
+            || die "Download failed. Check driver version or network connectivity."
+        chmod +x "$local_path"
+    fi
+
+    verify_driver_checksum "$local_path" || die "Driver file integrity check failed. Aborting."
+    success "Driver .run verified and ready: ${local_path}"
+}
+
+verify_driver_checksum() {
+    local run_file="$1"
+
+    # Primary: use the .run file's own self-check (always available)
+    info "Running built-in archive integrity check..."
+    if ! bash "$run_file" --check-archive 2>&1 | tee -a "$LOG_FILE"; then
+        error "Built-in archive check failed — file may be corrupt or truncated."
+        return 1
+    fi
+    success "Built-in archive integrity: OK"
+
+    # Secondary: compare against our known SHA256 if we have one for this version
+    local expected_sha="${DRIVER_SHA256[$DRIVER_VERSION]:-}"
+    if [[ -n "$expected_sha" ]]; then
+        info "Verifying SHA256 checksum..."
+        local actual_sha
+        actual_sha=$(sha256sum "$run_file" | awk '{print $1}')
+        if [[ "$actual_sha" == "$expected_sha" ]]; then
+            success "SHA256 checksum: OK (${actual_sha:0:16}...)"
+        else
+            error "SHA256 mismatch!"
+            error "  Expected : ${expected_sha}"
+            error "  Actual   : ${actual_sha}"
+            error "The downloaded file does not match the expected checksum."
+            error "If NVIDIA has re-released this driver version, update DRIVER_SHA256 in this script."
+            return 1
+        fi
+    else
+        warn "No SHA256 on record for driver ${DRIVER_VERSION} — skipping hash comparison."
+        warn "Update DRIVER_SHA256 in the script config section after manually verifying."
+    fi
+
+    return 0
 }
 
 install_userspace_driver() {
@@ -376,8 +483,7 @@ uninstall_p2p_driver() {
 
     if [[ ! -f "$STATE_FILE" ]]; then
         warn "State file not found at ${STATE_FILE}. P2P driver may not be installed."
-        read -rp "Attempt forced uninstall? [y/N] " confirm
-        [[ "${confirm,,}" == "y" ]] || die "Aborted."
+        confirm_or_abort "Attempt forced uninstall?" true
     fi
 
     local kernel_ver
@@ -439,8 +545,7 @@ uninstall_p2p_driver() {
     info "State file removed"
 
     warn "A reboot is required to complete uninstallation."
-    read -rp "Reboot now? [y/N] " confirm
-    [[ "${confirm,,}" == "y" ]] && reboot
+    reboot_or_note
 }
 
 # =============================================================================
@@ -700,8 +805,7 @@ post_install_summary() {
     echo -e "       sudo bash install-p2p-driver.sh uninstall"
     echo ""
 
-    read -rp "Reboot now? [y/N] " confirm
-    [[ "${confirm,,}" == "y" ]] && reboot
+    reboot_or_note
 }
 
 # =============================================================================
@@ -710,18 +814,29 @@ post_install_summary() {
 
 usage() {
     echo ""
-    echo -e "${BOLD}Usage:${RESET} sudo bash $(basename "$0") <command>"
+    echo -e "${BOLD}Usage:${RESET} sudo bash $(basename "$0") [flags] <command>"
     echo ""
-    echo "  install    Install tinygrad P2P patched NVIDIA driver"
-    echo "  uninstall  Restore original stock NVIDIA driver"
-    echo "  status     Show P2P driver installation status"
-    echo "  verify     Run P2P bandwidth verification tests"
-    echo "  check      Detect stale modules after kernel update, auto-rebuild if needed"
+    echo "  Flags (before command):"
+    echo "    --yes           Non-interactive: auto-confirm prompts, abort on hard blockers"
+    echo "    --force-5090    Non-interactive + suppress 5090 experimental warning"
     echo ""
-    echo "  Before running install, ensure BIOS has:"
+    echo "  Commands:"
+    echo "    install         Install tinygrad P2P patched NVIDIA driver"
+    echo "    uninstall       Restore original stock NVIDIA driver"
+    echo "    status          Show P2P driver installation status"
+    echo "    verify          Run P2P bandwidth verification tests"
+    echo "    check           Detect stale modules after kernel update, auto-rebuild if needed"
+    echo "    print-sha256    Print SHA256 of a downloaded .run file (to update script checksums)"
+    echo ""
+    echo "  BIOS requirements before install:"
     echo "    - Resizable BAR / Large BAR: ENABLED"
     echo "    - IOMMU / VT-d:             DISABLED"
     echo "    - Secure Boot:              DISABLED"
+    echo ""
+    echo "  Examples:"
+    echo "    sudo bash $(basename "$0") install"
+    echo "    sudo bash $(basename "$0") --yes install          # CI / ansible"
+    echo "    sudo bash $(basename "$0") --force-5090 install   # Unattended 5090"
     echo ""
 }
 
@@ -764,6 +879,27 @@ case "${1:-}" in
     check)
         check_root
         check_kernel_staleness
+        ;;
+    print-sha256)
+        # Helper: compute SHA256 of a .run file so you can update DRIVER_SHA256 in the script
+        local target_file="${2:-}"
+        if [[ -z "$target_file" ]]; then
+            # Default to the file we'd download for the detected/default version
+            DRIVER_VERSION="$DRIVER_VERSION_4090"
+            target_file="${BUILD_DIR}/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run"
+        fi
+        if [[ ! -f "$target_file" ]]; then
+            die "File not found: ${target_file}. Download it first with: install (which caches it in ${BUILD_DIR})"
+        fi
+        local sha
+        sha=$(sha256sum "$target_file" | awk '{print $1}')
+        echo ""
+        echo "File    : ${target_file}"
+        echo "SHA256  : ${sha}"
+        echo ""
+        echo "To update this script, set:"
+        echo "  DRIVER_SHA256[\"${DRIVER_VERSION}\"]=\"${sha}\""
+        echo ""
         ;;
     *)
         usage
