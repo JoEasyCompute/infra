@@ -25,6 +25,8 @@ header()  { echo -e "\n${BOLD}${CYAN}==> $*${RESET}" | tee -a "${LOG_FILE:-/tmp/
 NON_INTERACTIVE=false
 FORCE_DISK=""    # --disk /dev/sdX  — override disk selection
 FORCE_VG=""      # --vg <vgname>   — override VG selection
+UNINSTALL=false
+WITH_COMPOSE=false
 
 usage() {
     cat <<EOF
@@ -35,13 +37,17 @@ Options:
                         free VG, then fall back to root partition with a warning
   --disk /dev/sdX       Force use of a specific disk (non-interactive safe)
   --vg <vgname>         Force use of a specific LVM VG (non-interactive safe)
+  --uninstall           Remove Docker, NVIDIA toolkit, Docker Compose, and undo
+                        volume mounts created by this script
+  --with-compose        Also install Docker Compose v2 (plugin)
   -h, --help            Show this help
 
 Examples:
-  sudo $0                          # interactive (default)
-  sudo $0 --non-interactive        # fully automated, best-effort selection
-  sudo $0 --non-interactive --vg ubuntu-vg
-  sudo $0 --disk /dev/sdb
+  sudo $0                                   # interactive install
+  sudo $0 --non-interactive                 # fully automated
+  sudo $0 --non-interactive --vg ubuntu-vg  # automated, specific VG
+  sudo $0 --with-compose                    # install with Compose
+  sudo $0 --uninstall                       # clean removal
 EOF
     exit 0
 }
@@ -49,8 +55,10 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --non-interactive) NON_INTERACTIVE=true ;;
-        --disk) FORCE_DISK="$2"; shift ;;
-        --vg)   FORCE_VG="$2";   shift ;;
+        --disk)         FORCE_DISK="$2"; shift ;;
+        --vg)           FORCE_VG="$2";   shift ;;
+        --uninstall)    UNINSTALL=true ;;
+        --with-compose) WITH_COMPOSE=true ;;
         -h|--help) usage ;;
         *) error "Unknown argument: $1"; usage ;;
     esac
@@ -76,6 +84,13 @@ LVM_USE_PCT=80          # % of free VG space to allocate
 MIN_ROOT_FREE_GB=10     # warn if root will drop below this after install
 MIN_DOCKER_VOL_GB=50    # warn if docker volume is smaller than this
 LOG_FILE="/var/log/docker-install.log"
+DAEMON_JSON="/etc/docker/daemon.json"
+COMPOSE_VERSION="v2.27.1"   # Docker Compose plugin version to install
+
+# -----------------------------------------------------------------------------
+# ERR trap — log failure line and hint before exit
+# -----------------------------------------------------------------------------
+trap 'error "Script failed at line ${LINENO} — check ${LOG_FILE} for details"' ERR
 
 # -----------------------------------------------------------------------------
 # 1. PREFLIGHT CHECKS
@@ -93,6 +108,68 @@ mkdir -p "$(dirname "$LOG_FILE")"
 echo "===== docker-install.sh started at $(date) =====" >> "$LOG_FILE"
 [[ "$NON_INTERACTIVE" == true ]] && info "Running in non-interactive mode"
 success "Running as root"
+
+# -----------------------------------------------------------------------------
+# UNINSTALL MODE
+# -----------------------------------------------------------------------------
+if [[ "$UNINSTALL" == true ]]; then
+    header "Uninstall mode"
+    warn "This will remove Docker CE, NVIDIA Container Toolkit, Docker Compose,"
+    warn "and any volume mounts created by this script under ${DOCKER_MOUNT}."
+    warn "Container images, volumes, and data under ${DOCKER_MOUNT} will be DESTROYED."
+    confirm "Proceed with full uninstall?" || { info "Aborted."; exit 0; }
+
+    # Stop and disable services
+    for svc in docker containerd; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            info "Stopping ${svc}..."
+            systemctl stop "$svc" || true
+            systemctl disable "$svc" || true
+        fi
+    done
+
+    # Remove packages
+    info "Removing Docker packages..."
+    apt-get purge -y docker-ce docker-ce-cli containerd.io \
+        docker-buildx-plugin docker-compose-plugin 2>/dev/null || true
+
+    info "Removing NVIDIA Container Toolkit..."
+    apt-get purge -y nvidia-container-toolkit nvidia-container-runtime \
+        nvidia-docker2 2>/dev/null || true
+
+    apt-get autoremove -y 2>/dev/null || true
+
+    # Remove APT repos and keys
+    rm -f /etc/apt/sources.list.d/docker.list \
+          /etc/apt/sources.list.d/nvidia-container-toolkit.list \
+          /etc/apt/keyrings/docker.gpg \
+          /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    apt-get update -qq
+
+    # Remove daemon config
+    rm -f "${DAEMON_JSON}"
+
+    # Remove Docker Compose binary if manually installed
+    rm -f /usr/local/lib/docker/cli-plugins/docker-compose
+
+    # Unmount and clean up Docker volume if it's a separate mount
+    if mountpoint -q "${DOCKER_MOUNT}" 2>/dev/null; then
+        warn "Unmounting ${DOCKER_MOUNT}..."
+        umount "${DOCKER_MOUNT}" || true
+        # Remove fstab entry for this mount point
+        sed -i "\|${DOCKER_MOUNT}|d" /etc/fstab
+        info "Removed fstab entry for ${DOCKER_MOUNT}"
+        warn "The underlying disk/LV was NOT wiped — remove manually if needed"
+    fi
+
+    # Remove leftover Docker directories
+    rm -rf /var/lib/docker /var/lib/containerd /etc/docker
+    rm -f /etc/modprobe.d/blacklist-nouveau.conf
+
+    # Remove docker group membership note (group itself left as harmless)
+    success "Uninstall complete — a reboot is recommended"
+    exit 0
+fi
 
 # Ubuntu only
 if ! grep -qi ubuntu /etc/os-release 2>/dev/null; then
@@ -409,6 +486,88 @@ else
 fi
 
 # -----------------------------------------------------------------------------
+# 5a. CONFIGURE DOCKER DAEMON
+# -----------------------------------------------------------------------------
+header "Configuring Docker daemon"
+
+# Determine storage driver — overlay2 is standard, but check for btrfs/zfs
+STORAGE_DRIVER="overlay2"
+if [[ -d "${DOCKER_MOUNT}" ]]; then
+    fs_type=$(df -T "${DOCKER_MOUNT}" | awk 'NR==2{print $2}')
+    case "$fs_type" in
+        btrfs) STORAGE_DRIVER="btrfs" ;;
+        zfs)   STORAGE_DRIVER="zfs" ;;
+        *)     STORAGE_DRIVER="overlay2" ;;
+    esac
+fi
+info "Storage driver: ${STORAGE_DRIVER}"
+
+mkdir -p /etc/docker
+if [[ -f "${DAEMON_JSON}" ]]; then
+    warn "${DAEMON_JSON} already exists — backing up to ${DAEMON_JSON}.bak"
+    cp "${DAEMON_JSON}" "${DAEMON_JSON}.bak"
+fi
+
+# Build daemon.json via Python to guarantee valid JSON regardless of runtime
+python3 - <<PYEOF
+import json
+cfg = {
+    "log-driver": "json-file",
+    "log-opts": {"max-size": "100m", "max-file": "3"},
+    "storage-driver": "${STORAGE_DRIVER}",
+    "data-root": "${DOCKER_MOUNT}"
+}
+# Only set default-runtime if driver is already present
+import subprocess, shutil
+if shutil.which("nvidia-smi"):
+    try:
+        subprocess.check_call(["nvidia-smi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cfg["default-runtime"] = "nvidia"
+    except subprocess.CalledProcessError:
+        pass
+with open("${DAEMON_JSON}", "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+PYEOF
+
+success "daemon.json written"
+
+systemctl restart docker
+success "Docker daemon configured: log rotation (100m×3), storage=${STORAGE_DRIVER}"
+
+# -----------------------------------------------------------------------------
+# 5b. INSTALL DOCKER COMPOSE (optional)
+# -----------------------------------------------------------------------------
+if [[ "$WITH_COMPOSE" == true ]]; then
+    header "Installing Docker Compose ${COMPOSE_VERSION}"
+
+    COMPOSE_DIR="/usr/local/lib/docker/cli-plugins"
+    COMPOSE_BIN="${COMPOSE_DIR}/docker-compose"
+    COMPOSE_ARCH=$(dpkg --print-architecture)
+
+    # Map dpkg arch to GitHub release arch naming
+    case "$COMPOSE_ARCH" in
+        amd64)   COMPOSE_ARCH="x86_64" ;;
+        arm64)   COMPOSE_ARCH="aarch64" ;;
+        armhf)   COMPOSE_ARCH="armv7" ;;
+    esac
+
+    COMPOSE_URL="https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${COMPOSE_ARCH}"
+
+    mkdir -p "${COMPOSE_DIR}"
+    info "Downloading Docker Compose from ${COMPOSE_URL}..."
+    curl -fsSL "${COMPOSE_URL}" -o "${COMPOSE_BIN}"
+    chmod +x "${COMPOSE_BIN}"
+
+    # Verify
+    if docker compose version &>/dev/null; then
+        success "Docker Compose installed: $(docker compose version)"
+    else
+        warn "Docker Compose binary installed but 'docker compose version' failed — check ${COMPOSE_BIN}"
+    fi
+fi
+
+# -----------------------------------------------------------------------------
 # 6. INSTALL NVIDIA CONTAINER TOOLKIT
 # -----------------------------------------------------------------------------
 header "Installing NVIDIA Container Toolkit"
@@ -448,8 +607,21 @@ if [[ "$SKIP_NVIDIA" == false ]]; then
 
     info "Configuring NVIDIA runtime for Docker..."
     nvidia-ctk runtime configure --runtime=docker
-    systemctl restart docker
 
+    # Also ensure default-runtime is nvidia in daemon.json now that toolkit is present
+    if command -v python3 &>/dev/null && [[ -f "${DAEMON_JSON}" ]]; then
+        python3 - <<'PYEOF'
+import json, sys
+with open('/etc/docker/daemon.json', 'r') as f:
+    cfg = json.load(f)
+cfg['default-runtime'] = 'nvidia'
+with open('/etc/docker/daemon.json', 'w') as f:
+    json.dump(cfg, f, indent=2)
+PYEOF
+        info "Set default-runtime=nvidia in ${DAEMON_JSON}"
+    fi
+
+    systemctl restart docker
     success "NVIDIA Container Toolkit installed"
 fi
 
@@ -487,6 +659,15 @@ else
     warn "nvidia-ctk not found in PATH — check installation"
 fi
 
+if [[ "$WITH_COMPOSE" == true ]]; then
+    info "Checking Docker Compose..."
+    if docker compose version &>/dev/null; then
+        success "docker compose: $(docker compose version)"
+    else
+        warn "Docker Compose check failed"
+    fi
+fi
+
 # -----------------------------------------------------------------------------
 # 9. SUMMARY
 # -----------------------------------------------------------------------------
@@ -495,6 +676,14 @@ header "Installation Summary"
 echo
 echo -e "${BOLD}Docker:${RESET}"
 docker version --format '  Client: {{.Client.Version}}  |  Server: {{.Server.Engine.Version}}' 2>/dev/null || true
+
+if [[ "$WITH_COMPOSE" == true ]]; then
+    echo -e "${BOLD}Docker Compose:${RESET}"
+    docker compose version 2>/dev/null | sed 's/^/  /' || echo "  (not available)"
+fi
+
+echo -e "${BOLD}Daemon config (${DAEMON_JSON}):${RESET}"
+cat "${DAEMON_JSON}" 2>/dev/null | sed 's/^/  /' || echo "  (not found)"
 
 echo -e "${BOLD}Storage layout:${RESET}"
 df -h "${DOCKER_MOUNT}" / | awk 'NR==1{print "  "$0} NR>1{print "  "$0}'

@@ -4,25 +4,21 @@
 # base-install.sh — GPU Node Base Installation Script
 # Supports: Ubuntu 22.04 / 24.04 (x86_64)
 # Installs: NVIDIA drivers, CUDA toolkit, cuDNN, DCGM, gpu-burn
-# Version:  1.6 (2026-02-24)
+# Version:  1.7 (2026-02-27)
 # ═══════════════════════════════════════════════════════════════
 
-# No set -e — we use explicit error checking so nothing dies silently.
+# No set -e — explicit error checking on every critical step.
 # set -u catches unbound variables. set -o pipefail catches pipe failures.
 set -uo pipefail
 
 # ─── Logging ──────────────────────────────────────────────────
-# Simple approach: tee to file, keep stdin untouched.
-# We don't redirect stdin at all — read prompts work normally.
 LOG_DIR="/var/log/gpu-node-install"
 sudo mkdir -p "${LOG_DIR}" && sudo chmod 777 "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
-
-# Only redirect stdout/stderr — stdin is left alone
 exec > >(tee -a "${LOG_FILE}") 2> >(tee -a "${LOG_FILE}" >&2)
 
 echo "════════════════════════════════════════════════════════"
-echo " GPU Node Installation Script  (v1.6 — 2026-02-24)"
+echo " GPU Node Installation Script  (v1.7 — 2026-02-27)"
 echo " Log: ${LOG_FILE}"
 echo " Started: $(date)"
 echo "════════════════════════════════════════════════════════"
@@ -41,6 +37,7 @@ section() { echo -e "\n${BOLD}${CYAN}── $* ──${NC}"; }
 DRIVER_VERSION=""
 CUDA_VERSION=""
 NON_INTERACTIVE=false
+UNINSTALL=false
 
 usage() {
     cat <<EOF
@@ -50,34 +47,29 @@ Options:
   --driver  <575|580|590>    NVIDIA driver version (default: interactive)
   --cuda    <12-9|13>        CUDA toolkit version  (default: interactive)
   --yes                      Non-interactive mode, use defaults (580 + 12-9)
+  --uninstall                Full clean removal — restores system to post-OS-install state
   -h, --help                 Show this help
 
 Examples:
-  $(basename "$0")                          # Interactive mode
-  $(basename "$0") --driver 580 --cuda 12-9 # Explicit versions
-  $(basename "$0") --yes                    # Non-interactive with defaults
+  $(basename "$0")                           # Interactive install
+  $(basename "$0") --driver 580 --cuda 12-9  # Explicit versions
+  $(basename "$0") --yes                     # Non-interactive with defaults
+  $(basename "$0") --uninstall               # Interactive uninstall
+  $(basename "$0") --uninstall --yes         # Non-interactive uninstall
 EOF
     exit 0
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --driver) DRIVER_VERSION="$2"; shift 2 ;;
-        --cuda)   CUDA_VERSION="$2";   shift 2 ;;
-        --yes)    NON_INTERACTIVE=true; shift ;;
-        -h|--help) usage ;;
+        --driver)    DRIVER_VERSION="$2"; shift 2 ;;
+        --cuda)      CUDA_VERSION="$2";   shift 2 ;;
+        --yes)       NON_INTERACTIVE=true; shift ;;
+        --uninstall) UNINSTALL=true; shift ;;
+        -h|--help)   usage ;;
         *) error "Unknown option: $1. Use --help for usage." ;;
     esac
 done
-
-# ─── Helper: run a command and exit on failure with clear message ──
-run() {
-    local desc="$1"; shift
-    info "Running: $*"
-    if ! "$@"; then
-        error "Failed at step: ${desc}\n  Command: $*\n  Check log: ${LOG_FILE}"
-    fi
-}
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 1 — Detect Ubuntu Version
@@ -171,12 +163,12 @@ preflight_checks() {
         success "No conflicting NVIDIA/CUDA packages"
     fi
 
-    # Kernel headers
+    # Kernel headers — check AND warn clearly since we install them in base packages
     local kver; kver=$(uname -r)
     if apt-cache show "linux-headers-${kver}" &>/dev/null; then
         success "Kernel headers: available for ${kver}"
     else
-        warn "linux-headers-${kver} not in apt cache — DKMS build may fail"
+        warn "linux-headers-${kver} not in apt cache — will attempt install anyway"
         (( warnings++ )) || true
     fi
 
@@ -276,7 +268,7 @@ confirm_install() {
 install_base_packages() {
     section "Base System Packages"
 
-    info "Bootstrapping prerequisites (software-properties-common etc)..."
+    info "Bootstrapping prerequisites..."
     sudo apt-get update -q \
         || error "apt-get update failed"
     sudo apt-get install -y \
@@ -289,12 +281,21 @@ install_base_packages() {
     sudo apt-get update -q \
         || error "apt-get update after PPA failed"
 
+    # Install kernel headers explicitly — required for DKMS to build nvidia module.
+    # Without this, DKMS silently fails and nvidia.ko is never built.
+    local kver; kver=$(uname -r)
+    info "Installing kernel headers for: ${kver}"
+    sudo apt-get install -y \
+        "linux-headers-${kver}" \
+        linux-headers-generic \
+        || warn "Kernel headers install had warnings — DKMS build may fail"
+
     info "Installing base packages..."
     sudo apt-get install -y \
         git cmake build-essential dkms alsa-utils \
         gcc-11 g++-11 gcc-12 g++-12 lsb-release \
         ipmitool jq pciutils iproute2 util-linux dmidecode lshw \
-        coreutils chrony nvme-cli smartmontools fio ioping bpytop mokutil \
+        coreutils chrony nvme-cli bpytop mokutil \
         python3 python3-pip python3-venv \
         || error "Base package install failed"
 
@@ -350,6 +351,7 @@ install_nvidia_stack() {
         "cuda-toolkit-${CUDA_TOOLKIT_VERSION}" \
         "libnvidia-compute-${DRIVER_VERSION}" \
         "nvidia-dkms-${DRIVER_VERSION}-open" \
+        "nvidia-utils-${DRIVER_VERSION}" \
         "cudnn9-cuda-${CUDA_MAJOR}" \
         nvtop \
         || error "NVIDIA stack install failed — check apt output above"
@@ -357,7 +359,27 @@ install_nvidia_stack() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 9 — DCGM
+# STEP 9 — CUDA PATH
+# ═══════════════════════════════════════════════════════════════
+configure_cuda_path() {
+    section "CUDA PATH Configuration"
+
+    # Set for current session immediately so nvcc works in validate_install
+    export PATH="/usr/local/cuda/bin:${PATH}"
+    export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+
+    # Persist across all future logins via /etc/profile.d/
+    sudo tee /etc/profile.d/cuda.sh > /dev/null << 'EOF'
+# CUDA toolkit PATH — added by base-install.sh
+export PATH="/usr/local/cuda/bin:${PATH}"
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+EOF
+    sudo chmod 644 /etc/profile.d/cuda.sh
+    success "CUDA PATH configured — /usr/local/cuda/bin added for all users"
+}
+
+# ═══════════════════════════════════════════════════════════════
+# STEP 10 — DCGM
 # ═══════════════════════════════════════════════════════════════
 install_dcgm() {
     section "DCGM (Datacenter GPU Manager)"
@@ -375,7 +397,7 @@ install_dcgm() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 10 — Repos & gpu-burn
+# STEP 11 — Repos & gpu-burn
 # ═══════════════════════════════════════════════════════════════
 setup_repos() {
     section "Repos & gpu-burn"
@@ -410,7 +432,7 @@ setup_repos() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 11 — Validation
+# STEP 12 — Validation
 # ═══════════════════════════════════════════════════════════════
 validate_install() {
     section "Post-install Validation"
@@ -428,7 +450,7 @@ validate_install() {
     if command -v nvcc &>/dev/null; then
         success "nvcc: $(nvcc --version | grep -oP 'release \K[0-9.]+')"
     else
-        warn "nvcc not in PATH"; (( warnings++ )) || true
+        warn "nvcc not in PATH (reboot or re-source /etc/profile.d/cuda.sh)"; (( warnings++ )) || true
     fi
 
     systemctl is-active --quiet nvidia-dcgm 2>/dev/null \
@@ -441,7 +463,7 @@ validate_install() {
 
     [[ -f "${HOME}/gpu-burn/gpu_burn" ]] \
         && success "gpu-burn: ready" \
-        || { warn "gpu-burn: not built"; (( warnings++ )) || true; }
+        || { warn "gpu-burn: not built (reboot first, then re-run)"; (( warnings++ )) || true; }
 
     [[ -d "${HOME}/infra" ]] \
         && success "infra repo: present" \
@@ -454,7 +476,7 @@ validate_install() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 12 — Reboot
+# STEP 13 — Reboot prompt (install)
 # ═══════════════════════════════════════════════════════════════
 offer_reboot() {
     echo ""
@@ -484,26 +506,304 @@ offer_reboot() {
 }
 
 # ═══════════════════════════════════════════════════════════════
+# UNINSTALL — Full clean removal, restores post-OS-install state
+# ═══════════════════════════════════════════════════════════════
+uninstall_node() {
+    section "Uninstall — Full GPU Stack Removal"
+
+    echo ""
+    echo -e "${BOLD}The following will be removed to restore a clean OS state:${NC}"
+    echo "  • NVIDIA drivers, CUDA toolkit, cuDNN, DCGM, nvtop"
+    echo "  • DKMS kernel module entries and built .ko files"
+    echo "  • /etc/modprobe.d/ NVIDIA blacklist and option files"
+    echo "  • initramfs rebuilt to remove NVIDIA/nouveau blacklist"
+    echo "  • CUDA apt keyring, repo sources"
+    echo "  • graphics-drivers PPA"
+    echo "  • /etc/profile.d/cuda.sh PATH entry"
+    echo "  • /etc/ld.so.conf.d/ CUDA library path entries"
+    echo "  • GCC update-alternatives entries"
+    echo "  • gpu-burn and infra repos (optional)"
+    echo "  • Orphaned apt dependencies"
+    echo ""
+
+    if [[ "${NON_INTERACTIVE}" == false ]]; then
+        read -rp "Proceed with full uninstall? [y/N]: " confirm_uninstall
+        [[ "${confirm_uninstall,,}" == "y" ]] || error "Uninstall aborted by user."
+    else
+        info "Non-interactive mode — proceeding with uninstall"
+    fi
+
+    # ── 1. Stop and disable services ─────────────────────────
+    section "Stopping Services"
+    for svc in nvidia-dcgm nvidia-persistenced; do
+        if systemctl list-units --full -all 2>/dev/null | grep -q "${svc}"; then
+            info "Stopping ${svc}..."
+            sudo systemctl disable --now "${svc}" 2>/dev/null || true
+            success "Stopped and disabled: ${svc}"
+        else
+            info "Service not found: ${svc} — skipping"
+        fi
+    done
+
+    # ── 2. Purge NVIDIA / CUDA / cuDNN / DCGM packages ───────
+    section "Removing NVIDIA/CUDA Packages"
+    info "Collecting installed NVIDIA/CUDA packages..."
+
+    local pkgs_to_remove
+    pkgs_to_remove=$(dpkg -l 2>/dev/null \
+        | grep -P '^ii\s+(nvidia|cuda|cudnn|datacenter-gpu-manager|libnvidia|libcuda|libcudnn|nvtop)' \
+        | awk '{print $2}' | tr '\n' ' ')
+
+    if [[ -n "${pkgs_to_remove}" ]]; then
+        echo "  Packages to remove:"
+        echo "${pkgs_to_remove}" | tr ' ' '\n' | sed 's/^/    /' | grep -v '^$'
+        echo ""
+        # shellcheck disable=SC2086
+        sudo apt-get purge -y ${pkgs_to_remove} \
+            || warn "Some packages failed to purge — continuing"
+        success "NVIDIA/CUDA packages purged"
+    else
+        info "No NVIDIA/CUDA packages found — already clean"
+    fi
+
+    # ── 3. DKMS explicit cleanup ──────────────────────────────
+    section "Cleaning DKMS Entries"
+    # Purging packages doesn't always clean DKMS — do it explicitly
+    if command -v dkms &>/dev/null; then
+        local dkms_entries
+        dkms_entries=$(dkms status 2>/dev/null | grep -i nvidia | awk -F'[,: ]+' '{print $1"/"$2}' || true)
+        if [[ -n "${dkms_entries}" ]]; then
+            while IFS= read -r entry; do
+                [[ -z "${entry}" ]] && continue
+                info "Removing DKMS entry: ${entry}"
+                sudo dkms remove "${entry}" --all 2>/dev/null || true
+            done <<< "${dkms_entries}"
+            success "DKMS nvidia entries removed"
+        else
+            info "No DKMS nvidia entries found — already clean"
+        fi
+    else
+        info "dkms not installed — skipping"
+    fi
+
+    # ── 4. Remove built kernel module files ───────────────────
+    section "Removing Kernel Module Files"
+    local ko_count
+    ko_count=$(sudo find /lib/modules -name "nvidia*.ko*" 2>/dev/null | wc -l)
+    if (( ko_count > 0 )); then
+        info "Found ${ko_count} nvidia .ko file(s) — removing..."
+        sudo find /lib/modules -name "nvidia*.ko*" -delete 2>/dev/null || true
+        sudo depmod -a
+        success "Kernel module files removed and module map rebuilt"
+    else
+        info "No nvidia .ko files found — already clean"
+    fi
+
+    # ── 5. Clean /etc/modprobe.d/ ─────────────────────────────
+    section "Cleaning modprobe.d Configuration"
+    local modprobe_files
+    modprobe_files=$(sudo find /etc/modprobe.d/ -name "nvidia*.conf" \
+        -o -name "blacklist-nouveau.conf" 2>/dev/null | tr '\n' ' ')
+    if [[ -n "${modprobe_files}" ]]; then
+        echo "  Removing:"
+        echo "${modprobe_files}" | tr ' ' '\n' | sed 's/^/    /' | grep -v '^$'
+        # shellcheck disable=SC2086
+        sudo rm -f ${modprobe_files}
+        success "modprobe.d NVIDIA/nouveau configs removed"
+    else
+        info "No NVIDIA modprobe.d files found — already clean"
+    fi
+
+    # ── 6. Rebuild initramfs ───────────────────────────────────
+    # Critical: without this, nouveau blacklist persists in initrd
+    # and the open-source driver won't load on next boot.
+    section "Rebuilding initramfs"
+    info "Rebuilding initramfs to remove NVIDIA/nouveau blacklist..."
+    sudo update-initramfs -u -k all \
+        && success "initramfs rebuilt successfully" \
+        || warn "initramfs rebuild had warnings — reboot and check dmesg"
+
+    # ── 7. Re-enable Nouveau ──────────────────────────────────
+    section "Re-enabling Nouveau Driver"
+    # Ensure nouveau is not blocked in any remaining conf
+    if grep -r "blacklist nouveau" /etc/modprobe.d/ 2>/dev/null; then
+        warn "nouveau blacklist still present in modprobe.d — removing"
+        sudo sed -i '/blacklist nouveau/d' /etc/modprobe.d/*.conf 2>/dev/null || true
+        sudo sed -i '/options nouveau modeset=0/d' /etc/modprobe.d/*.conf 2>/dev/null || true
+    fi
+    # Try to load nouveau now (will succeed if GPU is not in use)
+    if sudo modprobe nouveau 2>/dev/null; then
+        success "Nouveau driver loaded"
+    else
+        info "Nouveau not loaded yet — will activate after reboot"
+    fi
+
+    # ── 8. Clean ld.so.conf.d CUDA entries ────────────────────
+    section "Removing CUDA Library Paths"
+    local ldconf_files
+    ldconf_files=$(sudo find /etc/ld.so.conf.d/ -name "cuda*.conf" \
+        -o -name "nvidia*.conf" 2>/dev/null | tr '\n' ' ')
+    if [[ -n "${ldconf_files}" ]]; then
+        # shellcheck disable=SC2086
+        sudo rm -f ${ldconf_files}
+        sudo ldconfig
+        success "CUDA ld.so.conf.d entries removed and ldconfig updated"
+    else
+        info "No CUDA ld.so.conf.d entries — already clean"
+    fi
+
+    # ── 9. Remove CUDA PATH profile.d entry ───────────────────
+    section "Removing CUDA PATH Configuration"
+    if [[ -f /etc/profile.d/cuda.sh ]]; then
+        sudo rm -f /etc/profile.d/cuda.sh
+        success "Removed /etc/profile.d/cuda.sh"
+    else
+        info "/etc/profile.d/cuda.sh not found — already clean"
+    fi
+    # Also clean current session PATH of cuda entries
+    export PATH=$(echo "${PATH}" | tr ':' '\n' | grep -v cuda | tr '\n' ':' | sed 's/:$//')
+    export LD_LIBRARY_PATH=$(echo "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v cuda | tr '\n' ':' | sed 's/:$//')
+
+    # ── 10. Remove CUDA apt keyring and sources ───────────────
+    section "Removing CUDA Repo & Keyring"
+    if dpkg -l cuda-keyring 2>/dev/null | grep -q '^ii'; then
+        sudo apt-get purge -y cuda-keyring || true
+        success "cuda-keyring package removed"
+    fi
+    sudo rm -f /usr/share/keyrings/cuda-archive-keyring.gpg
+    sudo rm -f /etc/apt/sources.list.d/cuda*.list \
+               /etc/apt/sources.list.d/nvidia*.list 2>/dev/null || true
+    success "CUDA apt sources cleaned"
+
+    # ── 11. Remove graphics-drivers PPA ──────────────────────
+    section "Removing graphics-drivers PPA"
+    if find /etc/apt/sources.list.d/ -name '*graphics-drivers*' 2>/dev/null | grep -q .; then
+        sudo add-apt-repository -y --remove ppa:graphics-drivers/ppa 2>/dev/null \
+            || sudo rm -f /etc/apt/sources.list.d/*graphics-drivers* 2>/dev/null || true
+        success "graphics-drivers PPA removed"
+    else
+        info "graphics-drivers PPA not present — skipping"
+    fi
+
+    # ── 12. Remove GCC alternatives ───────────────────────────
+    section "Removing GCC Alternatives"
+    for ver in 11 12; do
+        [[ -f "/usr/bin/gcc-${ver}" ]] \
+            && sudo update-alternatives --remove gcc "/usr/bin/gcc-${ver}" 2>/dev/null || true
+        [[ -f "/usr/bin/g++-${ver}" ]] \
+            && sudo update-alternatives --remove g++ "/usr/bin/g++-${ver}" 2>/dev/null || true
+    done
+    success "GCC alternatives cleared"
+
+    # ── 13. Optional: remove repos ────────────────────────────
+    section "Repo Cleanup (Optional)"
+    local infra_dir="${HOME}/infra"
+    local gpuburn_dir="${HOME}/gpu-burn"
+
+    if [[ "${NON_INTERACTIVE}" == false ]]; then
+        for repo_dir in "${gpuburn_dir}" "${infra_dir}"; do
+            if [[ -d "${repo_dir}" ]]; then
+                read -rp "  Remove ${repo_dir}? [y/N]: " rm_repo
+                if [[ "${rm_repo,,}" == "y" ]]; then
+                    rm -rf "${repo_dir}"
+                    success "Removed: ${repo_dir}"
+                else
+                    info "Keeping: ${repo_dir}"
+                fi
+            fi
+        done
+    else
+        info "Non-interactive mode — keeping repos (remove manually if needed)"
+    fi
+
+    # ── 14. apt autoremove + update ───────────────────────────
+    section "Final apt Cleanup"
+    sudo apt-get autoremove -y  || warn "autoremove had warnings (non-fatal)"
+    sudo apt-get update -q      || warn "apt-get update had warnings (non-fatal)"
+    success "apt cleanup complete"
+
+    # ── 15. Final verification ────────────────────────────────
+    section "Uninstall Verification"
+    local remaining
+    remaining=$(dpkg -l 2>/dev/null \
+        | grep -P '^ii\s+(nvidia|cuda|cudnn|datacenter-gpu-manager|libnvidia)' \
+        | awk '{print $2}' | tr '\n' ' ' || true)
+
+    if [[ -n "${remaining}" ]]; then
+        warn "Some packages still present:"
+        echo "${remaining}" | tr ' ' '\n' | sed 's/^/    /' | grep -v '^$'
+        warn "Run manually if needed: sudo apt purge ${remaining}"
+    else
+        success "Package check: clean — no NVIDIA/CUDA packages remaining"
+    fi
+
+    local dkms_remaining
+    dkms_remaining=$(dkms status 2>/dev/null | grep -i nvidia || true)
+    if [[ -n "${dkms_remaining}" ]]; then
+        warn "DKMS entries still present: ${dkms_remaining}"
+    else
+        success "DKMS check: clean"
+    fi
+
+    [[ -f /etc/profile.d/cuda.sh ]] \
+        && warn "/etc/profile.d/cuda.sh still exists" \
+        || success "PATH check: cuda.sh removed"
+
+    find /etc/modprobe.d/ -name "nvidia*.conf" -o -name "blacklist-nouveau.conf" 2>/dev/null \
+        | grep -q . \
+        && warn "modprobe.d: some NVIDIA configs still present" \
+        || success "modprobe.d check: clean"
+
+    echo ""
+    echo -e "${BOLD}════════════════════════════════════════${NC}"
+    echo -e "${GREEN}${BOLD} Uninstall complete!${NC}"
+    echo -e "  System restored to clean OS state."
+    echo -e "  Reboot required to fully unload kernel modules."
+    echo -e "  Full log: ${LOG_FILE}"
+    echo -e "${BOLD}════════════════════════════════════════${NC}"
+    echo ""
+
+    if [[ "${NON_INTERACTIVE}" == false ]]; then
+        read -rp "Reboot now to complete cleanup? [Y/n]: " do_reboot
+        if [[ "${do_reboot,,}" != "n" ]]; then
+            info "Rebooting in 5 seconds... (Ctrl+C to cancel)"
+            sleep 5
+            sudo reboot
+        else
+            warn "Reboot required before reprovisioning — run: sudo reboot"
+        fi
+    else
+        info "Non-interactive — reboot manually: sudo reboot"
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════
 main() {
     detect_ubuntu
-    preflight_checks
 
-    section "Version Selection"
-    select_driver_version
-    select_cuda_version
-    validate_combination
-    confirm_install
+    if [[ "${UNINSTALL}" == true ]]; then
+        uninstall_node
+    else
+        preflight_checks
 
-    install_base_packages
-    configure_gcc_alternatives
-    install_cuda_keyring
-    install_nvidia_stack
-    install_dcgm
-    setup_repos
-    validate_install
-    offer_reboot
+        section "Version Selection"
+        select_driver_version
+        select_cuda_version
+        validate_combination
+        confirm_install
+
+        install_base_packages
+        configure_gcc_alternatives
+        install_cuda_keyring
+        install_nvidia_stack
+        configure_cuda_path
+        install_dcgm
+        setup_repos
+        validate_install
+        offer_reboot
+    fi
 }
 
 main
