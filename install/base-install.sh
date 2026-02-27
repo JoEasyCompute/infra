@@ -4,7 +4,7 @@
 # base-install.sh — GPU Node Base Installation Script
 # Supports: Ubuntu 22.04 / 24.04 (x86_64)
 # Installs: NVIDIA drivers, CUDA toolkit, cuDNN, DCGM, gpu-burn
-# Version:  1.7 (2026-02-27)
+# Version:  1.8 (2026-02-27)
 # ═══════════════════════════════════════════════════════════════
 
 # No set -e — explicit error checking on every critical step.
@@ -18,7 +18,7 @@ LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee -a "${LOG_FILE}") 2> >(tee -a "${LOG_FILE}" >&2)
 
 echo "════════════════════════════════════════════════════════"
-echo " GPU Node Installation Script  (v1.7 — 2026-02-27)"
+echo " GPU Node Installation Script  (v1.8 — 2026-02-27)"
 echo " Log: ${LOG_FILE}"
 echo " Started: $(date)"
 echo "════════════════════════════════════════════════════════"
@@ -297,7 +297,11 @@ install_base_packages() {
         ipmitool jq pciutils iproute2 util-linux dmidecode lshw \
         coreutils chrony nvme-cli bpytop mokutil \
         python3 python3-pip python3-venv \
+        smartmontools \
+        lvm2 mdadm lsof ioping \
         || error "Base package install failed"
+    # Note: fio is intentionally NOT installed here — it is a test-only tool
+    # managed by disktest.sh's own prerequisite check.
 
     sudo systemctl enable --now chrony \
         || warn "Failed to enable chrony"
@@ -522,6 +526,7 @@ uninstall_node() {
     echo "  • /etc/profile.d/cuda.sh PATH entry"
     echo "  • /etc/ld.so.conf.d/ CUDA library path entries"
     echo "  • GCC update-alternatives entries"
+    echo "  • Storage tools: smartmontools, lvm2, mdadm, lsof, ioping"
     echo "  • gpu-burn and infra repos (optional)"
     echo "  • Orphaned apt dependencies"
     echo ""
@@ -551,8 +556,10 @@ uninstall_node() {
 
     local pkgs_to_remove
     pkgs_to_remove=$(dpkg -l 2>/dev/null \
-        | grep -P '^ii\s+(nvidia|cuda|cudnn|datacenter-gpu-manager|libnvidia|libcuda|libcudnn|nvtop)' \
+        | grep -P '^ii\s+(nvidia|cuda|cudnn|datacenter-gpu-manager|libnvidia|libcuda|libcudnn|nvtop|smartmontools|ioping)' \
         | awk '{print $2}' | tr '\n' ' ')
+    # Note: lvm2, mdadm, lsof are general system tools — we remove them only if
+    # they were not present before our install. We purge selectively below.
 
     if [[ -n "${pkgs_to_remove}" ]]; then
         echo "  Packages to remove:"
