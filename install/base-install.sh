@@ -4,7 +4,7 @@
 # base-install.sh — GPU Node Base Installation Script
 # Supports: Ubuntu 22.04 / 24.04 (x86_64)
 # Installs: NVIDIA drivers, CUDA toolkit, cuDNN, DCGM, gpu-burn
-# Version:  1.8 (2026-02-27)
+# Version:  1.9 (2026-02-27)
 # ═══════════════════════════════════════════════════════════════
 
 # No set -e — explicit error checking on every critical step.
@@ -18,7 +18,7 @@ LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee -a "${LOG_FILE}") 2> >(tee -a "${LOG_FILE}" >&2)
 
 echo "════════════════════════════════════════════════════════"
-echo " GPU Node Installation Script  (v1.8 — 2026-02-27)"
+echo " GPU Node Installation Script  (v1.9 — 2026-02-27)"
 echo " Log: ${LOG_FILE}"
 echo " Started: $(date)"
 echo "════════════════════════════════════════════════════════"
@@ -351,11 +351,20 @@ install_cuda_keyring() {
 install_nvidia_stack() {
     section "NVIDIA Driver + CUDA Stack"
     info "Installing driver=${DRIVER_VERSION}, cuda=${CUDA_TOOLKIT_VERSION}, cudnn=cudnn9-cuda-${CUDA_MAJOR}"
+
+    # nvidia-utils-575 is required explicitly for driver 575 to get nvidia-smi
+    # and other userspace tools. Drivers 580+ include them via their metapackage.
+    local extra_pkgs=""
+    if [[ "${DRIVER_VERSION}" == "575" ]]; then
+        extra_pkgs="nvidia-utils-575"
+        info "Driver 575 detected — adding nvidia-utils-575 for nvidia-smi"
+    fi
+
     sudo apt-get install -V -y \
         "cuda-toolkit-${CUDA_TOOLKIT_VERSION}" \
         "libnvidia-compute-${DRIVER_VERSION}" \
         "nvidia-dkms-${DRIVER_VERSION}-open" \
-        "nvidia-utils-${DRIVER_VERSION}" \
+        ${extra_pkgs} \
         "cudnn9-cuda-${CUDA_MAJOR}" \
         nvtop \
         || error "NVIDIA stack install failed — check apt output above"
