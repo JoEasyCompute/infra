@@ -39,6 +39,9 @@ RESULTS_PASS=()
 RESULTS_FAIL=()
 RESULTS_SKIP=()
 
+GPU_TARGET=""   # set by --gpu <index>; empty means all GPUs
+SMI_FILTER=""   # set to "-i <index>" in detect_system when GPU_TARGET is set
+
 # Populated during system detection
 NUM_GPUS=""
 GPU_NAMES=""
@@ -204,14 +207,34 @@ detect_system() {
     os_id=$(lsb_release -is 2>/dev/null || echo "Unknown")
     log "  OS                  : $os_id $ubuntu_ver"
 
-    NUM_GPUS=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU' || true)
-    if [ -z "$NUM_GPUS" ] || [ "$NUM_GPUS" -eq 0 ]; then
+    # Validate --gpu target before anything else
+    local total_gpus
+    total_gpus=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU' || true)
+    if [ -z "$total_gpus" ] || [ "$total_gpus" -eq 0 ]; then
         log "ERROR: No NVIDIA GPUs detected. Aborting."
         exit 1
     fi
-    log "  GPUs detected       : $NUM_GPUS"
 
-    GPU_NAMES=$(nvidia-smi --query-gpu=name --format=csv,noheader \
+    if [ -n "$GPU_TARGET" ]; then
+        if ! [[ "$GPU_TARGET" =~ ^[0-9]+$ ]] || [ "$GPU_TARGET" -ge "$total_gpus" ]; then
+            log "ERROR: --gpu $GPU_TARGET is invalid. System has GPUs 0-$((total_gpus - 1))."
+            exit 1
+        fi
+        # Restrict all CUDA operations to this GPU index.
+        # nvidia-smi still enumerates all GPUs by physical index unless we pass -i explicitly.
+        export CUDA_VISIBLE_DEVICES="$GPU_TARGET"
+        NUM_GPUS=1
+        log "  GPU target          : GPU $GPU_TARGET (CUDA_VISIBLE_DEVICES=$GPU_TARGET)"
+        log "  NOTE: Single-GPU mode — NCCL/PyTorch run with 1 process, collective tests use 1 GPU."
+    else
+        NUM_GPUS=$total_gpus
+    fi
+    log "  GPUs in scope       : $NUM_GPUS"
+
+    # nvidia-smi queries — scoped to target GPU if set, otherwise all
+    [ -n "$GPU_TARGET" ] && SMI_FILTER="-i $GPU_TARGET" || SMI_FILTER=""
+
+    GPU_NAMES=$(nvidia-smi $SMI_FILTER --query-gpu=name --format=csv,noheader \
         | tr -d '\r' | sort -u | tr '\n' ',' | sed 's/,$//')
     log "  GPU model(s)        : $GPU_NAMES"
 
@@ -235,7 +258,7 @@ detect_system() {
 
     # Strip \r — nvidia-smi can emit Windows-style line endings
     CUDA_ARCH_LIST=$(
-        nvidia-smi --query-gpu=compute_cap --format=csv,noheader \
+        nvidia-smi $SMI_FILTER --query-gpu=compute_cap --format=csv,noheader \
         | tr -d '\r' | tr -d '.' | sort -u | tr '\n' ' ' | xargs
     )
     log "  Architecture(s)     : $CUDA_ARCH_LIST"
@@ -280,7 +303,7 @@ test_preflight() {
             log "  GPU $gpu_idx: persistence mode Disabled — recommend: sudo nvidia-smi -pm 1"
             # Warning only, not a failure — not all environments need it
         fi
-    done < <(nvidia-smi \
+    done < <(nvidia-smi $SMI_FILTER \
         --query-gpu=index,persistence_mode \
         --format=csv,noheader | tr -d '\r')
 
@@ -319,13 +342,13 @@ test_preflight() {
             log "  WARNING: GPU $gpu_idx has active throttle at idle: $throttle_decoded"
             rc=1
         fi
-    done < <(nvidia-smi \
+    done < <(nvidia-smi $SMI_FILTER \
         --query-gpu=index,name,temperature.gpu,power.draw,clocks.sm,clocks.mem,fan.speed,clocks_throttle_reasons.active \
         --format=csv,noheader | tr -d '\r')
 
     log ""
     log "--- Driver version ---"
-    nvidia-smi --query-gpu=index,driver_version \
+    nvidia-smi $SMI_FILTER --query-gpu=index,driver_version \
         --format=csv,noheader | tr -d '\r' \
         | while IFS=, read -r idx drv; do
             log "  GPU $idx: driver $drv"
@@ -381,7 +404,7 @@ test_ecc() {
         printf "  %-4s %-25s %-10s %-12s %s\n" \
             "$gpu_idx" "$gpu_name" "$ecc_mode" "$uncorr_errs" "$note" \
             | tee -a "$LOG_FILE"
-    done < <(nvidia-smi \
+    done < <(nvidia-smi $SMI_FILTER \
         --query-gpu=index,name,ecc.mode.current,ecc.errors.uncorrected.volatile.total \
         --format=csv,noheader | tr -d '\r')
 
@@ -472,7 +495,7 @@ PYEOF
             "$gpu_idx" "$gpu_name" \
             "Gen$cur_gen" "Gen$max_gen" "x$cur_width" "x$max_width" \
             "$status" | tee -a "$LOG_FILE"
-    done < <(nvidia-smi \
+    done < <(nvidia-smi $SMI_FILTER \
         --query-gpu=index,name,pcie.link.gen.current,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max \
         --format=csv,noheader | tr -d '\r')
 
@@ -520,7 +543,7 @@ test_clocks() {
             "$(echo "$gpu_name" | xargs)" \
             "$(echo "$max_sm" | xargs)" \
             "$(echo "$max_mem" | xargs)" | tee -a "$LOG_FILE"
-    done < <(nvidia-smi \
+    done < <(nvidia-smi $SMI_FILTER \
         --query-gpu=index,name,clocks.max.sm,clocks.max.mem \
         --format=csv,noheader | tr -d '\r')
 
@@ -571,7 +594,7 @@ PYEOF
             if [ "$throttle_decoded" != "Not Active" ] && [ "$throttle_decoded" != "unknown" ]; then
                 any_throttle=true
             fi
-        done < <(nvidia-smi \
+        done < <(nvidia-smi $SMI_FILTER \
             --query-gpu=index,clocks.sm,clocks.mem,clocks_throttle_reasons.active \
             --format=csv,noheader | tr -d '\r')
         sample=$((sample + 1))
@@ -917,7 +940,7 @@ build_gpu_burn() {
 
     # COMPUTE must be "X.Y" — Makefile does -arch=compute_$(subst .,,${COMPUTE})
     local compute_cap
-    compute_cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader \
+    compute_cap=$(nvidia-smi $SMI_FILTER --query-gpu=compute_cap --format=csv,noheader \
         | tr -d '\r' | sort -u | head -1)
 
     in_dir "$BUILD_DIR/gpu-burn" bash -c "
@@ -986,7 +1009,7 @@ run_burn_monitor() {
     # Per-GPU tracking arrays (indexed by GPU index)
     declare -A peak_temp peak_fan peak_power throttle_seen
     local gpu_idx
-    for gpu_idx in $(nvidia-smi --query-gpu=index --format=csv,noheader | tr -d '\r'); do
+    for gpu_idx in $(nvidia-smi $SMI_FILTER --query-gpu=index --format=csv,noheader | tr -d '\r'); do
         peak_temp[$gpu_idx]=0
         peak_fan[$gpu_idx]=0
         peak_power[$gpu_idx]=0
@@ -1030,7 +1053,7 @@ run_burn_monitor() {
             if [ "$throttle_decoded" != "Not Active" ] && [ "$throttle_decoded" != "unknown" ]; then
                 throttle_seen[$gpu_idx]="$throttle_decoded"
             fi
-        done < <(nvidia-smi \
+        done < <(nvidia-smi $SMI_FILTER \
             --query-gpu=index,temperature.gpu,power.draw,fan.speed,clocks.sm,clocks_throttle_reasons.active \
             --format=csv,noheader | tr -d '\r')
 
@@ -1069,7 +1092,7 @@ run_burn_monitor() {
         if [[ "$issues" != "OK" ]]; then
             BURN_THERMAL_RC=1
         fi
-    done < <(nvidia-smi --query-gpu=index,name --format=csv,noheader | tr -d '\r')
+    done < <(nvidia-smi $SMI_FILTER --query-gpu=index,name --format=csv,noheader | tr -d '\r')
 
     log "  ─────────────────────────────────────────────────────────────────"
     if [ "$BURN_THERMAL_RC" -eq 1 ]; then
@@ -1198,13 +1221,16 @@ Available tests (run in this order if none specified):
   stress        Sustained compute stress: gpu-fryer / gpu-burn / PyTorch
 
 Options:
+  --gpu <index>              Target a single GPU by index (e.g. --gpu 3)
   --burn-duration <seconds>  Duration for stress test (default: 300 = 5 min)
   --clean                    Delete all build artifacts and exit
   --list                     List available test names and exit
   --help, -h                 Show this help
 
 Examples:
-  ./fulltest.sh                              # run all tests
+  ./fulltest.sh                              # run all tests on all GPUs
+  ./fulltest.sh --gpu 3                      # run all tests on GPU 3 only
+  ./fulltest.sh --gpu 3 memtest stress       # memtest + stress on GPU 3 only
   ./fulltest.sh preflight ecc pcie clocks    # hardware health checks only
   ./fulltest.sh nccl pytorch                 # communication + framework only
   ./fulltest.sh stress --burn-duration 3600  # 1 hour stress test
@@ -1233,6 +1259,15 @@ while [ "$i" -lt "${#args[@]}" ]; do
         --help|-h)    usage; exit 0 ;;
         --list)       echo "Available tests: ${ALL_TESTS[*]}"; exit 0 ;;
         --clean)      CLEAN_BUILD=true ;;
+        --gpu)
+            i=$((i + 1))
+            val="${args[$i]:-}"
+            if [[ ! "$val" =~ ^[0-9]+$ ]]; then
+                echo "ERROR: --gpu requires a GPU index (e.g. --gpu 3)" >&2
+                exit 1
+            fi
+            GPU_TARGET="$val"
+            ;;
         --burn-duration)
             i=$((i + 1))
             val="${args[$i]:-}"
