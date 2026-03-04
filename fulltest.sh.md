@@ -7,291 +7,446 @@ Supports: RTX 4090 / RTX 5090, A4000, A100, H100 on Ubuntu 22.04 / 24.04.
 
 ## Requirements
 
-**Must be pre-installed (script will not install these):**
+### Must be pre-installed
 
 | Requirement | Notes |
 |---|---|
 | NVIDIA driver | 575+ recommended for CUDA 12.9 |
-| CUDA toolkit | nvcc must be on PATH or in `/usr/local/cuda/bin` |
+| CUDA toolkit | `nvcc` must be on PATH or in `/usr/local/cuda/bin` |
 | `git`, `make`, `gcc` | Build tools |
-| `python3-pip` | For PyTorch install |
-| `bc` | For duration formatting |
+| `python3`, `python3-pip` | For PyTorch and inline test scripts |
+| `bc` | For duration formatting in burn test output |
 
-**Auto-installed on first run:**
+### Auto-installed on first run
 
 | Dependency | Used by |
 |---|---|
 | `cmake` | nvbandwidth, cuda_memtest, cuda-samples |
 | `libboost-program-options-dev` | nvbandwidth |
-| `libnccl2` / `libnccl-dev` | NCCL test (version-pinned to match CUDA) |
-| PyTorch + accelerate | PyTorch DDP benchmark, clock test, PCIe test |
-| Rust toolchain (via rustup) | gpu-fryer (stress test) |
+| `libnccl2` / `libnccl-dev` | NCCL test — version-pinned to match active CUDA toolkit |
+| PyTorch + accelerate | pytorch test, clock test, pcie test |
+| Rust toolchain (via rustup) | gpu-fryer (primary stress tool) |
 
-**Optional:**
+### Optional
 
 | Dependency | Notes |
 |---|---|
-| `dcgmi` (DCGM) | DCGM test is skipped gracefully if not installed |
+| `dcgmi` (DCGM) | `dcgm` test is skipped gracefully if not installed. Install from https://developer.nvidia.com/dcgm |
 
 ---
 
 ## Installation
 
 ```bash
-# Clone or copy fulltest.sh to your test directory
 chmod +x fulltest.sh
 
-# First run — all dependencies and build artifacts go into ./build/
+# First run — clones repos and builds binaries into ./build/
 ./fulltest.sh
 ```
 
-All cloned repos and compiled binaries are placed under `./build/` next to the script. Nothing is written to system directories.
+All cloned repos and compiled binaries are placed under `./build/` next to the script. Nothing is written to system directories except NCCL and apt packages.
 
 ---
 
 ## Usage
 
 ```
-./fulltest.sh [test...] [--burn-duration <seconds>] [--clean] [--list] [--help]
+./fulltest.sh [test...] [--gpu <index>] [--burn-duration <seconds>] [--clean] [--list] [--help]
 ```
 
-### Run all tests
+### Run all tests on all GPUs
 ```bash
 ./fulltest.sh
 ```
 
+### Run all tests on a single GPU
+```bash
+./fulltest.sh --gpu 3
+```
+
 ### Run specific tests only
 ```bash
-./fulltest.sh preflight ecc pcie clocks     # hardware health checks only
-./fulltest.sh nccl pytorch                  # communication + framework only
-./fulltest.sh memtest                       # VRAM integrity only
-./fulltest.sh stress                        # stress test only (default 5 min)
+./fulltest.sh preflight ecc pcie clocks       # hardware health checks only
+./fulltest.sh nccl pytorch                    # communication + framework only
+./fulltest.sh memtest                         # VRAM integrity only
+./fulltest.sh stress                          # stress test only (default 5 min)
 ```
 
-### Options
+### Combine: specific tests on a specific GPU
+```bash
+./fulltest.sh --gpu 3 memtest stress
+./fulltest.sh --gpu 0 preflight ecc pcie
+```
 
-| Option | Description |
-|---|---|
-| `--burn-duration <seconds>` | Override stress test duration (default: 300 = 5 min) |
-| `--clean` | Delete `build/` directory (forces full rebuild on next run) |
-| `--list` | Print available test names and exit |
-| `--help` | Show usage and exit |
+---
 
-### Examples
+## Options
+
+| Option | Default | Description |
+|---|---|---|
+| `--gpu <index>` | all GPUs | Target a single GPU by its index (0-based, as shown by `nvidia-smi`). |
+| `--burn-duration <seconds>` | `300` (5 min) | Duration of the sustained stress test. |
+| `--clean` | — | Delete `./build/` and exit. Forces full rebuild on next run. Can be combined with tests to clean then immediately run. |
+| `--list` | — | Print available test names and exit. |
+| `--help` / `-h` | — | Show usage and exit. |
+
+---
+
+## Examples
 
 ```bash
-# Full suite with 30-minute stress test
-./fulltest.sh --burn-duration 1800
+# Full suite, all GPUs
+./fulltest.sh
 
-# 1-hour stress test only
+# Full suite, GPU 3 only (e.g. after a card swap)
+./fulltest.sh --gpu 3
+
+# 30-minute stress test on GPU 5 only
+./fulltest.sh --gpu 5 stress --burn-duration 1800
+
+# 1-hour stress test on all GPUs
 ./fulltest.sh stress --burn-duration 3600
 
-# Wipe all build artifacts and re-run everything fresh
+# Quick hardware health check only
+./fulltest.sh preflight ecc pcie clocks
+
+# NCCL + PyTorch DDP only (comms stack validation)
+./fulltest.sh nccl pytorch
+
+# Wipe all build artifacts and start fresh
 ./fulltest.sh --clean
 
-# Clean then immediately run a specific test
+# Wipe build artifacts then immediately run NCCL
 ./fulltest.sh --clean nccl
+
+# List available test names
+./fulltest.sh --list
 ```
+
+---
+
+## Single-GPU Mode (`--gpu`)
+
+`--gpu <index>` accepts a physical GPU index as shown by `nvidia-smi` (0-based).
+
+When specified:
+
+- `CUDA_VISIBLE_DEVICES` is set to the target index, scoping all CUDA processes to that GPU
+- All `nvidia-smi` queries use `-i <index>` to filter telemetry, thermal data, ECC, PCIe, and clock tables to that card only
+- `NUM_GPUS` is set to `1`, so NCCL runs with `-g 1` and PyTorch with `--nproc_per_node 1`
+- `memtest` runs `--device 0` (remapped from the physical index via `CUDA_VISIBLE_DEVICES`)
+- The index is validated against the actual GPU count — an invalid index exits immediately with a clear error
+
+```bash
+# Test GPU 3 only
+./fulltest.sh --gpu 3 memtest stress
+
+# Invalid index gives a clean error
+./fulltest.sh --gpu 9
+# ERROR: --gpu 9 is invalid. System has GPUs 0-7.
+```
+
+> Tests that are inherently multi-GPU collective operations (NCCL all-reduce, PyTorch DDP) still run correctly in single-GPU mode — they test that the full stack initialises and executes on one card.
 
 ---
 
 ## Tests
 
-Tests run in this order when none are specified. Each test is independently selectable by name.
+Tests run in this fixed order when none are specified. Each test is independently selectable by name.
+
+---
 
 ### `preflight` — Idle Baseline
-Runs before any load is applied. Captures a per-GPU snapshot of temperature, power draw, SM clock, memory clock, fan speed, and throttle reason at idle. Also checks persistence mode and driver version.
 
-- **Fails if:** Any GPU is throttling due to a real hardware problem (thermal or power brake) at idle, or idle temperature exceeds 60°C.
-- **Notes:** `sw_power_cap` (0x4) at idle is normal power-saving behaviour and is ignored.
+Runs before any load is applied. Captures a per-GPU snapshot at idle covering persistence mode, thermals, and driver version.
+
+**Persistence mode:** Checks each GPU has persistence mode enabled. Warns (not fails) if disabled, with the command to enable it (`sudo nvidia-smi -pm 1`).
+
+**Thermal baseline:** Records temperature, power draw, SM clock, memory clock, fan speed, and throttle reason per GPU at idle in a formatted table.
+
+**Driver version:** Logs the active driver version per GPU.
+
+**Fails if:**
+- Any GPU has an active hardware throttle reason at idle (HW_Slowdown, SW_Thermal, or HW_PowerBrake)
+- Any GPU idle temperature exceeds 60°C
+
+**Notes:** `sw_power_cap` (bitmask `0x4`) at idle is normal power-saving clock-down — decoded and suppressed. Only real hardware fault bits trigger a warning.
 
 ---
 
 ### `ecc` — ECC Error Check
-Checks ECC mode and uncorrected error count per GPU.
+
+Checks ECC mode and uncorrected volatile error count per GPU.
 
 | GPU Type | Behaviour |
 |---|---|
-| GeForce (RTX 4090, 5090) | ECC not supported — skipped with a note, not a failure |
-| Workstation (A4000, A6000) | ECC supported but off by default — warning with enable instructions |
-| Data Centre (A100, H100) | ECC on by default — fails if any uncorrected errors found |
+| GeForce (RTX 4090, 5090, etc.) | ECC not supported — noted in output, not a failure |
+| Workstation (A4000, A6000, etc.) | ECC supported but off by default — warning with enable command |
+| Data Centre (A100, H100, etc.) | ECC on by default — hard failure if uncorrected errors > 0 |
 
-- **Fails if:** A Data Centre GPU reports uncorrected ECC errors (indicates live VRAM corruption — GPU should be replaced).
+**Fails if:** A Data Centre GPU reports any uncorrected ECC errors. This indicates live VRAM corruption — the GPU should be replaced.
+
+**Enable ECC on workstation GPUs:**
+```bash
+sudo nvidia-smi -e 1
+sudo reboot
+```
 
 ---
 
 ### `pcie` — PCIe Link Check
-Verifies PCIe link width and generation per GPU. Spins up a brief GPU load before sampling to force links to full negotiated speed.
 
-| Check | Behaviour |
-|---|---|
-| Gen mismatch (e.g. Gen1 vs Gen3) | **Warning only** — ASPM idle power-gating is normal |
-| Width mismatch (e.g. x8 vs x16) | **Hard failure** — lane count never power-gates |
+Verifies PCIe link width and generation per GPU. Always spins up a brief GPU load before sampling to force links to their negotiated speed.
 
-- **Fails if:** Any GPU is running at fewer PCIe lanes than its maximum (x8 when capable of x16). This indicates a physical slot limitation, riser cable issue, or BIOS lane allocation problem.
-- **Notes:** Gen speed mismatch at idle is not a failure. If NVBandwidth host↔device numbers are normal, Gen mismatch is not a real issue.
+| Check | Severity | Notes |
+|---|---|---|
+| Gen mismatch (e.g. Gen1 vs Gen3) | **Warning only** | ASPM legitimately power-gates link speed at idle — not a failure |
+| Width mismatch (e.g. x8 vs x16) | **Hard failure** | Lane count never power-gates — always a physical problem |
+
+**Fails if:** Any GPU is running fewer PCIe lanes than its maximum (x8 when capable of x16). Likely causes: GPU in an x8 physical slot, damaged riser cable, or BIOS lane allocation.
+
+**Notes:** Gen speed mismatch at idle is not a real issue on systems with ASPM enabled — this is explained in the test output. If NVBandwidth host↔device bandwidth numbers are normal (~25–30 GB/s for PCIe 4.0 x16), there is no actual problem.
+
+To force Gen3 at all times (disables power saving):
+```bash
+sudo sh -c 'echo performance > /sys/module/pcie_aspm/parameters/policy'
+```
 
 ---
 
 ### `clocks` — Clock Verification Under Load
-Runs a 30-second GEMM workload and samples SM clock, memory clock, and throttle reason every 3 seconds across all GPUs.
 
-- **Fails if:** Any real throttle reason is detected (HW_Slowdown, SW_Thermal, HW_PowerBrake).
-- **Reports:** A live table of clocks per GPU per sample, and a final note on throttle cause if any.
+Runs a 30-second GEMM workload and samples SM clock, memory clock, and throttle reason every 3 seconds across all GPUs in scope. Prints a live table during the test, then a summary.
 
-Throttle reason guide:
+**Fails if:** Any real throttle reason is active during the load.
 
-| Reason | Cause |
-|---|---|
-| `HW_Slowdown` | Hardware thermal or power event |
-| `SW_Thermal` | GPU hit its temperature limit |
-| `HW_PowerBrake` | External power brake signal (PSU/power delivery) |
-| `sw_power_cap` | Normal idle clock-down — ignored |
+**Throttle reason guide:**
+
+| Reason | Meaning | Action |
+|---|---|---|
+| `HW_Slowdown` | Hardware thermal or power event | Check temps, PSU, power connectors |
+| `SW_Thermal` | GPU hit its temperature limit | Improve cooling or reduce power limit |
+| `HW_PowerBrake` | External power brake signal | Check PSU capacity and cable connections |
+| `sw_power_cap` | Normal idle clock-down | Ignored — not a problem |
 
 ---
 
 ### `nccl` — NCCL All-Reduce
-Runs `all_reduce_perf` from [nccl-tests](https://github.com/NVIDIA/nccl-tests) across all GPUs, testing message sizes from 8B to 1GB.
 
-- **Fails if:** NCCL communication fails for any reason.
-- **On failure:** Automatically re-runs with `NCCL_DEBUG=INFO` and prints filtered diagnostic output, so the root cause is visible without a manual re-run.
-- **NCCL version pinning:** `libnccl2` is automatically checked against the active CUDA toolkit version. If a mismatched version is found (e.g. `+cuda13.1` when toolkit is CUDA 12.9), it is removed and the correct version installed before building.
+Runs `all_reduce_perf` from [nccl-tests](https://github.com/NVIDIA/nccl-tests) across all GPUs in scope, sweeping message sizes from 8B to 1GB.
+
+**Fails if:** NCCL communication fails for any message size.
+
+**On failure:** Automatically re-runs with `NCCL_DEBUG=INFO` and prints filtered diagnostic output — no manual re-run needed.
+
+**NCCL version pinning:** Before building, the script checks `libnccl2`'s CUDA suffix against the active toolkit. If mismatched (e.g. `+cuda13.1` with a CUDA 12.9 toolkit — a known issue when DCGM pulls in a different NCCL variant), it removes and reinstalls the correct version automatically.
+
+To fix manually:
+```bash
+apt-cache madison libnccl2 | grep cuda12
+sudo apt-get install libnccl2=<version> libnccl-dev=<version>
+./fulltest.sh --clean nccl
+```
 
 ---
 
 ### `cuda-samples` — CUDA Runtime Validation
+
 Builds and runs two samples from [cuda-samples](https://github.com/NVIDIA/cuda-samples):
 
-| Sample | Tests |
+| Sample | What it tests |
 |---|---|
-| `deviceQuery` | CUDA runtime initialisation, GPU enumeration, capability reporting |
-| `p2pBandwidthLatencyTest` | GPU-to-GPU P2P bandwidth and latency |
+| `deviceQuery` | CUDA runtime init, GPU enumeration, driver/runtime version, capability flags |
+| `p2pBandwidthLatencyTest` | GPU-to-GPU P2P access, bandwidth, and latency |
 
-- **Fails if:** Either binary fails to build or returns a non-zero exit code.
-- **Notes:** `sm_110` is automatically patched out of CMakeLists before building — it was removed in CUDA 12.9 but hardcoded in the cuda-samples repo.
+**Fails if:** Either binary fails to build or exits non-zero.
+
+**Notes:** `sm_110` is automatically patched out of CMakeLists before building — it was removed in CUDA 12.9 but is hardcoded in the cuda-samples repo.
 
 ---
 
 ### `nvbandwidth` — Memory Bandwidth
-Runs [NVBandwidth](https://github.com/NVIDIA/nvbandwidth) (NVIDIA's official replacement for the removed `bandwidthTest`) measuring:
 
-- Host → Device (PCIe upload)
-- Device → Host (PCIe download)
-- Device → Device read / write / bidirectional (VRAM throughput)
+Runs [NVBandwidth](https://github.com/NVIDIA/nvbandwidth) — NVIDIA's official replacement for the removed `bandwidthTest`:
 
-- **Fails if:** NVBandwidth returns a non-zero exit code.
-- **Notes:** Device-to-device tests are waived on single-GPU systems — this is expected.
+| Test | Description |
+|---|---|
+| `host_to_device_memcpy_ce` | PCIe upload bandwidth |
+| `device_to_host_memcpy_ce` | PCIe download bandwidth |
+| `device_to_device_memcpy_read_ce` | VRAM read bandwidth |
+| `device_to_device_memcpy_write_ce` | VRAM write bandwidth |
+| `device_to_device_bidirectional_memcpy_read_ce` | Bidirectional VRAM bandwidth |
+
+**Fails if:** NVBandwidth exits non-zero.
+
+**Notes:** Device-to-device tests are skipped by NVBandwidth itself on single-GPU systems — expected, not a failure.
 
 ---
 
 ### `dcgm` — DCGM Diagnostics *(optional)*
-Runs NVIDIA Data Centre GPU Manager diagnostics if `dcgmi` is installed. Skipped gracefully if not.
+
+Runs NVIDIA Data Centre GPU Manager diagnostics if `dcgmi` is installed. Skipped gracefully with an install link if not present.
 
 Runs:
 - `dcgmi discovery -l` — enumerate GPUs
-- `dcgmi diag -r 3` — deployment health check
-- `dcgmi dmon` — 10 samples of GPU util, memory util, temperature, power
+- `dcgmi diag -r 3` — deployment-level health check
+- `dcgmi dmon -e 203,252,150,155 -c 10` — 10 samples of GPU util, memory util, temperature, and power draw
 
-- **Notes:** Hardware and stress subtests within DCGM are skipped on GeForce GPUs — this is expected behaviour, not a failure.
-- **Install DCGM:** https://developer.nvidia.com/dcgm
+**Notes:** DCGM hardware and stress subtests are automatically skipped on GeForce GPUs — this is expected behaviour, not a test failure.
 
 ---
 
 ### `pytorch` — Multi-GPU DDP Benchmark
-Installs PyTorch (version matched to the active CUDA toolkit) and runs a multi-GPU DistributedDataParallel benchmark using `torchrun`.
 
-Runs 100 forward passes of a large linear layer across all GPUs using NCCL as the collective backend.
+Installs PyTorch (wheel auto-selected by CUDA version) and runs a multi-GPU DistributedDataParallel benchmark via `torchrun`.
 
-- **Fails if:** PyTorch install fails, `torchrun` is not found, NCCL process group init fails, or any GPU returns an error during the forward pass.
-- **Notes:** PyTorch wheel is auto-selected based on CUDA version (cu118 / cu121 / cu124 / cu128). On Ubuntu 24.04, `--break-system-packages` is used automatically.
+Runs 100 forward passes of a 10,000×10,000 linear layer across all GPUs in scope using NCCL as the collective backend.
+
+**Fails if:** PyTorch install fails, `torchrun` not found, NCCL process group init fails, or any forward pass errors.
+
+**PyTorch wheel selection:**
+
+| CUDA Version | Wheel |
+|---|---|
+| 11.x | `cu118` |
+| 12.0–12.1 | `cu121` |
+| 12.2–12.4 | `cu124` |
+| 12.5+ | `cu128` |
+
+**Notes:** On Ubuntu 24.04+, `--break-system-packages` is added to pip installs automatically (PEP 668 compliance).
 
 ---
 
 ### `memtest` — VRAM Integrity
+
 Builds and runs [cuda_memtest](https://github.com/ComputationalRadiationPhysics/cuda_memtest) — the GPU equivalent of memtest86.
 
-Runs 10 passes of Test 10 (memory stress) per GPU in parallel, writing pseudorandom patterns across all available VRAM and verifying readback.
+Runs 10 passes of memory stress testing per GPU in scope, writing pseudorandom patterns across all available VRAM and verifying readback. All GPUs run in parallel; exit codes are collected after all complete.
 
-- **Fails if:** Any GPU reports a memory error on any pass.
-- **Notes:** All GPUs are tested simultaneously. Exit codes are collected after all finish — a failure on any GPU fails the test.
+**Fails if:** Any GPU reports a memory error on any pass.
 
 ---
 
 ### `stress` — Sustained Compute Stress
-Runs a sustained compute workload for the specified duration (default 5 minutes) while a background thermal monitor samples every 5 seconds.
 
-**Tool selection hierarchy:**
+Runs a sustained compute workload for the configured duration while a background thermal monitor samples every 5 seconds.
+
+**Tool selection (in priority order):**
 
 | Tool | Method | Notes |
 |---|---|---|
-| [gpu-fryer](https://github.com/huggingface/gpu-fryer) | BF16 Tensor Core GEMM | Primary — Rust binary, no CUDA compile, works on all drivers |
+| [gpu-fryer](https://github.com/huggingface/gpu-fryer) | BF16 Tensor Core GEMM | Primary — Rust binary, no CUDA compilation required |
 | [gpu-burn](https://github.com/wilicc/gpu-burn) | FP64 GEMM | Secondary fallback |
-| PyTorch cuBLAS loop | BF16 8192×8192 GEMM | Final fallback — always available |
+| PyTorch cuBLAS loop | BF16 8192×8192 GEMM | Final fallback — always available if PyTorch is installed |
 
 **Thermal monitoring during burn:**
 
-The monitor records per-GPU peak temperature, peak fan speed, and any throttle events. At the end it prints a summary table and flags:
+A background monitor samples all GPUs in scope every 5 seconds throughout the burn and prints a live table:
 
-| Threshold | Flag |
-|---|---|
-| Temperature ≥ 87°C | `TEMP` warning |
-| Fan speed = 100% | `FAN` warning |
-| Any active throttle reason | `THROTTLE` warning |
+```
+  Elapsed  GPU  Temp°C  Power W   Fan %   SM MHz  Throttle
+  5s         0    72    440.5 W    78%     2520    Not Active
+  5s         1    74    441.2 W    79%     2520    Not Active
+```
 
-- **Fails if:** The burn tool exits with a non-zero code (compute error), **or** any GPU exceeds a thermal threshold.
-- **Thresholds** are configurable at the top of the script: `TEMP_WARN` (default 87°C) and `FAN_WARN` (default 100%).
+At the end a per-GPU peak summary is printed:
+
+```
+  GPU  Name                      PeakTemp  PeakFan  Issues
+  0    NVIDIA GeForce RTX 5090      84°C      92%   OK
+  1    NVIDIA GeForce RTX 5090      89°C     100%   TEMP 89°C >= 87°C  FAN at 100%
+```
+
+**Thermal thresholds** (configurable at the top of the script):
+
+| Constant | Default | Flag |
+|---|---|---|
+| `TEMP_WARN` | `87°C` | `TEMP <n>°C >= 87°C (check thermal paste/airflow)` |
+| `FAN_WARN` | `100%` | `FAN at 100% (cooling at limit)` |
+
+**Fails if:**
+- The burn tool exits non-zero (compute error or GPU crash)
+- Any GPU in scope exceeds a thermal threshold during the run
+
+> A thermal failure means the compute test passed but cooling needs investigation. The GPU appears as `FAIL` in the summary to ensure it gets attention rather than being buried in scrollback.
 
 ---
 
 ## Output
 
-### Screen output
-All test output is printed to the terminal as it runs, with section headers and `[ PASS ]` / `[ FAIL ]` / `[ SKIPPED ]` markers.
+### Terminal
+
+All output is printed live to the terminal with section headers and result markers:
+
+```
+========================================
+Running: NCCL All-Reduce Test
+========================================
+...
+[ PASS ] NCCL All-Reduce Test
+```
 
 ### Log file
-A timestamped log file is written to the same directory as the script:
+
+A timestamped log is written alongside the script:
+
 ```
 fulltest_YYYYMMDD_HHMMSS.log
 ```
 
-The log header includes hostname, IP addresses, user, and timestamp for identification when collecting logs from multiple machines.
+The log header captures hostname, IP addresses, user, and timestamp — useful when collecting logs from multiple machines:
+
+```
+============================================================
+  fulltest.sh — GPU Test Suite
+  Date     : 2026-02-24 15:05:15 UTC
+  Hostname : ezc-tensora-15g
+  IP(s)    : 172.16.10.16
+  User     : ezc
+  Script   : /home/ezc/infra/test/fulltest.sh
+============================================================
+```
 
 ### Summary
-The final summary shows:
+
+The final summary block is self-contained and includes host identification:
+
 ```
 ========================================
 TEST SUMMARY
 ========================================
-  Host     : my-gpu-server
-  IP(s)    : 10.0.0.5
+  Host     : ezc-tensora-15g
+  IP(s)    : 172.16.10.16
   GPUs     : NVIDIA GeForce RTX 5090
   Arch(es) : 120
   CUDA     : 12.9
-  Log file : /home/user/test/fulltest_20260224_150515.log
+  Log file : /home/ezc/infra/test/fulltest_20260224_150515.log
 
   PASSED (11):
     ✓  Preflight (Thermal Baseline / Persistence / Driver)
     ✓  ECC Error Check
-    ...
-
-  SKIPPED (1):
-    -  DCGM Diagnostics — dcgmi not found
-
-  FAILED (1):
-    ✗  Sustained Compute Stress (5.0 min)
+    ✓  PCIe Link Width / Generation
+    ✓  Clock Speed Under Load
+    ✓  NCCL All-Reduce Test
+    ✓  CUDA Samples (deviceQuery / p2pBandwidthLatencyTest)
+    ✓  NVBandwidth (GPU Memory Bandwidth)
+    ✓  DCGM Diagnostics
+    ✓  PyTorch Multi-GPU Benchmark
+    ✓  cuda_memtest (GPU Memory Stress)
+    ✓  Sustained Compute Stress (5.0 min)
 
 ========================================
-  RESULT: 1 test(s) FAILED
+  RESULT: ALL 11 TESTS PASSED
 ========================================
 ```
 
-Exit code is `0` if all tests pass, `1` if any test fails — suitable for CI/CD pipelines.
+**Exit code:** `0` if all tests pass, `1` if any test fails — suitable for CI/CD pipelines.
 
 ---
 
 ## Build Directory
 
-All compiled binaries and cloned repos are placed under `./build/` next to the script. Builds are idempotent — already-built binaries are reused on subsequent runs.
+All compiled binaries and cloned repos live under `./build/` next to the script. Builds are idempotent — existing binaries are reused on subsequent runs.
 
 ```
 build/
@@ -303,36 +458,71 @@ build/
   gpu-burn/
 ```
 
-To force a full rebuild:
+**Force full rebuild:**
 ```bash
+# Clean and exit
 ./fulltest.sh --clean
+
+# Clean then immediately run specific tests
+./fulltest.sh --clean nccl memtest
 ```
 
-Or delete manually:
-```bash
-rm -rf build/
-```
+---
+
+## Configurable Constants
+
+Defined near the top of the script — edit directly to change defaults:
+
+| Constant | Default | Description |
+|---|---|---|
+| `BURN_DURATION` | `300` | Default stress duration in seconds (overridden by `--burn-duration`) |
+| `TEMP_WARN` | `87` | Temperature threshold in °C for burn test thermal flag |
+| `FAN_WARN` | `100` | Fan speed threshold in % for burn test thermal flag |
 
 ---
 
 ## Common Issues
 
 ### NCCL fails with "CUDA driver version is insufficient"
-`libnccl2` is built against a different CUDA version than your toolkit. The script detects and fixes this automatically on the next run. To fix manually:
+
+`libnccl2` is built against a different CUDA version than the active toolkit. This commonly happens when DCGM installs `libnccl2+cuda13.x` on a CUDA 12.x system. The script detects and fixes this automatically on the next run. To fix manually:
+
 ```bash
-apt-cache madison libnccl2 | grep cuda12   # find matching version
+apt-cache madison libnccl2 | grep cuda12
 sudo apt-get install libnccl2=<version> libnccl-dev=<version>
 ./fulltest.sh --clean nccl
 ```
 
-### PCIe test reports Gen1 warning
-Normal on systems with ASPM enabled — the link power-gates to Gen1 at idle. This is a warning, not a failure. Verify by checking NVBandwidth host↔device results. If bandwidth is normal (~25–30 GB/s for PCIe 4.0 x16), there is no real issue.
+### PCIe test shows Gen1 warning
+
+Normal on any system with ASPM (Active State Power Management) enabled — the PCIe link power-gates to Gen1 at idle. This is a **warning, not a failure**. Confirm there is no real issue by checking NVBandwidth host↔device results: if bandwidth is normal (~25–30 GB/s for PCIe 4.0 x16), the hardware is fine.
 
 ### Preflight fails with throttle warning at idle
-Indicates a real hardware throttle event at idle (not normal idle clock-down). Check `nvidia-smi -q -d CLOCK` for details and `nvidia-smi --query-gpu=clocks_throttle_reasons.active --format=csv`.
+
+Indicates a real hardware throttle event at idle (not normal clock-down). Investigate with:
+
+```bash
+nvidia-smi --query-gpu=index,clocks_throttle_reasons.active --format=csv
+nvidia-smi -q -d CLOCK
+```
 
 ### cuda-samples build fails on CUDA 12.9
-The script patches out `sm_110` from CMakeLists automatically. If build still fails, run `./fulltest.sh --clean cuda-samples` to force a fresh clone and rebuild.
 
-### gpu-fryer build fails (Rust)
-Rust is installed automatically via rustup. If cargo is unavailable after install, the script falls back to gpu-burn, then to the PyTorch stress fallback. No action needed unless you specifically want gpu-fryer.
+The script patches `sm_110` out of CMakeLists automatically. If the build still fails, force a clean rebuild:
+
+```bash
+./fulltest.sh --clean cuda-samples
+```
+
+### gpu-fryer unavailable (Rust not installed)
+
+Rust is installed automatically via `rustup`. If `cargo` is still unavailable, the script falls back to gpu-burn, then to the PyTorch cuBLAS stress fallback automatically — no manual action needed.
+
+### `--gpu` reports invalid index
+
+```bash
+./fulltest.sh --gpu 9
+# ERROR: --gpu 9 is invalid. System has GPUs 0-7.
+```
+
+Use `nvidia-smi -L` to list available GPU indices.
