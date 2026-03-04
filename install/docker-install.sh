@@ -371,7 +371,8 @@ free_gb_on_mount() {
     df -BG "$1" 2>/dev/null | awk 'NR==2{gsub(/G/,"",$4); print $4}' || echo 0
 }
 lvm_gib_to_int() {
-    echo "$1" | awk '{printf "%d", $1}'
+    # vgs --units g returns values like "3626.98g" — strip the unit and floor to int
+    echo "$1" | awk '{gsub(/[gG]/,""); printf "%d", $1}'
 }
 
 # GPG fingerprint verification helper
@@ -452,15 +453,18 @@ phase_disk_setup() {
     local free_vgs=()
     if command -v vgs &>/dev/null; then
         info "Scanning LVM VGs for free space..."
-        while IFS= read -r vg_name; do
-            local free_str free_gb
-            free_str=$(vgdisplay "$vg_name" 2>/dev/null | awk '/Free  PE/{print $5,$6}')
+        # Use vgs --units g for clean numeric GiB output — avoids PE-count ambiguity
+        # from vgdisplay which returns PE count in $5 not GiB
+        while IFS= read -r line; do
+            local vg_name free_str free_gb
+            vg_name=$(echo "$line" | awk '{print $1}')
+            free_str=$(echo "$line" | awk '{print $2}')
             free_gb=$(lvm_gib_to_int "$free_str")
             if (( free_gb > 0 )); then
                 free_vgs+=("${vg_name}:${free_gb}GB")
                 info "  VG '${vg_name}': ~${free_gb} GB free"
             fi
-        done < <(vgs --noheadings -o vg_name 2>/dev/null | awk '{print $1}')
+        done < <(vgs --noheadings --units g -o vg_name,vg_free 2>/dev/null | awk '{print $1, $2}')
     fi
 
     local setup_method="none"
