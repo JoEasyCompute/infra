@@ -2,7 +2,14 @@
 # =============================================================================
 # docker-install.sh
 # Installs Docker CE + NVIDIA Container Toolkit on Ubuntu
-# Handles automatic disk/LVM detection for /var/lib/docker placement
+# Handles automatic disk/LVM detection for container runtime storage
+#
+# Storage layout:
+#   /data/container-runtime/          ← XFS volume (shared)
+#   /data/container-runtime/docker/   ← Docker data root
+#   /data/container-runtime/containerd/ ← containerd data root
+#   /var/lib/docker    → symlink → /data/container-runtime/docker
+#   /var/lib/containerd → symlink → /data/container-runtime/containerd
 #
 # Part of the /opt/provision provisioning suite.
 # State file: /opt/provision/state/docker-install.state
@@ -23,10 +30,16 @@ JSONL_FILE="${LOG_DIR}/docker-install.jsonl"
 STATE_FILE="${STATE_DIR}/docker-install.state"
 LOG_MAX_RUNS=3                 # keep last N run blocks in the human log
 
-DOCKER_MOUNT="/var/lib/docker"
+# Container runtime storage layout
+CONTAINER_RUNTIME_MOUNT="/data/container-runtime"   # XFS volume mountpoint
+DOCKER_DATA_DIR="${CONTAINER_RUNTIME_MOUNT}/docker"
+CONTAINERD_DATA_DIR="${CONTAINER_RUNTIME_MOUNT}/containerd"
+DOCKER_SYMLINK="/var/lib/docker"                    # → DOCKER_DATA_DIR
+CONTAINERD_SYMLINK="/var/lib/containerd"            # → CONTAINERD_DATA_DIR
+
 LVM_USE_PCT=80
 MIN_ROOT_FREE_GB=10
-MIN_DOCKER_VOL_GB=50
+MIN_CONTAINER_VOL_GB=100    # shared volume — higher minimum than docker-only
 DAEMON_JSON="/etc/docker/daemon.json"
 
 # Known-good GPG fingerprints
@@ -269,7 +282,7 @@ if [[ "$UNINSTALL" == true ]]; then
     CURRENT_PHASE="UNINSTALL"
     header "Uninstall mode"
     warn "This will remove Docker CE, NVIDIA Container Toolkit, Docker Compose,"
-    warn "and any volume mounts created by this script under ${DOCKER_MOUNT}."
+    warn "and the container runtime volume at ${CONTAINER_RUNTIME_MOUNT}."
     warn "All container images, volumes, and data will be DESTROYED."
     confirm "Proceed with full uninstall?" || { info "Aborted."; exit 0; }
 
@@ -300,14 +313,19 @@ if [[ "$UNINSTALL" == true ]]; then
     rm -f "${DAEMON_JSON}"
     rm -f /usr/local/lib/docker/cli-plugins/docker-compose
 
-    if mountpoint -q "${DOCKER_MOUNT}" 2>/dev/null; then
-        warn "Unmounting ${DOCKER_MOUNT}..."
-        umount "${DOCKER_MOUNT}" || true
-        sed -i "\|${DOCKER_MOUNT}|d" /etc/fstab
+    # Remove symlinks first, then unmount the shared volume
+    info "Removing /var/lib symlinks..."
+    rm -f "${DOCKER_SYMLINK}" "${CONTAINERD_SYMLINK}"
+
+    if mountpoint -q "${CONTAINER_RUNTIME_MOUNT}" 2>/dev/null; then
+        warn "Unmounting ${CONTAINER_RUNTIME_MOUNT}..."
+        umount "${CONTAINER_RUNTIME_MOUNT}" || true
+        sed -i "\|${CONTAINER_RUNTIME_MOUNT}|d" /etc/fstab
         info "Removed fstab entry — underlying disk/LV NOT wiped (manual step)"
     fi
 
-    rm -rf /var/lib/docker /var/lib/containerd /etc/docker
+    # Remove any leftover data directories and config
+    rm -rf "${CONTAINER_RUNTIME_MOUNT}" /etc/docker
     rm -f /etc/modprobe.d/blacklist-nouveau.conf
     rm -f "$STATE_FILE"
 
@@ -336,6 +354,9 @@ for cmd in curl gpg lsblk df awk sed python3; do
         exit 1
     fi
 done
+# rsync preferred for data migration but not hard-required (falls back to cp -ax)
+command -v rsync &>/dev/null || warn "rsync not found — will use cp for data migration (slower)"
+# xfsprogs auto-installed in DISK_SETUP phase if missing
 success "Required tools present"
 
 if command -v docker &>/dev/null && [[ "$(state_get DOCKER_INSTALL)" != "complete" ]]; then
@@ -398,10 +419,18 @@ phase_disk_setup() {
 # -----------------------------------------------------------------------------
     CURRENT_PHASE="DISK_SETUP"
 
-    # Already on its own mount — nothing to do
-    if mountpoint -q "$DOCKER_MOUNT" 2>/dev/null; then
-        success "${DOCKER_MOUNT} is already a separate mount — skipping"
+    # If the shared volume is already mounted at our target path, just verify
+    # the subdirs and symlinks are in place and return early
+    if mountpoint -q "${CONTAINER_RUNTIME_MOUNT}" 2>/dev/null; then
+        success "${CONTAINER_RUNTIME_MOUNT} already mounted — verifying layout..."
+        _ensure_subdirs_and_symlinks
         return 0
+    fi
+
+    # Check xfsprogs is available for mkfs.xfs
+    if ! command -v mkfs.xfs &>/dev/null; then
+        info "Installing xfsprogs..."
+        apt-get install -y xfsprogs
     fi
 
     # Detect free disks
@@ -464,7 +493,7 @@ phase_disk_setup() {
             done
             echo "  $idx) Skip — use LVM or root instead"
             while true; do
-                read -rp "$(echo -e "${YELLOW}Select disk for ${DOCKER_MOUNT} [1-${idx}]: ${RESET}")" choice
+                read -rp "$(echo -e "${YELLOW}Select disk for container runtime [1-${idx}]: ${RESET}")" choice
                 [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= idx )) && break
                 warn "Enter a number between 1 and ${idx}"
             done
@@ -503,7 +532,7 @@ phase_disk_setup() {
             done
             echo "  $idx) Skip — install on root"
             while true; do
-                read -rp "$(echo -e "${YELLOW}Select VG for ${DOCKER_MOUNT} [1-${idx}]: ${RESET}")" choice
+                read -rp "$(echo -e "${YELLOW}Select VG for container runtime [1-${idx}]: ${RESET}")" choice
                 [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= idx )) && break
                 warn "Enter a number between 1 and ${idx}"
             done
@@ -515,17 +544,20 @@ phase_disk_setup() {
 
     # --- Scenario D: root fallback ---
     if [[ "$setup_method" == "none" ]]; then
-        warn "No free disks or LVM space — Docker will install on root partition"
+        warn "No free disks or LVM space — container runtime will use root partition"
         df -h /
         local root_free; root_free=$(free_gb_on_mount /)
         (( root_free < MIN_ROOT_FREE_GB )) && \
             warn "Root only has ${root_free} GB free — may be insufficient"
+        warn "This is NOT recommended for GPU/ML workloads"
         confirm "Continue on root partition?" || { info "Aborted."; exit 0; }
+        # Still create subdirs and symlinks under root — consistent layout
+        _ensure_subdirs_and_symlinks
         return 0
     fi
 
-    # --- Execute disk setup ---
-    local uuid
+    # --- Format and mount the shared XFS volume ---
+    local device
     if [[ "$setup_method" == "disk" ]]; then
         local existing
         existing=$(lsblk -no NAME "${selected_disk}" | tail -n +2 | wc -l)
@@ -534,37 +566,164 @@ phase_disk_setup() {
             lsblk "${selected_disk}"
             confirm "Wipe and reformat ${selected_disk}? ALL DATA LOST." || exit 1
         fi
-        info "Formatting ${selected_disk} as ext4..."
-        mkfs.ext4 -L docker_data -F "${selected_disk}"
-        uuid=$(blkid -s UUID -o value "${selected_disk}")
+        info "Formatting ${selected_disk} as XFS (reflink=1, ftype=1)..."
+        mkfs.xfs -f \
+            -L container_rt \
+            -m reflink=1 \
+            -i maxpct=25 \
+            "${selected_disk}"
+        device="${selected_disk}"
 
     elif [[ "$setup_method" == "lvm" ]]; then
-        local lv_name="docker_data"
+        local lv_name="container_rt"
         local lv_path="/dev/${selected_vg}/${lv_name}"
         if lvdisplay "${lv_path}" &>/dev/null; then
             warn "LV ${lv_path} already exists"
-            confirm "Use existing LV (will reformat)?" || exit 1
+            confirm "Use existing LV (will reformat as XFS)?" || exit 1
         else
             info "Creating LV using ${LVM_USE_PCT}% of free space in ${selected_vg}..."
             lvcreate -l "${LVM_USE_PCT}%FREE" -n "${lv_name}" "${selected_vg}"
         fi
-        info "Formatting ${lv_path} as ext4..."
-        mkfs.ext4 -L docker_data "${lv_path}"
-        uuid=$(blkid -s UUID -o value "${lv_path}")
+        info "Formatting ${lv_path} as XFS (reflink=1, ftype=1)..."
+        mkfs.xfs -f \
+            -L container_rt \
+            -m reflink=1 \
+            -i maxpct=25 \
+            "${lv_path}"
+        device="${lv_path}"
     fi
 
-    mkdir -p "${DOCKER_MOUNT}"
+    local uuid
+    uuid=$(blkid -s UUID -o value "${device}")
+    info "Volume UUID: ${uuid}"
+
+    # Create mountpoint and add fstab entry
+    # noatime: skip access time updates — improves I/O performance
+    # nofail:  don't halt boot if volume is missing
+    mkdir -p "${CONTAINER_RUNTIME_MOUNT}"
     if ! grep -q "UUID=${uuid}" /etc/fstab; then
-        echo "UUID=${uuid}  ${DOCKER_MOUNT}  ext4  defaults,nofail  0  2" >> /etc/fstab
+        echo "UUID=${uuid}  ${CONTAINER_RUNTIME_MOUNT}  xfs  defaults,noatime,nofail  0  2" \
+            >> /etc/fstab
+        info "Added fstab entry for UUID=${uuid}"
     else
         info "fstab entry for UUID=${uuid} already present"
     fi
-    mount -a
 
-    local vol_free; vol_free=$(free_gb_on_mount "${DOCKER_MOUNT}")
-    (( vol_free < MIN_DOCKER_VOL_GB )) && \
-        warn "Docker volume only ${vol_free} GB — recommend at least ${MIN_DOCKER_VOL_GB} GB"
-    success "Docker volume ready: ${vol_free} GB available at ${DOCKER_MOUNT}"
+    # Mount now
+    mount -a
+    success "Mounted ${device} → ${CONTAINER_RUNTIME_MOUNT} (XFS, reflink enabled)"
+
+    # Verify volume size
+    local vol_free; vol_free=$(free_gb_on_mount "${CONTAINER_RUNTIME_MOUNT}")
+    (( vol_free < MIN_CONTAINER_VOL_GB )) && \
+        warn "Volume only ${vol_free} GB free — recommend at least ${MIN_CONTAINER_VOL_GB} GB for GPU workloads"
+
+    # Migrate any existing data from root, then create subdirs and symlinks
+    _migrate_existing_data
+    _ensure_subdirs_and_symlinks
+
+    success "Container runtime volume ready: ${vol_free} GB at ${CONTAINER_RUNTIME_MOUNT}"
+    info "  Docker data:     ${DOCKER_DATA_DIR}  (← ${DOCKER_SYMLINK})"
+    info "  containerd data: ${CONTAINERD_DATA_DIR}  (← ${CONTAINERD_SYMLINK})"
+}
+
+# -----------------------------------------------------------------------------
+# Helper: migrate existing /var/lib/docker and /var/lib/containerd data
+# to the new volume before symlinking. Called only when the volume is freshly
+# mounted and the source paths are real directories (not yet symlinks).
+# -----------------------------------------------------------------------------
+_migrate_existing_data() {
+    for src_path in "${DOCKER_SYMLINK}" "${CONTAINERD_SYMLINK}"; do
+        # Only migrate if the path exists, is a real directory (not a symlink),
+        # and has actual content
+        if [[ -d "${src_path}" ]] && [[ ! -L "${src_path}" ]]; then
+            local item_count
+            item_count=$(find "${src_path}" -maxdepth 1 -mindepth 1 2>/dev/null | wc -l)
+            if (( item_count > 0 )); then
+                local dest
+                if [[ "${src_path}" == "${DOCKER_SYMLINK}" ]]; then
+                    dest="${DOCKER_DATA_DIR}"
+                else
+                    dest="${CONTAINERD_DATA_DIR}"
+                fi
+                warn "Existing data found in ${src_path} (${item_count} items) — migrating to ${dest}..."
+
+                # Stop services before touching their data
+                for svc in docker containerd; do
+                    systemctl is-active --quiet "$svc" 2>/dev/null && \
+                        { info "Stopping ${svc} for migration..."; systemctl stop "$svc"; }
+                done
+
+                mkdir -p "${dest}"
+                # rsync: archive mode, hard-link preservation, sparse file support
+                if command -v rsync &>/dev/null; then
+                    rsync -aHSx "${src_path}/" "${dest}/"
+                else
+                    cp -ax "${src_path}/." "${dest}/"
+                fi
+
+                # Rename the original to a backup rather than deleting immediately
+                mv "${src_path}" "${src_path}.pre-migration.bak"
+                success "Migrated ${src_path} → ${dest} (backup: ${src_path}.pre-migration.bak)"
+            else
+                # Empty directory — just remove it so we can symlink cleanly
+                rm -rf "${src_path}"
+                info "${src_path} was empty — removed"
+            fi
+        elif [[ -L "${src_path}" ]]; then
+            info "${src_path} is already a symlink — skipping migration"
+        fi
+    done
+}
+
+# -----------------------------------------------------------------------------
+# Helper: create subdirectories on the volume and point /var/lib symlinks at them
+# Idempotent — safe to call on re-runs
+# -----------------------------------------------------------------------------
+_ensure_subdirs_and_symlinks() {
+    # Create subdirs on the volume with correct ownership
+    mkdir -p "${DOCKER_DATA_DIR}" "${CONTAINERD_DATA_DIR}"
+    chmod 710 "${DOCKER_DATA_DIR}"
+    chmod 710 "${CONTAINERD_DATA_DIR}"
+
+    # Docker symlink
+    if [[ -L "${DOCKER_SYMLINK}" ]]; then
+        local current_target
+        current_target=$(readlink "${DOCKER_SYMLINK}")
+        if [[ "${current_target}" != "${DOCKER_DATA_DIR}" ]]; then
+            warn "${DOCKER_SYMLINK} points to ${current_target}, expected ${DOCKER_DATA_DIR} — re-linking"
+            rm -f "${DOCKER_SYMLINK}"
+            ln -s "${DOCKER_DATA_DIR}" "${DOCKER_SYMLINK}"
+        else
+            info "${DOCKER_SYMLINK} → ${DOCKER_DATA_DIR} (already correct)"
+        fi
+    elif [[ -e "${DOCKER_SYMLINK}" ]]; then
+        # Real directory or file blocking the symlink — should have been migrated above
+        error "${DOCKER_SYMLINK} exists as a non-symlink — migration may have failed"
+        return 1
+    else
+        ln -s "${DOCKER_DATA_DIR}" "${DOCKER_SYMLINK}"
+        success "Created symlink: ${DOCKER_SYMLINK} → ${DOCKER_DATA_DIR}"
+    fi
+
+    # containerd symlink
+    if [[ -L "${CONTAINERD_SYMLINK}" ]]; then
+        local current_target
+        current_target=$(readlink "${CONTAINERD_SYMLINK}")
+        if [[ "${current_target}" != "${CONTAINERD_DATA_DIR}" ]]; then
+            warn "${CONTAINERD_SYMLINK} points to ${current_target}, expected ${CONTAINERD_DATA_DIR} — re-linking"
+            rm -f "${CONTAINERD_SYMLINK}"
+            ln -s "${CONTAINERD_DATA_DIR}" "${CONTAINERD_SYMLINK}"
+        else
+            info "${CONTAINERD_SYMLINK} → ${CONTAINERD_DATA_DIR} (already correct)"
+        fi
+    elif [[ -e "${CONTAINERD_SYMLINK}" ]]; then
+        error "${CONTAINERD_SYMLINK} exists as a non-symlink — migration may have failed"
+        return 1
+    else
+        ln -s "${CONTAINERD_DATA_DIR}" "${CONTAINERD_SYMLINK}"
+        success "Created symlink: ${CONTAINERD_SYMLINK} → ${CONTAINERD_DATA_DIR}"
+    fi
 }
 
 # -----------------------------------------------------------------------------
@@ -608,16 +767,19 @@ phase_daemon_config() {
     CURRENT_PHASE="DAEMON_CONFIG"
 
     local storage_driver="overlay2"
-    if [[ -d "${DOCKER_MOUNT}" ]]; then
+    if mountpoint -q "${CONTAINER_RUNTIME_MOUNT}" 2>/dev/null; then
         local fs_type
-        fs_type=$(df -T "${DOCKER_MOUNT}" | awk 'NR==2{print $2}')
+        fs_type=$(df -T "${CONTAINER_RUNTIME_MOUNT}" | awk 'NR==2{print $2}')
         case "$fs_type" in
+            xfs)   storage_driver="overlay2" ;;  # overlay2 on XFS requires ftype=1 (set at format time)
             btrfs) storage_driver="btrfs" ;;
             zfs)   storage_driver="zfs" ;;
             *)     storage_driver="overlay2" ;;
         esac
+        info "Volume filesystem: ${fs_type} → storage driver: ${storage_driver}"
+    else
+        info "No dedicated volume — storage driver: ${storage_driver} (root)"
     fi
-    info "Storage driver: ${storage_driver}"
 
     mkdir -p /etc/docker
     [[ -f "${DAEMON_JSON}" ]] && {
@@ -625,13 +787,14 @@ phase_daemon_config() {
         cp "${DAEMON_JSON}" "${DAEMON_JSON}.bak"
     }
 
+    # data-root points to the docker subdir on the shared XFS volume
     python3 - <<PYEOF
 import json, subprocess, shutil
 cfg = {
     "log-driver": "json-file",
     "log-opts": {"max-size": "100m", "max-file": "3"},
     "storage-driver": "${storage_driver}",
-    "data-root": "${DOCKER_MOUNT}"
+    "data-root": "${DOCKER_DATA_DIR}"
 }
 if shutil.which("nvidia-smi"):
     try:
@@ -651,7 +814,7 @@ PYEOF
         || { error "daemon.json JSON validation failed"; exit 1; }
 
     systemctl restart docker
-    success "Daemon configured: log-rotation=100m×3, storage=${storage_driver}"
+    success "Daemon configured: data-root=${DOCKER_DATA_DIR}, log-rotation=100m×3, storage=${storage_driver}"
 }
 
 # -----------------------------------------------------------------------------
@@ -839,7 +1002,14 @@ echo -e "${BOLD}Daemon config:${RESET}"
 sed 's/^/  /' "${DAEMON_JSON}" 2>/dev/null || echo "  (not found)"
 
 echo -e "${BOLD}Storage layout:${RESET}"
-df -h "${DOCKER_MOUNT}" / | awk 'NR==1{print "  "$0} NR>1{print "  "$0}'
+if mountpoint -q "${CONTAINER_RUNTIME_MOUNT}" 2>/dev/null; then
+    df -h "${CONTAINER_RUNTIME_MOUNT}" | awk 'NR==1{print "  "$0} NR==2{print "  "$0}'
+    echo -e "    ${DOCKER_SYMLINK} → $(readlink ${DOCKER_SYMLINK} 2>/dev/null || echo '(not set)')"
+    echo -e "    ${CONTAINERD_SYMLINK} → $(readlink ${CONTAINERD_SYMLINK} 2>/dev/null || echo '(not set)')"
+else
+    df -h / | awk 'NR==1{print "  "$0} NR==2{print "  "$0}'
+    warn "  No dedicated volume — container runtime on root partition"
+fi
 
 echo -e "${BOLD}Phase state:${RESET}"
 for phase in "${PHASES[@]}"; do

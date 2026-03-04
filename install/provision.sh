@@ -189,8 +189,13 @@ stage_done() { [[ "$(state_get "$1")" == "complete" ]]; }
 
 if [[ "$RESET_STATE" == true ]]; then
     rm -f "$STATE_FILE"
-    # Also reset sub-script states
     rm -f "${STATE_DIR}/docker-install.state"
+    # Remove the completion sentinel so the resume service will re-arm correctly
+    rm -f "${STATE_DIR}/.provision_complete"
+    # Re-enable the resume service if it was disabled after a previous full run
+    if [[ -f "${RESUME_SERVICE_FILE}" ]]; then
+        systemctl enable "${RESUME_SERVICE}.service" 2>/dev/null || true
+    fi
     info "All state cleared — provisioning will restart from stage1"
 fi
 
@@ -393,6 +398,27 @@ if ! stage_done "stage2_docker"; then
     run_stage "stage2_docker" "Docker + NVIDIA Toolkit Install" \
         "$SCRIPT_DOCKER_INSTALL" "$DOCKER_ARGS"
 
+    # Verify the container runtime volume is correctly mounted before continuing.
+    # If DISK_SETUP fell back to root this will be a no-op check, but if a dedicated
+    # volume was provisioned and the mount silently failed we must catch it here
+    # rather than letting fulltest run against root.
+    if ! mountpoint -q /data/container-runtime 2>/dev/null; then
+        warn "No dedicated volume at /data/container-runtime — container runtime is on root"
+        warn "This is expected only if no free disk or LVM space was available"
+    else
+        success "Container runtime volume mounted: $(df -h /data/container-runtime | awk 'NR==2{print $2" total, "$4" free"}')"
+        # Verify both symlinks resolve correctly
+        for link in /var/lib/docker /var/lib/containerd; do
+            if [[ -L "$link" ]]; then
+                success "  ${link} → $(readlink "$link")"
+            else
+                error "  ${link} is not a symlink — DISK_SETUP may have failed mid-run"
+                error "  Reset and re-run: sudo ${PROVISION_DIR}/provision.sh --reset-state"
+                exit 1
+            fi
+        done
+    fi
+
     # Reboot if nouveau was blacklisted (initramfs updated)
     if grep -q "blacklist nouveau" /etc/modprobe.d/blacklist-nouveau.conf 2>/dev/null \
        && lsmod | grep -q "^nouveau " 2>/dev/null; then
@@ -442,6 +468,18 @@ docker version --format \
     2>/dev/null || true
 [[ "$WITH_COMPOSE" == true ]] && \
     docker compose version 2>/dev/null | sed 's/^/  /' || true
+
+echo
+echo -e "${BOLD}Storage:${RESET}"
+if mountpoint -q /data/container-runtime 2>/dev/null; then
+    df -h /data/container-runtime | awk 'NR==2{printf "  /data/container-runtime  %s total  %s used  %s free\n", $2, $3, $4}'
+    echo "  /var/lib/docker     → $(readlink /var/lib/docker     2>/dev/null || echo '(not set)')"
+    echo "  /var/lib/containerd → $(readlink /var/lib/containerd 2>/dev/null || echo '(not set)')"
+    xfs_info /data/container-runtime 2>/dev/null | grep -E 'reflink|ftype' | sed 's/^/  xfs: /' || true
+else
+    df -h / | awk 'NR==2{printf "  / (root)  %s total  %s used  %s free\n", $2, $3, $4}'
+    warn "  No dedicated container runtime volume — running on root"
+fi
 
 echo
 info "Provision log:  ${LOG_FILE}"
