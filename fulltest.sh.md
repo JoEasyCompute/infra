@@ -51,7 +51,7 @@ All cloned repos and compiled binaries are placed under `./build/` next to the s
 ## Usage
 
 ```
-./fulltest.sh [test...] [--gpu <index>] [--burn-duration <seconds>] [--clean] [--list] [--help]
+./fulltest.sh [test...] [--gpu <index[,index...]>] [--burn-duration <seconds>] [--clean] [--list] [--help]
 ```
 
 ### Run all tests on all GPUs
@@ -59,9 +59,10 @@ All cloned repos and compiled binaries are placed under `./build/` next to the s
 ./fulltest.sh
 ```
 
-### Run all tests on a single GPU
+### Run all tests on specific GPU(s)
 ```bash
-./fulltest.sh --gpu 3
+./fulltest.sh --gpu 3            # single GPU
+./fulltest.sh --gpu 2,4,5        # subset of GPUs
 ```
 
 ### Run specific tests only
@@ -72,10 +73,11 @@ All cloned repos and compiled binaries are placed under `./build/` next to the s
 ./fulltest.sh stress                          # stress test only (default 5 min)
 ```
 
-### Combine: specific tests on a specific GPU
+### Combine: specific tests on specific GPUs
 ```bash
 ./fulltest.sh --gpu 3 memtest stress
-./fulltest.sh --gpu 0 preflight ecc pcie
+./fulltest.sh --gpu 2,4,5 memtest stress
+./fulltest.sh --gpu 0,1 preflight ecc pcie
 ```
 
 ---
@@ -84,7 +86,7 @@ All cloned repos and compiled binaries are placed under `./build/` next to the s
 
 | Option | Default | Description |
 |---|---|---|
-| `--gpu <index>` | all GPUs | Target a single GPU by its index (0-based, as shown by `nvidia-smi`). |
+| `--gpu <index[,index...]>` | all GPUs | Target one or more GPUs by index — single (`3`) or comma-separated (`2,4,5`). Indices are 0-based as shown by `nvidia-smi`. |
 | `--burn-duration <seconds>` | `300` (5 min) | Duration of the sustained stress test. |
 | `--clean` | — | Delete `./build/` and exit. Forces full rebuild on next run. Can be combined with tests to clean then immediately run. |
 | `--list` | — | Print available test names and exit. |
@@ -101,8 +103,14 @@ All cloned repos and compiled binaries are placed under `./build/` next to the s
 # Full suite, GPU 3 only (e.g. after a card swap)
 ./fulltest.sh --gpu 3
 
+# Full suite on GPUs 2, 4, and 5 (e.g. after swapping multiple cards)
+./fulltest.sh --gpu 2,4,5
+
 # 30-minute stress test on GPU 5 only
 ./fulltest.sh --gpu 5 stress --burn-duration 1800
+
+# memtest + stress on a specific subset
+./fulltest.sh --gpu 2,4,5 memtest stress
 
 # 1-hour stress test on all GPUs
 ./fulltest.sh stress --burn-duration 3600
@@ -125,28 +133,36 @@ All cloned repos and compiled binaries are placed under `./build/` next to the s
 
 ---
 
-## Single-GPU Mode (`--gpu`)
+## GPU Targeting (`--gpu`)
 
-`--gpu <index>` accepts a physical GPU index as shown by `nvidia-smi` (0-based).
+`--gpu` accepts a single index or a comma-separated list of indices, matching the physical GPU numbers shown by `nvidia-smi` (0-based).
+
+```bash
+--gpu 3          # single GPU
+--gpu 2,4,5      # subset of GPUs
+```
 
 When specified:
 
-- `CUDA_VISIBLE_DEVICES` is set to the target index, scoping all CUDA processes to that GPU
-- All `nvidia-smi` queries use `-i <index>` to filter telemetry, thermal data, ECC, PCIe, and clock tables to that card only
-- `NUM_GPUS` is set to `1`, so NCCL runs with `-g 1` and PyTorch with `--nproc_per_node 1`
-- `memtest` runs `--device 0` (remapped from the physical index via `CUDA_VISIBLE_DEVICES`)
-- The index is validated against the actual GPU count — an invalid index exits immediately with a clear error
+- `CUDA_VISIBLE_DEVICES` is set to the target list, scoping all CUDA processes to those GPUs only
+- All `nvidia-smi` queries use `-i <list>` to filter telemetry, thermal data, ECC, PCIe, and clock tables to those cards only
+- `NUM_GPUS` is set to the count of indices provided, so NCCL runs with `-g N` and PyTorch with `--nproc_per_node N`
+- `memtest` runs `--device 0..N-1` (remapped from physical indices via `CUDA_VISIBLE_DEVICES`)
+- All indices are validated against the actual GPU count — any invalid index exits immediately with a clear error
 
 ```bash
 # Test GPU 3 only
 ./fulltest.sh --gpu 3 memtest stress
 
+# Test GPUs 2, 4, and 5 together
+./fulltest.sh --gpu 2,4,5
+
 # Invalid index gives a clean error
 ./fulltest.sh --gpu 9
-# ERROR: --gpu 9 is invalid. System has GPUs 0-7.
+# ERROR: --gpu invalid index(es): 9. System has GPUs 0-7.
 ```
 
-> Tests that are inherently multi-GPU collective operations (NCCL all-reduce, PyTorch DDP) still run correctly in single-GPU mode — they test that the full stack initialises and executes on one card.
+> NCCL all-reduce and PyTorch DDP run across whatever GPUs are in scope — they work correctly with 1 GPU, a subset, or all GPUs.
 
 ---
 
@@ -522,7 +538,10 @@ Rust is installed automatically via `rustup`. If `cargo` is still unavailable, t
 
 ```bash
 ./fulltest.sh --gpu 9
-# ERROR: --gpu 9 is invalid. System has GPUs 0-7.
+# ERROR: --gpu invalid index(es): 9. System has GPUs 0-7.
+
+./fulltest.sh --gpu 2,9,4
+# ERROR: --gpu invalid index(es): 9. System has GPUs 0-7.
 ```
 
 Use `nvidia-smi -L` to list available GPU indices.
