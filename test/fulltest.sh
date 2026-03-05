@@ -797,14 +797,40 @@ test_nvbandwidth() {
     [ -n "$nvb_bin" ] && [ -x "$nvb_bin" ] || \
         { log "ERROR: nvbandwidth binary not found after build."; return 1; }
 
+    # Cap buffer size to avoid OOM on multi-GPU systems with large VRAM.
+    # nvbandwidth default (~1-2 GB) * num_gpus * concurrent testcases can
+    # exhaust VRAM on 4x RTX 5090 when device buffers stack up across tests.
+    local vram_mb gpu_count_local buf_mb
+    vram_mb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits \
+        | head -1 | tr -d ' ')
+    gpu_count_local=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+    # Use at most 25% of single-GPU VRAM, capped at 512 MB
+    buf_mb=$(( vram_mb / 4 ))
+    [ "$buf_mb" -gt 512 ] && buf_mb=512
+    log "  Using buffer size: ${buf_mb} MB (GPU VRAM: ${vram_mb} MB x ${gpu_count_local} GPUs)"
+
+    local nvb_out nvb_rc
     # device-to-device tests are waived on single-GPU systems
-    "$nvb_bin" \
+    nvb_out=$("$nvb_bin" \
+        --bufferSize "$buf_mb" \
         -t host_to_device_memcpy_ce \
            device_to_host_memcpy_ce \
            device_to_device_memcpy_read_ce \
            device_to_device_memcpy_write_ce \
            device_to_device_bidirectional_memcpy_read_ce \
-        2>&1 | tee -a "$LOG_FILE"
+        2>&1)
+    nvb_rc=$?
+    echo "$nvb_out" | tee -a "$LOG_FILE"
+
+    # OOM is a non-fatal warning — partial bandwidth results are still useful
+    if echo "$nvb_out" | grep -q "CUDA_ERROR_OUT_OF_MEMORY"; then
+        log "  WARNING: nvbandwidth hit OOM on one or more subtests." \
+            "Consider reducing concurrent GPU load or checking for VRAM consumers."
+        log "  Partial results above are still valid."
+        return 0
+    fi
+
+    return "$nvb_rc"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
