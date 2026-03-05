@@ -478,7 +478,7 @@ PYEOF
         "GPU" "Name" "CurGen" "MaxGen" "CurWidth" "MaxWidth" "Status" \
         | tee -a "$LOG_FILE"
 
-    local any_gen_warn=false any_width_fail=false
+    local any_gen_warn=false any_width_warn=false any_width_fail=false
     local gpu_idx gpu_name cur_gen max_gen cur_width max_width
     while IFS=, read -r gpu_idx gpu_name cur_gen max_gen cur_width max_width; do
         gpu_idx=$(echo "$gpu_idx"     | xargs)
@@ -499,13 +499,20 @@ PYEOF
             # Warning, not a hard failure
         fi
 
-        # Width mismatch: hard failure — lane count never power-gates.
-        # x8 when capable of x16 means a physical slot or riser limitation.
+        # Width mismatch: x8 physical slots are a valid server configuration
+        # (bifurcated CPU lanes, half-width risers).  Only x4 or below is a
+        # hard failure — that is never intentional and indicates a damaged
+        # riser or failed PCIe negotiation.
         if [ "$cur_width" != "$max_width" ] && \
            [ "$cur_width" != "[N/A]" ] && [ "$max_width" != "[N/A]" ]; then
-            status="FAIL: x${cur_width} < x${max_width} (physical slot/riser limitation)"
-            any_width_fail=true
-            rc=1
+            if [ "$cur_width" -le 4 ] 2>/dev/null; then
+                status="FAIL: x${cur_width} < x${max_width} (critically narrow — damaged riser?)"
+                any_width_fail=true
+                rc=1
+            else
+                status="WARN: x${cur_width} < x${max_width} (physical slot — verify intentional)"
+                any_width_warn=true
+            fi
         fi
 
         printf "  %-4s %-25s %8s %8s %8s %8s  %s\n" \
@@ -529,9 +536,14 @@ PYEOF
         log "    • 'Above 4G Decoding' disabled in BIOS (required for 8-GPU systems)"
         log "  If NVBandwidth host<->device numbers look normal, this is not a real issue."
     fi
+    if [ "$any_width_warn" = true ]; then
+        log "  NOTE: Width mismatch on one or more GPUs (warning only — not a failure)."
+        log "  x8 physical slots are valid in bifurcated or half-width riser configurations."
+        log "  Confirm intentional — NVBandwidth h2d/d2h numbers should still look normal."
+    fi
     if [ "$any_width_fail" = true ]; then
-        log "  FAIL: Width mismatch detected — lane count does not power-gate."
-        log "  Likely causes: GPU in x8 physical slot, damaged riser, or shared PCIe lanes."
+        log "  FAIL: Critically narrow lane width detected (x4 or below)."
+        log "  Likely causes: damaged riser, failed slot, or PCIe negotiation fault."
     fi
     if [ "$rc" -eq 0 ] && [ "$any_gen_warn" = false ]; then
         log "  All PCIe links running at full width and generation."
@@ -810,22 +822,33 @@ test_nvbandwidth() {
     log "  Using buffer size: ${buf_mb} MB (GPU VRAM: ${vram_mb} MB x ${gpu_count_local} GPUs)"
 
     local nvb_out nvb_rc
-    # device-to-device tests are waived on single-GPU systems
+    # On systems with >8 GPUs the full P2P mesh (N*(N-1) peer mappings) exceeds
+    # the kernel's peer mapping resource limit, causing CUDA_ERROR_TOO_MANY_PEERS.
+    # Skip device-to-device tests in that case — h2d/d2h results are still valid.
+    local d2d_tests=()
+    if [ "$gpu_count_local" -le 8 ]; then
+        d2d_tests=(
+            device_to_device_memcpy_read_ce
+            device_to_device_memcpy_write_ce
+            device_to_device_bidirectional_memcpy_read_ce
+        )
+    else
+        log "  NOTE: Skipping device-to-device tests — $gpu_count_local GPUs exceeds peer" \
+            "mapping limit. Run on a ≤8-GPU subset to test d2d bandwidth."
+    fi
+
     nvb_out=$("$nvb_bin" \
         --bufferSize "$buf_mb" \
         -t host_to_device_memcpy_ce \
            device_to_host_memcpy_ce \
-           device_to_device_memcpy_read_ce \
-           device_to_device_memcpy_write_ce \
-           device_to_device_bidirectional_memcpy_read_ce \
+           "${d2d_tests[@]}" \
         2>&1)
     nvb_rc=$?
     echo "$nvb_out" | tee -a "$LOG_FILE"
 
-    # OOM is a non-fatal warning — partial bandwidth results are still useful
-    if echo "$nvb_out" | grep -q "CUDA_ERROR_OUT_OF_MEMORY"; then
-        log "  WARNING: nvbandwidth hit OOM on one or more subtests." \
-            "Consider reducing concurrent GPU load or checking for VRAM consumers."
+    # OOM and TOO_MANY_PEERS are both non-fatal — partial results are still useful
+    if echo "$nvb_out" | grep -qE "CUDA_ERROR_OUT_OF_MEMORY|CUDA_ERROR_TOO_MANY_PEERS"; then
+        log "  WARNING: nvbandwidth hit a resource limit (OOM or peer mapping exhaustion)."
         log "  Partial results above are still valid."
         return 0
     fi
@@ -875,6 +898,7 @@ test_pytorch() {
     log "  Using torchrun: $torchrun"
 
     local script="$BUILD_DIR/_pytorch_ddp_test.py"
+    mkdir -p "$BUILD_DIR" || { log "ERROR: Cannot create BUILD_DIR: $BUILD_DIR"; return 1; }
     cat > "$script" << 'PYEOF'
 import os
 import torch
@@ -899,6 +923,11 @@ if local_rank == 0:
     print(f"PyTorch multi-GPU DDP test completed on {world} GPU(s).")
 dist.destroy_process_group()
 PYEOF
+
+    if [ ! -f "$script" ]; then
+        log "ERROR: Failed to write DDP test script to $script"
+        return 1
+    fi
 
     local rc=0
     "$torchrun" --nproc_per_node "$NUM_GPUS" "$script" 2>&1 | tee -a "$LOG_FILE" || rc=$?
