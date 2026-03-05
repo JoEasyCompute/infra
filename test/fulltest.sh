@@ -39,8 +39,8 @@ RESULTS_PASS=()
 RESULTS_FAIL=()
 RESULTS_SKIP=()
 
-GPU_TARGET=""   # set by --gpu <index>; empty means all GPUs
-SMI_FILTER=""   # set to "-i <index>" in detect_system when GPU_TARGET is set
+GPU_TARGET=""   # set by --gpu <idx[,idx...]>; empty means all GPUs
+SMI_FILTER=""   # set to "-i <idx[,idx...]>" in detect_system when GPU_TARGET is set
 
 # Populated during system detection
 NUM_GPUS=""
@@ -216,16 +216,33 @@ detect_system() {
     fi
 
     if [ -n "$GPU_TARGET" ]; then
-        if ! [[ "$GPU_TARGET" =~ ^[0-9]+$ ]] || [ "$GPU_TARGET" -ge "$total_gpus" ]; then
-            log "ERROR: --gpu $GPU_TARGET is invalid. System has GPUs 0-$((total_gpus - 1))."
+        # Validate each index in the comma-separated list
+        local bad_indices=()
+        local gpu_count=0
+        local idx
+        IFS=',' read -ra indices <<< "$GPU_TARGET"
+        for idx in "${indices[@]}"; do
+            idx=$(echo "$idx" | xargs)  # trim whitespace
+            if ! [[ "$idx" =~ ^[0-9]+$ ]] || [ "$idx" -ge "$total_gpus" ]; then
+                bad_indices+=("$idx")
+            fi
+            gpu_count=$((gpu_count + 1))
+        done
+        if [ "${#bad_indices[@]}" -gt 0 ]; then
+            log "ERROR: --gpu invalid index(es): ${bad_indices[*]}. System has GPUs 0-$((total_gpus - 1))."
             exit 1
         fi
-        # Restrict all CUDA operations to this GPU index.
-        # nvidia-smi still enumerates all GPUs by physical index unless we pass -i explicitly.
+        # Normalise: rebuild as clean comma-separated string (no spaces)
+        GPU_TARGET=$(IFS=','; echo "${indices[*]}" | tr -d ' ')
         export CUDA_VISIBLE_DEVICES="$GPU_TARGET"
-        NUM_GPUS=1
-        log "  GPU target          : GPU $GPU_TARGET (CUDA_VISIBLE_DEVICES=$GPU_TARGET)"
-        log "  NOTE: Single-GPU mode — NCCL/PyTorch run with 1 process, collective tests use 1 GPU."
+        NUM_GPUS=$gpu_count
+        if [ "$gpu_count" -eq 1 ]; then
+            log "  GPU target          : GPU $GPU_TARGET (CUDA_VISIBLE_DEVICES=$GPU_TARGET)"
+            log "  NOTE: Single-GPU mode — NCCL/PyTorch run with 1 process."
+        else
+            log "  GPU target          : GPUs $GPU_TARGET (CUDA_VISIBLE_DEVICES=$GPU_TARGET)"
+            log "  NOTE: $gpu_count-GPU subset mode — NCCL/PyTorch run across these $gpu_count GPUs."
+        fi
     else
         NUM_GPUS=$total_gpus
     fi
@@ -1221,7 +1238,7 @@ Available tests (run in this order if none specified):
   stress        Sustained compute stress: gpu-fryer / gpu-burn / PyTorch
 
 Options:
-  --gpu <index>              Target a single GPU by index (e.g. --gpu 3)
+  --gpu <index[,index...]>   Target specific GPU(s) by index — single (3) or comma-separated (2,4,5)
   --burn-duration <seconds>  Duration for stress test (default: 300 = 5 min)
   --clean                    Delete all build artifacts and exit
   --list                     List available test names and exit
@@ -1230,6 +1247,8 @@ Options:
 Examples:
   ./fulltest.sh                              # run all tests on all GPUs
   ./fulltest.sh --gpu 3                      # run all tests on GPU 3 only
+  ./fulltest.sh --gpu 2,4,5                  # run all tests on GPUs 2, 4, and 5
+  ./fulltest.sh --gpu 2,4,5 memtest stress   # memtest + stress on GPUs 2, 4, 5
   ./fulltest.sh --gpu 3 memtest stress       # memtest + stress on GPU 3 only
   ./fulltest.sh preflight ecc pcie clocks    # hardware health checks only
   ./fulltest.sh nccl pytorch                 # communication + framework only
@@ -1262,8 +1281,11 @@ while [ "$i" -lt "${#args[@]}" ]; do
         --gpu)
             i=$((i + 1))
             val="${args[$i]:-}"
-            if [[ ! "$val" =~ ^[0-9]+$ ]]; then
-                echo "ERROR: --gpu requires a GPU index (e.g. --gpu 3)" >&2
+            # Accept: single index (3), comma-separated (2,4,5), or spaced list quoted ("2 4 5")
+            # Normalise spaces to commas
+            val=$(echo "$val" | tr ' ' ',')
+            if ! [[ "$val" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+                echo "ERROR: --gpu requires one or more GPU indices (e.g. --gpu 3 or --gpu 2,4,5)" >&2
                 exit 1
             fi
             GPU_TARGET="$val"
