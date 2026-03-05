@@ -295,6 +295,10 @@ Runs [NVBandwidth](https://github.com/NVIDIA/nvbandwidth) — NVIDIA's official 
 
 **Fails if:** NVBandwidth exits non-zero.
 
+**Buffer sizing:** The script automatically caps the per-GPU buffer to 25% of single-GPU VRAM, with a hard ceiling of 512 MB. This prevents OOM failures on multi-GPU systems with large VRAM (e.g. 8× RTX 5090) where nvbandwidth's default buffer size multiplied across GPUs and concurrent test cases can exhaust available memory.
+
+**OOM handling:** If nvbandwidth hits an out-of-memory error despite the buffer cap, the result is treated as a **warning rather than a failure** — partial bandwidth results are still logged and useful. A note is printed directing attention to any other VRAM consumers that may be running.
+
 **Notes:** Device-to-device tests are skipped by NVBandwidth itself on single-GPU systems — expected, not a failure.
 
 ---

@@ -4,7 +4,7 @@
 
 `docker-install.sh` is a production-grade installer for Docker CE and the NVIDIA Container Toolkit on Ubuntu systems. It is designed to be safe to run on fresh nodes, partially provisioned nodes, and nodes being reprovisioned — handling all of the following automatically:
 
-- Provisioning a shared XFS volume (with reflink/copy-on-write) for both Docker and containerd
+- Provisioning a shared XFS volume (with reflink and project quota support) for both Docker and containerd
 - Migrating any existing data before mounting, so re-provisioning never causes data loss
 - Installing and configuring Docker CE with sensible production defaults
 - Optionally installing Docker Compose v2 with checksum verification
@@ -18,44 +18,61 @@ It can be run standalone or called by `provision.sh` as part of a full multi-sta
 
 ## Storage Architecture
 
-A key design decision in this script is that Docker and containerd **share a single XFS volume**, rather than each consuming separate mounts. This means the full volume capacity is available to whichever runtime needs it at any given time — no pre-splitting required.
+Docker and containerd **share a single XFS volume** rather than each consuming separate mounts. The full volume capacity is available to whichever runtime needs it at any given time — no pre-splitting required.
 
 ### Layout
 
 ```
-/data/container-runtime/          ← XFS volume (single mount)
-├── docker/                        ← Docker data root
+/data/container-runtime/              ← XFS volume (single mount, prjquota)
+├── docker/                            ← Docker data root
 │   ├── image/
 │   ├── overlay2/
 │   ├── volumes/
 │   └── ...
-└── containerd/                    ← containerd data root
+└── containerd/                        ← containerd data root
     ├── io.containerd.snapshotter.v1.overlayfs/
     └── ...
 
-/var/lib/docker      → /data/container-runtime/docker      (symlink)
-/var/lib/containerd  → /data/container-runtime/containerd  (symlink)
+/var/lib/docker      ← bind mount → /data/container-runtime/docker
+/var/lib/containerd  ← bind mount → /data/container-runtime/containerd
 ```
 
-Both Docker and containerd continue to reference their standard paths under `/var/lib/` — the symlinks make the redirection transparent to all tooling. The XFS volume is formatted with `reflink=1` (copy-on-write), which allows Docker's overlay2 driver to share unchanged file blocks between image layers, reducing both disk usage and copy time.
+Both Docker and containerd reference their standard `/var/lib/` paths. The bind mounts make those paths genuine mountpoints at the kernel VFS level — not symlinks — which is required for correct operation with tools that perform atomic file operations (such as the vast.ai installer).
+
+### Why Bind Mounts, Not Symlinks
+
+An earlier version of this script used symlinks at `/var/lib/docker` and `/var/lib/containerd`. This caused failures with tools (including the vast.ai installer) that call `rename(2)` on those paths. The kernel rejects `rename()` when the path resolves through a symlink target directory, returning `EXDEV` or `EINVAL`. Bind mounts make the paths genuinely equivalent at the VFS layer, so `rename()` and all other syscalls work correctly regardless of which path is used.
+
+Bind mount fstab entries are written alongside the XFS volume entry so both survive reboots:
+
+```
+# XFS shared volume
+UUID=<uuid>  /data/container-runtime  xfs  defaults,noatime,nofail,prjquota  0  2
+
+# Bind mounts — survive reboot, registered by _ensure_subdirs_and_bind_mounts
+/data/container-runtime/docker      /var/lib/docker      none  bind  0  0
+/data/container-runtime/containerd  /var/lib/containerd  none  bind  0  0
+```
 
 ### Why XFS over ext4
 
 | Feature | XFS | ext4 |
 |---|---|---|
 | Reflink (CoW layer dedup) | ✓ Yes (`-m reflink=1`) | ✗ No |
+| Project quota (`prjquota`) | ✓ Yes | Limited |
 | Online grow (no unmount) | ✓ Yes | ✓ Yes |
 | Large file performance | ✓ Better | Good |
 | overlay2 support | ✓ Yes (ftype=1, default) | ✓ Yes |
-| Metadata scaling | ✓ Better at scale | Adequate |
 
-### fstab Entry
+### XFS Mount Options
 
-The volume is mounted by UUID (not device path) so it survives disk rename events across reboots. The `noatime` option skips access-time updates on every read, which meaningfully reduces I/O overhead for container workloads:
+| Option | Purpose |
+|---|---|
+| `noatime` | Skip access-time updates on every read — reduces I/O overhead for container workloads |
+| `nofail` | Don't halt boot if the volume is temporarily unavailable |
+| `prjquota` | Enable XFS project quota support — required by vast.ai and Docker's `--storage-opt size=` feature |
 
-```
-UUID=<uuid>  /data/container-runtime  xfs  defaults,noatime,nofail  0  2
-```
+If the script detects an existing fstab entry for the UUID that is **missing** `prjquota`, it patches it in automatically before mounting.
 
 ---
 
@@ -66,24 +83,20 @@ UUID=<uuid>  /data/container-runtime  xfs  defaults,noatime,nofail  0  2
 | OS | Ubuntu 20.04, 22.04, or 24.04 |
 | Privileges | Must be run as root (`sudo`) |
 | Required tools | `curl`, `gpg`, `lsblk`, `df`, `awk`, `sed`, `python3` |
-| Auto-installed | `xfsprogs` (if not present, installed automatically in Phase 1) |
+| Auto-installed | `xfsprogs` (installed automatically in Phase 1 if missing) |
 | Recommended | `rsync` (used for data migration; falls back to `cp -ax` if absent) |
 | Python | 3.6+ (used for JSON generation and log rotation) |
 | Network | Outbound HTTPS to `download.docker.com`, `github.com`, `nvidia.github.io` |
-| LVM tools | `vgs`, `vgdisplay`, `lvcreate` — only needed when using LVM storage |
+| LVM tools | `vgs`, `lvcreate` — only needed when using LVM storage |
 
 ---
 
 ## Installation
 
 ```bash
-# Copy to the provision directory (recommended)
 sudo mkdir -p /opt/provision
 sudo cp docker-install.sh /opt/provision/
 sudo chmod +x /opt/provision/docker-install.sh
-
-# Or run from any location
-sudo chmod +x docker-install.sh
 ```
 
 ---
@@ -102,7 +115,7 @@ sudo /opt/provision/docker-install.sh [OPTIONS]
 | `--disk /dev/sdX` | Force use of a specific disk for the container runtime volume |
 | `--vg <vgname>` | Force use of a specific LVM volume group for the container runtime volume |
 | `--with-compose` | Also install Docker Compose v2 (latest stable, checksum-verified) |
-| `--uninstall` | Full removal — Docker, toolkit, Compose, volume mounts, and symlinks |
+| `--uninstall` | Full removal — Docker, toolkit, Compose, bind mounts, and volume |
 | `--reset-state` | Clear phase state file and re-run all phases from scratch |
 | `--called-by-provision` | Internal flag set by `provision.sh` — do not use manually |
 | `-h, --help` | Show help and exit |
@@ -113,7 +126,7 @@ sudo /opt/provision/docker-install.sh [OPTIONS]
 # Interactive install — prompts for disk/VG selection
 sudo /opt/provision/docker-install.sh
 
-# Fully automated — no prompts, auto-selects storage
+# Fully automated
 sudo /opt/provision/docker-install.sh --non-interactive
 
 # Automated with Docker Compose
@@ -125,7 +138,7 @@ sudo /opt/provision/docker-install.sh --non-interactive --vg ubuntu-vg
 # Automated, pin to a specific disk
 sudo /opt/provision/docker-install.sh --non-interactive --disk /dev/sdb
 
-# Force a complete re-run (ignore existing state)
+# Force a complete re-run
 sudo /opt/provision/docker-install.sh --reset-state --non-interactive
 
 # Clean uninstall
@@ -135,8 +148,6 @@ sudo /opt/provision/docker-install.sh --uninstall
 ---
 
 ## Execution Flow
-
-The script is structured as six sequential phases. Each phase writes its status to the state file, so a re-run after a failure automatically skips completed phases and retries only what failed.
 
 ```
 docker-install.sh
@@ -149,16 +160,19 @@ docker-install.sh
         │       └─► Existing Docker detection
         │
         ├─► PHASE 1: DISK_SETUP
-        │       ├─► Check if /data/container-runtime already mounted → verify layout + skip format
+        │       ├─► Check if /data/container-runtime already mounted
+        │       │     YES → verify bind mounts active + skip format
         │       ├─► Auto-install xfsprogs if missing
         │       ├─► Scan for free disks (unpartitioned, unmounted)
-        │       ├─► Scan for free LVM VG space
+        │       ├─► Scan LVM VGs for free space (via vgs --units g)
         │       ├─► Run storage decision tree (see below)
-        │       ├─► Format selected device as XFS (reflink=1, ftype=1, noatime)
-        │       ├─► Add UUID-based fstab entry (idempotent)
-        │       ├─► Mount → /data/container-runtime
-        │       ├─► Migrate existing data (if any) from /var/lib/docker and /var/lib/containerd
-        │       └─► Create subdirs + place /var/lib symlinks (idempotent)
+        │       ├─► Format selected device: mkfs.xfs -m reflink=1 -i maxpct=25
+        │       ├─► Write fstab entry: xfs defaults,noatime,nofail,prjquota
+        │       │     (patches prjquota into any existing entry missing it)
+        │       ├─► mount -a
+        │       ├─► Migrate existing data from /var/lib/docker + /var/lib/containerd
+        │       └─► Create subdirs + bind-mount both into /var/lib/ (idempotent)
+        │               Converts any existing symlinks to bind mounts automatically
         │
         ├─► PHASE 2: DOCKER_INSTALL
         │       ├─► Add Docker APT repository + keyring
@@ -173,15 +187,14 @@ docker-install.sh
         │       │     btrfs      → btrfs
         │       │     zfs        → zfs
         │       ├─► Write /etc/docker/daemon.json (Python, guaranteed valid JSON)
-        │       │     log-driver, log-opts, storage-driver
         │       │     data-root → /data/container-runtime/docker
-        │       │     default-runtime: nvidia (only if nvidia-smi present now)
+        │       │     log-driver json-file, max-size 100m, max-file 3
+        │       │     default-runtime: nvidia (only if nvidia-smi present)
         │       ├─► Validate JSON (python3 json.load)
         │       └─► Restart Docker
         │
         ├─► PHASE 4: COMPOSE_INSTALL  (skipped unless --with-compose)
-        │       ├─► Query GitHub API for latest Compose release version
-        │       │     fallback → v2.27.1 if API unreachable
+        │       ├─► Query GitHub API for latest Compose version (fallback v2.27.1)
         │       ├─► Detect host architecture (amd64 / arm64 / armhf)
         │       ├─► Download binary + SHA256 checksum from GitHub releases
         │       ├─► Verify checksum — hard fail on mismatch
@@ -195,7 +208,7 @@ docker-install.sh
         │       ├─► Fix architecture placeholder in repo list (dynamic, not hardcoded)
         │       ├─► apt-get install nvidia-container-toolkit
         │       ├─► nvidia-ctk runtime configure --runtime=docker
-        │       ├─► Patch daemon.json → add default-runtime: nvidia (Python)
+        │       ├─► Patch daemon.json → add default-runtime: nvidia
         │       └─► Restart Docker
         │
         ├─► PHASE 6: NOUVEAU_BLACKLIST
@@ -212,7 +225,7 @@ docker-install.sh
                 ├─► Docker version
                 ├─► Compose version (if installed)
                 ├─► daemon.json contents
-                ├─► Volume usage + symlink targets
+                ├─► Volume usage + bind mount sources
                 └─► Phase state table
 ```
 
@@ -222,8 +235,7 @@ docker-install.sh
 
 ```
 Is /data/container-runtime already mounted?
-    YES → Verify docker/ and containerd/ subdirs exist
-          Verify /var/lib symlinks are correct
+    YES → Verify bind mounts active at /var/lib/docker and /var/lib/containerd
           Skip format + mount → return
      NO ↓
 
@@ -237,10 +249,11 @@ Are there any free disks? (no partitions, not mounted)
         Interactive:
             Show numbered list of free disks + sizes
             User selects one (or skips to LVM check)
-        → Format as XFS (reflink=1), mount, add to fstab by UUID
+        → mkfs.xfs with reflink=1
+        → fstab entry with noatime,nofail,prjquota
      NO ↓
 
-Is there free space in any LVM VG?
+Is there free space in any LVM VG? (detected via vgs --units g)
     YES →
         Non-interactive or --vg given:
             --vg specified → use that VG
@@ -249,50 +262,57 @@ Is there free space in any LVM VG?
             Show numbered list of VGs with free space and projected allocation
             User selects one (or skips to root fallback)
         → lvcreate using 80% of free VG extents
-        → Format as XFS (reflink=1), mount, add to fstab by UUID
+        → mkfs.xfs with reflink=1
+        → fstab entry with noatime,nofail,prjquota
      NO ↓
 
 No dedicated storage available:
     → Print warning + df -h /
     → Warn if root has < 10 GB free
     → Warn NOT recommended for GPU/ML workloads
-    → Require explicit confirmation (or auto-confirm in non-interactive mode)
-    → Create subdirs + symlinks under root (same layout, no separate volume)
+    → Require explicit confirmation (auto-confirm in non-interactive)
+    → Create subdirs + bind mounts on root (same layout, no separate volume)
 ```
-
-After the volume is mounted (or root fallback confirmed), two additional steps always run:
 
 ### Data Migration
 
-Before creating symlinks, the script checks whether `/var/lib/docker` or `/var/lib/containerd` already exist as real directories (not symlinks) with content. If they do, it migrates the data to the new volume before symlinking:
+Before setting up bind mounts, the script checks whether `/var/lib/docker` or `/var/lib/containerd` already exist as real directories with content. If they do:
 
 ```
 For each of /var/lib/docker and /var/lib/containerd:
-    Is it a real directory (not a symlink) with content?
-        YES →
-            Stop docker and containerd services
-            rsync -aHSx <source>/ → /data/container-runtime/<docker|containerd>/
-              (-a: archive, -H: hard links, -S: sparse files, -x: single filesystem)
-            Rename source to <path>.pre-migration.bak
-        Is it empty?
-            → Remove the empty directory (clean slate for symlink)
-        Is it already a symlink?
-            → Skip (already migrated)
+
+    Already a bind mountpoint?
+        → Skip (already migrated and mounted)
+
+    Real directory with content?
+        → Stop docker and containerd services
+        → rsync -aHSx <source>/ → /data/container-runtime/<subdir>/
+            -a: archive mode   -H: hard links
+            -S: sparse files   -x: stay on one filesystem
+        → Rename source to <path>.pre-migration.bak
+        (falls back to cp -ax if rsync is not installed)
+
+    Empty directory?
+        → Remove it (clean slate for bind mount)
+
+    Existing symlink?
+        → Remove it and replace with bind mount
 ```
 
-The `.pre-migration.bak` directories are intentionally left on disk. Once you have confirmed the migration succeeded, they can be removed manually to reclaim root space.
+The `.pre-migration.bak` directories are intentionally left on disk. Remove them manually once you have confirmed the new layout is working correctly.
 
-### Symlink Setup
+### Bind Mount Setup (`_ensure_subdirs_and_bind_mounts`)
 
-After migration, symlinks are created pointing into the shared volume. This step is idempotent — on re-runs it checks whether existing symlinks already point to the correct targets and only re-links if they have drifted:
+After migration, bind mounts are created. This function is idempotent — safe to call on re-runs:
 
 ```
-mkdir -p /data/container-runtime/docker
-mkdir -p /data/container-runtime/containerd
-chmod 710 on both
+mkdir -p /data/container-runtime/docker      (chmod 710)
+mkdir -p /data/container-runtime/containerd  (chmod 710)
 
-/var/lib/docker     → /data/container-runtime/docker     (symlink)
-/var/lib/containerd → /data/container-runtime/containerd (symlink)
+For each (source → target) pair:
+    If target is a symlink    → remove it, replace with bind mount
+    If target already mounted → skip mount, verify fstab entry
+    If target directory absent → mkdir, add fstab entry, mount --bind
 ```
 
 ### Storage Sizing
@@ -303,13 +323,9 @@ chmod 710 on both
 | Root free space < 10 GB | Warning printed |
 | LVM allocation | 80% of free VG extents (`lvcreate -l 80%FREE`) |
 
-The minimum is 100 GB (vs 50 GB in a Docker-only setup) because the volume serves both runtimes and GPU/ML base images are large.
-
 ---
 
 ## Docker Daemon Configuration (Phase 3 — DAEMON_CONFIG)
-
-`/etc/docker/daemon.json` is written by the script. If the file already exists it is backed up to `daemon.json.bak` before being overwritten.
 
 ### Written Configuration
 
@@ -329,83 +345,46 @@ The minimum is 100 GB (vs 50 GB in a Docker-only setup) because the volume serve
 | Key | Value | Reason |
 |---|---|---|
 | `log-driver` | `json-file` | Standard, compatible with most log shippers |
-| `log-opts.max-size` | `100m` | Prevents logs silently filling the volume |
+| `log-opts.max-size` | `100m` | Prevents container logs silently filling the volume |
 | `log-opts.max-file` | `3` | Keeps last 300 MB of logs per container |
 | `storage-driver` | `overlay2` | Correct for XFS with `ftype=1` (set at format time) |
-| `data-root` | `/data/container-runtime/docker` | Explicit path to Docker's subdir on the shared volume |
+| `data-root` | `/data/container-runtime/docker` | Docker's subdir on the shared volume |
 | `default-runtime` | `nvidia` | Every container gets GPU access without `--gpus all` |
 
-`data-root` points to the docker subdir on the shared volume, not the volume root — this keeps Docker's data cleanly separated from containerd's even though they share the same XFS filesystem.
-
-`default-runtime` is only written if `nvidia-smi` is present and responding at config time. After the NVIDIA toolkit installs in Phase 5, the script patches it in via Python if it was absent earlier.
+`default-runtime` is only written if `nvidia-smi` is present at config time. Phase 5 patches it in afterwards if it was absent.
 
 ---
 
-## Docker Compose Install (Phase 4 — COMPOSE_INSTALL)
+## Docker Compose Install (Phase 4)
 
-### Version Resolution
+Queries the GitHub releases API for the latest stable version, falls back to `v2.27.1` if unreachable. Downloads the binary and its `.sha256` sidecar from the same release, verifies the checksum before installing. Hard fails if the checksum does not match.
 
-The script queries the GitHub API to resolve the latest stable release:
-
-```
-GET https://api.github.com/repos/docker/compose/releases/latest
-```
-
-If the API is unreachable (air-gapped environments, rate limiting), it falls back to the pinned version `v2.27.1`. The resolved version is logged.
-
-### Checksum Verification
-
-The binary and its SHA256 checksum file are downloaded separately from GitHub releases:
-
-```
-https://github.com/docker/compose/releases/download/<version>/docker-compose-linux-<arch>
-https://github.com/docker/compose/releases/download/<version>/docker-compose-linux-<arch>.sha256
-```
-
-The script computes `sha256sum` of the downloaded binary and compares it against the published checksum. The installation **hard fails** if they do not match — the binary is discarded and an error is written to the log.
-
-### Architecture Mapping
-
-| `dpkg --print-architecture` | GitHub release filename suffix |
+| `dpkg --print-architecture` | GitHub release arch |
 |---|---|
 | `amd64` | `x86_64` |
 | `arm64` | `aarch64` |
 | `armhf` | `armv7` |
 
-### Install Location
-
-```
-/usr/local/lib/docker/cli-plugins/docker-compose
-```
+Install location: `/usr/local/lib/docker/cli-plugins/docker-compose`
 
 ---
 
-## NVIDIA Container Toolkit (Phase 5 — NVIDIA_TOOLKIT)
+## NVIDIA Container Toolkit (Phase 5)
 
-### Driver Pre-check
-
-Before installing the toolkit, the script checks for `nvidia-smi`. If the driver is not present, a warning is written and in interactive mode you are asked whether to continue. In non-interactive mode installation proceeds with a warning. The toolkit installs successfully without the driver — GPU containers just won't work until the driver is loaded and the host is rebooted.
-
-### GPG Key Verification
-
-Both the Docker and NVIDIA APT repository GPG keys are fingerprint-verified after download. If the fingerprint does not match the value embedded in the script, the installation fails hard.
+Checks for `nvidia-smi` before proceeding — warns if absent but continues (toolkit installs cleanly without the driver; GPU containers won't work until after a reboot with the driver loaded). Both the Docker and NVIDIA APT repository GPG keys are fingerprint-verified before being trusted:
 
 | Key | Expected Fingerprint |
 |---|---|
 | Docker | `9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88` |
 | NVIDIA | `EB69 3B30 35CD 5710 E231 7D3F 0402 5462 7A30 5A5C` |
 
-### Architecture Fix
-
-The NVIDIA repo list sometimes contains a literal `$(ARCH)` placeholder. The script detects this and replaces it with the output of `dpkg --print-architecture` — it never hardcodes `amd64`.
+Hard fails if either fingerprint doesn't match.
 
 ---
 
 ## Phase State & Resume
 
-### State File
-
-Progress is tracked in `/opt/provision/state/docker-install.state`:
+### State File — `/opt/provision/state/docker-install.state`
 
 ```
 DISK_SETUP=complete
@@ -416,38 +395,23 @@ NVIDIA_TOOLKIT=failed
 NOUVEAU_BLACKLIST=not run
 ```
 
-### Phase Lifecycle
-
-```
-(absent) → running → complete
-                   → failed
-```
-
-| Status | Meaning on Re-run |
+| Status | Meaning on re-run |
 |---|---|
 | `complete` | Phase is skipped |
-| `running` | Phase re-runs (script crashed mid-phase) |
+| `running` | Phase re-runs (script was killed mid-phase) |
 | `failed` | Phase re-runs |
 | *(absent)* | Phase runs normally |
 
 ### Resuming After a Failure
 
-Simply re-run the script — completed phases are skipped, only the failed phase retries:
-
 ```bash
+# Re-run — completed phases are skipped automatically
 sudo /opt/provision/docker-install.sh --non-interactive
-```
 
-### Forcing a Full Re-run
-
-```bash
+# Force full re-run from scratch
 sudo /opt/provision/docker-install.sh --reset-state --non-interactive
-```
 
-### Resetting a Single Phase
-
-```bash
-# Example: re-run only the NVIDIA_TOOLKIT phase
+# Re-run a single specific phase
 sed -i '/^NVIDIA_TOOLKIT=/d' /opt/provision/state/docker-install.state
 sudo /opt/provision/docker-install.sh --non-interactive
 ```
@@ -456,52 +420,32 @@ sudo /opt/provision/docker-install.sh --non-interactive
 
 ## Logging
 
-### Human-Readable Log
+### Human-Readable Log — `/opt/provision/logs/docker-install.log`
 
-Located at `/opt/provision/logs/docker-install.log`. Each run appends a timestamped block. The script retains the **last 3 runs** automatically — the log will never grow unbounded.
+Retains the last 3 runs automatically. Example output:
 
 ```
 ===== docker-install.sh started at Thu Feb 27 10:23:01 UTC 2026 =====
 [INFO]  Running in non-interactive mode
 [OK]    OS: Ubuntu jammy
-[INFO]  (auto) Selected largest free disk: /dev/sdb (500 GB)
-[OK]    Mounted /dev/sdb → /data/container-runtime (XFS, reflink enabled)
-[WARN]  Existing data found in /var/lib/docker (42 items) — migrating...
+[INFO]  (auto) Selected VG with most free space: ubuntu-vg (3626 GB)
+[OK]    Mounted /dev/ubuntu-vg/container_rt → /data/container-runtime (XFS, reflink enabled, prjquota)
+[WARN]  Existing data found in /var/lib/docker (42 items) — migrating to /data/container-runtime/docker
 [OK]    Migrated /var/lib/docker → /data/container-runtime/docker
-[OK]    Created symlink: /var/lib/docker → /data/container-runtime/docker
-[OK]    Created symlink: /var/lib/containerd → /data/container-runtime/containerd
-...
-[OK]    docker-install.sh complete
+[WARN]  /var/lib/docker is a symlink — removing and replacing with bind mount
+[OK]    Bind-mounted: /data/container-runtime/docker → /var/lib/docker
+[OK]    Bind-mounted: /data/container-runtime/containerd → /var/lib/containerd
 ```
 
-### JSON Log
+### JSON Log — `/opt/provision/logs/docker-install.jsonl`
 
-Located at `/opt/provision/logs/docker-install.jsonl`. Every log event is written as a JSON object (one per line), suitable for Loki, Elasticsearch, Splunk, or any structured log pipeline.
-
-```json
-{"ts":"2026-02-27T10:23:01Z","level":"info","phase":"INIT","host":"gpu-node-01","msg":"docker-install.sh started"}
-{"ts":"2026-02-27T10:23:04Z","level":"info","phase":"DISK_SETUP","host":"gpu-node-01","msg":"(auto) Selected largest free disk: /dev/sdb (500 GB)"}
-{"ts":"2026-02-27T10:23:12Z","level":"warn","phase":"DISK_SETUP","host":"gpu-node-01","msg":"Existing data found in /var/lib/docker (42 items) — migrating to /data/container-runtime/docker"}
-{"ts":"2026-02-27T10:23:58Z","level":"success","phase":"DISK_SETUP","host":"gpu-node-01","msg":"Migrated /var/lib/docker → /data/container-runtime/docker (backup: /var/lib/docker.pre-migration.bak)"}
-{"ts":"2026-02-27T10:24:15Z","level":"success","phase":"DOCKER_INSTALL","host":"gpu-node-01","msg":"Docker installed: Docker version 26.1.0"}
-```
-
-### JSON Log Fields
-
-| Field | Type | Description |
-|---|---|---|
-| `ts` | string | ISO 8601 UTC timestamp |
-| `level` | string | `info`, `success`, `warn`, `error` |
-| `phase` | string | Script phase name at time of event |
-| `host` | string | Short hostname (`hostname -s`) |
-| `msg` | string | Log message |
-
-### Tailing Live Progress
+One JSON object per line. Fields: `ts` (ISO 8601 UTC), `level`, `phase`, `host`, `msg`.
 
 ```bash
+# Tail live progress
 tail -f /opt/provision/logs/docker-install.log
 
-# Errors only, formatted
+# All errors formatted
 grep '"level":"error"' /opt/provision/logs/docker-install.jsonl | python3 -m json.tool
 ```
 
@@ -522,163 +466,137 @@ sudo /opt/provision/docker-install.sh --uninstall
 | `nvidia-container-toolkit`, `nvidia-container-runtime` | `apt-get purge` |
 | Docker Compose CLI plugin binary | `rm -f` |
 | Docker + NVIDIA APT repos and keyring files | `rm -f` |
-| `/etc/docker/daemon.json` | `rm -f` |
-| `/var/lib/docker` symlink | `rm -f` |
-| `/var/lib/containerd` symlink | `rm -f` |
-| `/data/container-runtime` mount | Unmounted |
-| `/data/container-runtime` fstab entry | Removed from `/etc/fstab` |
+| `/etc/docker/daemon.json` + `/etc/docker` | `rm -f` / `rm -rf` |
+| `/var/lib/docker` bind mount | Unmounted, fstab entry removed, directory removed |
+| `/var/lib/containerd` bind mount | Unmounted, fstab entry removed, directory removed |
+| `/data/container-runtime` XFS volume | Unmounted, fstab entry removed |
 | `/data/container-runtime` directory | `rm -rf` (all container data destroyed) |
-| `/etc/docker` | `rm -rf` |
 | `/etc/modprobe.d/blacklist-nouveau.conf` | `rm -f` |
 | Phase state file | Deleted |
 
 ### What Is NOT Removed
 
-- The underlying disk or LV — intentional. Wiping is a separate manual step to prevent accidental data loss.
-- `.pre-migration.bak` directories — intentional. These are your safety net from the migration step. Remove manually once you have confirmed the original data is no longer needed.
+- The underlying disk or LV — intentional. Wiping is a separate manual step.
+- `.pre-migration.bak` directories — your safety net from the migration step.
 - The docker system group.
-- NVIDIA drivers — managed by `base-install.sh`, not this script.
-
-A reboot is recommended after uninstall to cleanly unload kernel modules.
+- NVIDIA drivers — managed by `base-install.sh`.
 
 ---
 
 ## Troubleshooting
 
-### Checking What Failed
+### Verifying the Full Storage Layout
 
 ```bash
-# Human log — last 50 lines
-tail -50 /opt/provision/logs/docker-install.log
-
-# All errors from JSON log, formatted
-grep '"level":"error"' /opt/provision/logs/docker-install.jsonl | python3 -m json.tool
-
-# Phase state
-cat /opt/provision/state/docker-install.state
-```
-
-### Verifying the Volume Layout
-
-```bash
-# Confirm volume is mounted
+# XFS volume mounted
 mountpoint /data/container-runtime
 df -h /data/container-runtime
 
-# Confirm filesystem is XFS with reflink
+# XFS features confirmed
 xfs_info /data/container-runtime | grep -E 'reflink|ftype'
-# Expected output includes: reflink=1, ftype=1
+# Expected: reflink=1, ftype=1
 
-# Confirm symlinks
-ls -la /var/lib/docker /var/lib/containerd
-# Expected:
-# /var/lib/docker -> /data/container-runtime/docker
-# /var/lib/containerd -> /data/container-runtime/containerd
+# prjquota active
+mount | grep container-runtime | grep prjquota
+
+# Bind mounts active
+mountpoint /var/lib/docker
+mountpoint /var/lib/containerd
+
+# Bind mount sources
+findmnt /var/lib/docker
+findmnt /var/lib/containerd
+# Expected SOURCE: /data/container-runtime/docker (etc.)
+
+# fstab entries
+grep -E 'container-runtime|var/lib/docker|var/lib/containerd' /etc/fstab
 ```
 
 ### Docker Fails to Start After Install
 
 ```bash
-# Check daemon logs
 journalctl -u docker --no-pager -n 50
 
 # Validate daemon.json
 python3 -c "import json; print(json.load(open('/etc/docker/daemon.json')))"
 
-# Confirm data-root is correct
+# Confirm data-root
 docker info | grep 'Docker Root Dir'
 # Expected: /data/container-runtime/docker
 
-# Restore daemon.json from backup if corrupt
+# Restore daemon.json from backup
 sudo cp /etc/docker/daemon.json.bak /etc/docker/daemon.json
 sudo systemctl restart docker
 ```
 
-### Symlink Pointing to Wrong Location
+### Bind Mount Not Active After Reboot
+
+If `/var/lib/docker` or `/var/lib/containerd` are not mounted after a reboot, the most likely cause is that `/data/container-runtime` didn't mount first (the XFS volume was slow to appear or missing). Check:
 
 ```bash
-# Check current symlink targets
-readlink /var/lib/docker
-readlink /var/lib/containerd
+# Check XFS volume
+mountpoint /data/container-runtime || sudo mount -a
 
-# Re-run disk setup phase to re-link correctly
-sed -i '/^DISK_SETUP=/d' /opt/provision/state/docker-install.state
-sudo /opt/provision/docker-install.sh --non-interactive
+# Re-run bind mounts if volume is now up
+sudo mount --bind /data/container-runtime/docker    /var/lib/docker
+sudo mount --bind /data/container-runtime/containerd /var/lib/containerd
+sudo systemctl restart docker containerd
+
+# Check fstab entries are present
+grep 'bind' /etc/fstab
 ```
+
+If this happens repeatedly, check `journalctl -b -u systemd-remount-fs` and ensure the XFS device is consistently visible at boot.
 
 ### Migration Backup Taking Up Root Space
 
 ```bash
-# Verify migration succeeded first
-ls /data/container-runtime/docker
-ls /data/container-runtime/containerd
+# Confirm new layout is working first
+docker info | grep 'Docker Root Dir'
+findmnt /var/lib/docker
 
 # Then remove backups
 sudo rm -rf /var/lib/docker.pre-migration.bak
 sudo rm -rf /var/lib/containerd.pre-migration.bak
-
-# Confirm root space reclaimed
 df -h /
 ```
 
-### NVIDIA Runtime Not Working
+### Volume Running Low on Space
 
 ```bash
-# Verify toolkit installed
-nvidia-ctk --version
-
-# Check docker info for runtime
-docker info | grep -i runtime
-
-# Test GPU access
-docker run --rm --gpus all nvidia/cuda:12.0-base-ubuntu22.04 nvidia-smi
-
-# If nvidia runtime is missing, re-run Phase 5
-sed -i '/^NVIDIA_TOOLKIT=/d' /opt/provision/state/docker-install.state
-sudo /opt/provision/docker-install.sh --non-interactive
-```
-
-### Docker Compose Not Found After Install
-
-```bash
-ls -la /usr/local/lib/docker/cli-plugins/docker-compose
-docker compose version
-
-# Re-run compose phase only
-sed -i '/^COMPOSE_INSTALL=/d' /opt/provision/state/docker-install.state
-sudo /opt/provision/docker-install.sh --non-interactive --with-compose
-```
-
-### Container Runtime Volume Running Low on Space
-
-```bash
-# Current usage breakdown
 df -h /data/container-runtime
 docker system df
 
-# Clean unused images, stopped containers, dangling volumes
+# Clean up unused resources
 docker system prune -af --volumes
 
-# If on LVM, extend the volume online (XFS supports online grow — no unmount needed)
+# Extend online if on LVM (XFS supports online grow — no unmount needed)
 sudo lvextend -l +100%FREE /dev/ubuntu-vg/container_rt
 sudo xfs_growfs /data/container-runtime
 df -h /data/container-runtime
 ```
 
-### GPG Key Fingerprint Mismatch
-
-The key downloaded from the vendor CDN does not match the expected fingerprint embedded in the script. Do not proceed — this may indicate a compromised key or a MITM attack. Verify network security and compare the fingerprint against the official vendor documentation before continuing.
-
-### Air-Gapped / No Internet Access
-
-If outbound HTTPS is not available:
-
-1. Set `http_proxy` / `https_proxy` to point to a local APT mirror before running
-2. Pre-download packages and configure a local repository
-3. For Compose, manually install and mark the phase complete:
+### NVIDIA Runtime Not Working
 
 ```bash
-# After manually placing the binary at the correct path
+nvidia-ctk --version
+docker info | grep -i runtime
+docker run --rm --gpus all nvidia/cuda:12.0-base-ubuntu22.04 nvidia-smi
+
+# Re-run toolkit phase only
+sed -i '/^NVIDIA_TOOLKIT=/d' /opt/provision/state/docker-install.state
+sudo /opt/provision/docker-install.sh --non-interactive
+```
+
+### GPG Key Fingerprint Mismatch
+
+Do not proceed — this may indicate a compromised key or MITM attack. Verify network security and check the fingerprint against the official vendor documentation before continuing.
+
+### Air-Gapped Environments
+
+Set `http_proxy` / `https_proxy` to a local APT mirror, or pre-configure a local repository. For Compose specifically, manually install the binary and mark the phase complete:
+
+```bash
 sed -i '/^COMPOSE_INSTALL=/d' /opt/provision/state/docker-install.state
 echo "COMPOSE_INSTALL=complete" >> /opt/provision/state/docker-install.state
 ```
@@ -687,8 +605,8 @@ echo "COMPOSE_INSTALL=complete" >> /opt/provision/state/docker-install.state
 
 ## Integration With provision.sh
 
-When called by `provision.sh`, the script receives `--called-by-provision` (suppresses reboot prompts — the orchestrator manages reboot timing) and `--non-interactive`. Disk and VG selections passed to `provision.sh` are forwarded automatically.
+When called by `provision.sh`, the script receives `--called-by-provision` (suppresses reboot prompts) and `--non-interactive`. Disk and VG selections are forwarded automatically from the top-level invocation.
 
-The phase state file at `/opt/provision/state/docker-install.state` is read directly by `provision.sh --status`, so per-phase progress is always visible from the orchestrator level.
+After stage 2 completes, `provision.sh` verifies that `/data/container-runtime` is mounted and that both `/var/lib/docker` and `/var/lib/containerd` are active mountpoints before proceeding to stage 3 (`fulltest.sh`). If either bind mount is missing it hard-fails with a clear recovery message rather than silently running validation against the wrong storage.
 
-See `provisioning-guide.md` for the full multi-stage orchestration flow.
+See `provisioning-guide.md` for the full orchestration flow.
