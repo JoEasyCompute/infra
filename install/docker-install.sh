@@ -5,11 +5,11 @@
 # Handles automatic disk/LVM detection for container runtime storage
 #
 # Storage layout:
-#   /data/container-runtime/          ← XFS volume (shared)
+#   /data/container-runtime/          ← XFS volume (shared, mounted with prjquota)
 #   /data/container-runtime/docker/   ← Docker data root
 #   /data/container-runtime/containerd/ ← containerd data root
-#   /var/lib/docker    → symlink → /data/container-runtime/docker
-#   /var/lib/containerd → symlink → /data/container-runtime/containerd
+#   /var/lib/docker    → bind mount → /data/container-runtime/docker
+#   /var/lib/containerd → bind mount → /data/container-runtime/containerd
 #
 # Part of the /opt/provision provisioning suite.
 # State file: /opt/provision/state/docker-install.state
@@ -313,9 +313,17 @@ if [[ "$UNINSTALL" == true ]]; then
     rm -f "${DAEMON_JSON}"
     rm -f /usr/local/lib/docker/cli-plugins/docker-compose
 
-    # Remove symlinks first, then unmount the shared volume
-    info "Removing /var/lib symlinks..."
-    rm -f "${DOCKER_SYMLINK}" "${CONTAINERD_SYMLINK}"
+    # Remove bind mounts and their fstab entries
+    info "Removing /var/lib bind mounts..."
+    for tgt in "${DOCKER_SYMLINK}" "${CONTAINERD_SYMLINK}"; do
+        if mountpoint -q "${tgt}" 2>/dev/null; then
+            umount "${tgt}" || true
+        fi
+        # Remove fstab bind mount entry (matched by target path)
+        sed -i "\|[[:space:]]${tgt}[[:space:]]|d" /etc/fstab
+        # Remove the now-empty mountpoint directory
+        rm -rf "${tgt}"
+    done
 
     if mountpoint -q "${CONTAINER_RUNTIME_MOUNT}" 2>/dev/null; then
         warn "Unmounting ${CONTAINER_RUNTIME_MOUNT}..."
@@ -602,20 +610,27 @@ phase_disk_setup() {
     info "Volume UUID: ${uuid}"
 
     # Create mountpoint and add fstab entry
-    # noatime: skip access time updates — improves I/O performance
-    # nofail:  don't halt boot if volume is missing
+    # noatime:  skip access time updates — improves I/O performance
+    # nofail:   don't halt boot if volume is missing
+    # prjquota: enable project quota support (required by vast.ai / Docker quota features)
     mkdir -p "${CONTAINER_RUNTIME_MOUNT}"
     if ! grep -q "UUID=${uuid}" /etc/fstab; then
-        echo "UUID=${uuid}  ${CONTAINER_RUNTIME_MOUNT}  xfs  defaults,noatime,nofail  0  2" \
+        echo "UUID=${uuid}  ${CONTAINER_RUNTIME_MOUNT}  xfs  defaults,noatime,nofail,prjquota  0  2" \
             >> /etc/fstab
-        info "Added fstab entry for UUID=${uuid}"
+        info "Added fstab entry for UUID=${uuid} (with prjquota)"
     else
-        info "fstab entry for UUID=${uuid} already present"
+        # Ensure prjquota is present on any existing entry for this UUID
+        if ! grep -q "UUID=${uuid}.*prjquota" /etc/fstab; then
+            sed -i "s|UUID=${uuid}\(.*xfs.*\)defaults\(.*\)|\UUID=${uuid}\1defaults,prjquota\2|" /etc/fstab
+            warn "Updated existing fstab entry to add prjquota for UUID=${uuid}"
+        else
+            info "fstab entry for UUID=${uuid} already present with prjquota"
+        fi
     fi
 
     # Mount now
     mount -a
-    success "Mounted ${device} → ${CONTAINER_RUNTIME_MOUNT} (XFS, reflink enabled)"
+    success "Mounted ${device} → ${CONTAINER_RUNTIME_MOUNT} (XFS, reflink enabled, prjquota)"
 
     # Verify volume size
     local vol_free; vol_free=$(free_gb_on_mount "${CONTAINER_RUNTIME_MOUNT}")
@@ -681,8 +696,12 @@ _migrate_existing_data() {
 }
 
 # -----------------------------------------------------------------------------
-# Helper: create subdirectories on the volume and point /var/lib symlinks at them
-# Idempotent — safe to call on re-runs
+# Helper: create subdirectories on the volume and bind-mount them at the
+# canonical /var/lib paths. Bind mounts are registered in /etc/fstab so they
+# survive reboots. This replaces the previous symlink approach, which caused
+# os.rename() failures in tools (e.g. vast.ai installer) that call rename(2)
+# on /var/lib/docker — the kernel rejects rename on a symlink target path.
+# Idempotent — safe to call on re-runs.
 # -----------------------------------------------------------------------------
 _ensure_subdirs_and_symlinks() {
     # Create subdirs on the volume with correct ownership
@@ -690,44 +709,42 @@ _ensure_subdirs_and_symlinks() {
     chmod 710 "${DOCKER_DATA_DIR}"
     chmod 710 "${CONTAINERD_DATA_DIR}"
 
-    # Docker symlink
-    if [[ -L "${DOCKER_SYMLINK}" ]]; then
-        local current_target
-        current_target=$(readlink "${DOCKER_SYMLINK}")
-        if [[ "${current_target}" != "${DOCKER_DATA_DIR}" ]]; then
-            warn "${DOCKER_SYMLINK} points to ${current_target}, expected ${DOCKER_DATA_DIR} — re-linking"
-            rm -f "${DOCKER_SYMLINK}"
-            ln -s "${DOCKER_DATA_DIR}" "${DOCKER_SYMLINK}"
-        else
-            info "${DOCKER_SYMLINK} → ${DOCKER_DATA_DIR} (already correct)"
-        fi
-    elif [[ -e "${DOCKER_SYMLINK}" ]]; then
-        # Real directory or file blocking the symlink — should have been migrated above
-        error "${DOCKER_SYMLINK} exists as a non-symlink — migration may have failed"
-        return 1
-    else
-        ln -s "${DOCKER_DATA_DIR}" "${DOCKER_SYMLINK}"
-        success "Created symlink: ${DOCKER_SYMLINK} → ${DOCKER_DATA_DIR}"
-    fi
+    # Helper: set up one bind mount entry
+    # Usage: _setup_bind_mount <source> <target>
+    _setup_bind_mount() {
+        local src="$1" tgt="$2"
 
-    # containerd symlink
-    if [[ -L "${CONTAINERD_SYMLINK}" ]]; then
-        local current_target
-        current_target=$(readlink "${CONTAINERD_SYMLINK}")
-        if [[ "${current_target}" != "${CONTAINERD_DATA_DIR}" ]]; then
-            warn "${CONTAINERD_SYMLINK} points to ${current_target}, expected ${CONTAINERD_DATA_DIR} — re-linking"
-            rm -f "${CONTAINERD_SYMLINK}"
-            ln -s "${CONTAINERD_DATA_DIR}" "${CONTAINERD_SYMLINK}"
-        else
-            info "${CONTAINERD_SYMLINK} → ${CONTAINERD_DATA_DIR} (already correct)"
+        # Remove any existing symlink at the target path
+        if [[ -L "${tgt}" ]]; then
+            warn "${tgt} is a symlink — removing and replacing with bind mount"
+            rm -f "${tgt}"
         fi
-    elif [[ -e "${CONTAINERD_SYMLINK}" ]]; then
-        error "${CONTAINERD_SYMLINK} exists as a non-symlink — migration may have failed"
-        return 1
-    else
-        ln -s "${CONTAINERD_DATA_DIR}" "${CONTAINERD_SYMLINK}"
-        success "Created symlink: ${CONTAINERD_SYMLINK} → ${CONTAINERD_DATA_DIR}"
-    fi
+
+        # Ensure the target mountpoint directory exists
+        if [[ ! -d "${tgt}" ]]; then
+            mkdir -p "${tgt}"
+            info "Created mountpoint directory: ${tgt}"
+        fi
+
+        # Add fstab entry if not already present
+        if ! grep -q "^${src}[[:space:]]" /etc/fstab; then
+            echo "${src}  ${tgt}  none  bind  0  0" >> /etc/fstab
+            info "Added fstab bind mount: ${src} → ${tgt}"
+        else
+            info "fstab bind mount already present: ${src} → ${tgt}"
+        fi
+
+        # Mount now if not already mounted
+        if mountpoint -q "${tgt}" 2>/dev/null; then
+            info "${tgt} already mounted"
+        else
+            mount --bind "${src}" "${tgt}"
+            success "Bind-mounted: ${src} → ${tgt}"
+        fi
+    }
+
+    _setup_bind_mount "${DOCKER_DATA_DIR}"    "${DOCKER_SYMLINK}"
+    _setup_bind_mount "${CONTAINERD_DATA_DIR}" "${CONTAINERD_SYMLINK}"
 }
 
 # -----------------------------------------------------------------------------
@@ -1008,8 +1025,15 @@ sed 's/^/  /' "${DAEMON_JSON}" 2>/dev/null || echo "  (not found)"
 echo -e "${BOLD}Storage layout:${RESET}"
 if mountpoint -q "${CONTAINER_RUNTIME_MOUNT}" 2>/dev/null; then
     df -h "${CONTAINER_RUNTIME_MOUNT}" | awk 'NR==1{print "  "$0} NR==2{print "  "$0}'
-    echo -e "    ${DOCKER_SYMLINK} → $(readlink ${DOCKER_SYMLINK} 2>/dev/null || echo '(not set)')"
-    echo -e "    ${CONTAINERD_SYMLINK} → $(readlink ${CONTAINERD_SYMLINK} 2>/dev/null || echo '(not set)')"
+    for tgt in "${DOCKER_SYMLINK}" "${CONTAINERD_SYMLINK}"; do
+        if mountpoint -q "${tgt}" 2>/dev/null; then
+            local src
+            src=$(findmnt -n -o SOURCE "${tgt}" 2>/dev/null || echo "?")
+            echo -e "    ${tgt} → bind mount from ${src}"
+        else
+            echo -e "    ${tgt} → (not mounted)"
+        fi
+    done
 else
     df -h / | awk 'NR==1{print "  "$0} NR==2{print "  "$0}'
     warn "  No dedicated volume — container runtime on root partition"
