@@ -305,6 +305,17 @@ configure_gcc_alternatives() {
 install_rocm_repos() {
     section "AMD ROCm Repository & Signing Key"
 
+    # Remove any stale repo files from a previous (possibly failed) run.
+    # This prevents apt from using an old/wrong URL on the apt-get update below.
+    if [[ -f /etc/apt/sources.list.d/amdgpu.list ]] || [[ -f /etc/apt/sources.list.d/rocm.list ]]; then
+        info "Removing stale AMD repo files from previous run..."
+        sudo rm -f /etc/apt/sources.list.d/amdgpu.list \
+                   /etc/apt/sources.list.d/rocm.list \
+                   /etc/apt/preferences.d/rocm-pin-600
+        sudo apt-get update -q 2>/dev/null || true   # flush stale cache; errors OK here
+        success "Stale repo files removed"
+    fi
+
     # The amdgpu driver repo uses a build number (e.g. 30.30), NOT the ROCm
     # version string. The ROCm apt repo DOES use the ROCm version string.
     # Mapping: ROCm 7.2 -> amdgpu 30.30 | ROCm 7.1 -> amdgpu 30.20.1
