@@ -34,11 +34,15 @@ LOG_MAX_RUNS=3                 # keep last N run blocks in the human log
 CONTAINER_RUNTIME_MOUNT="/data/container-runtime"   # XFS volume mountpoint
 DOCKER_DATA_DIR="${CONTAINER_RUNTIME_MOUNT}/docker"
 CONTAINERD_DATA_DIR="${CONTAINER_RUNTIME_MOUNT}/containerd"
-DOCKER_SYMLINK="/var/lib/docker"                    # → DOCKER_DATA_DIR
-CONTAINERD_SYMLINK="/var/lib/containerd"            # → CONTAINERD_DATA_DIR
+DOCKER_SYMLINK="/var/lib/docker"                    # bind-mounted from DOCKER_DATA_DIR
+CONTAINERD_SYMLINK="/var/lib/containerd"            # bind-mounted from CONTAINERD_DATA_DIR
+
+# Loopback image — used when no dedicated disk or LVM space is available
+LOOPBACK_IMG="/var/lib/container-runtime.img"       # fully allocated XFS image on root
+LOOPBACK_IMG_PCT=80                                  # % of root free space to allocate
 
 LVM_USE_PCT=80
-MIN_ROOT_FREE_GB=10
+MIN_ROOT_FREE_GB=20         # higher threshold when creating a loopback image
 MIN_CONTAINER_VOL_GB=100    # shared volume — higher minimum than docker-only
 DAEMON_JSON="/etc/docker/daemon.json"
 
@@ -332,6 +336,14 @@ if [[ "$UNINSTALL" == true ]]; then
         info "Removed fstab entry — underlying disk/LV NOT wiped (manual step)"
     fi
 
+    # Remove loopback image and its fstab entry if present
+    if [[ -f "${LOOPBACK_IMG}" ]]; then
+        warn "Removing loopback image ${LOOPBACK_IMG} — all container data will be LOST"
+        sed -i "\|${LOOPBACK_IMG}|d" /etc/fstab
+        rm -f "${LOOPBACK_IMG}"
+        info "Removed loopback image and fstab entry"
+    fi
+
     # Remove any leftover data directories and config
     rm -rf "${CONTAINER_RUNTIME_MOUNT}" /etc/docker
     rm -f /etc/modprobe.d/blacklist-nouveau.conf
@@ -432,7 +444,7 @@ phase_disk_setup() {
     # the subdirs and symlinks are in place and return early
     if mountpoint -q "${CONTAINER_RUNTIME_MOUNT}" 2>/dev/null; then
         success "${CONTAINER_RUNTIME_MOUNT} already mounted — verifying layout..."
-        _ensure_subdirs_and_symlinks
+        _ensure_subdirs_and_bind_mounts
         return 0
     fi
 
@@ -554,17 +566,26 @@ phase_disk_setup() {
         fi
     fi
 
-    # --- Scenario D: root fallback ---
+    # --- Scenario D: loopback image on root ─────────────────────────────────
+    # No dedicated disk or LVM space found. Create a fully pre-allocated XFS
+    # image file on root, attach it via loop device, and mount it at
+    # CONTAINER_RUNTIME_MOUNT. This provides the same XFS features (reflink,
+    # prjquota) and bind-mount layout as a real block device while keeping
+    # container data isolated from root.
     if [[ "$setup_method" == "none" ]]; then
-        warn "No free disks or LVM space — container runtime will use root partition"
+        warn "No free disks or LVM space found — will create a loopback image on root"
         df -h /
         local root_free; root_free=$(free_gb_on_mount /)
-        (( root_free < MIN_ROOT_FREE_GB )) && \
-            warn "Root only has ${root_free} GB free — may be insufficient"
-        warn "This is NOT recommended for GPU/ML workloads"
-        confirm "Continue on root partition?" || { info "Aborted."; exit 0; }
-        # Still create subdirs and symlinks under root — consistent layout
-        _ensure_subdirs_and_symlinks
+        if (( root_free < MIN_ROOT_FREE_GB )); then
+            error "Root only has ${root_free} GB free — need at least ${MIN_ROOT_FREE_GB} GB to create a loopback image"
+            exit 1
+        fi
+        local img_size_gb
+        img_size_gb=$(( root_free * LOOPBACK_IMG_PCT / 100 ))
+        warn "Loopback image: ${LOOPBACK_IMG} (${img_size_gb} GB — ${LOOPBACK_IMG_PCT}% of ${root_free} GB free)"
+        warn "This is NOT recommended for production GPU/ML workloads — use a dedicated disk when possible"
+        confirm "Create ${img_size_gb} GB loopback image on root?" || { info "Aborted."; exit 0; }
+        _provision_loopback_image "${img_size_gb}"
         return 0
     fi
 
@@ -621,7 +642,7 @@ phase_disk_setup() {
     else
         # Ensure prjquota is present on any existing entry for this UUID
         if ! grep -q "UUID=${uuid}.*prjquota" /etc/fstab; then
-            sed -i "s|UUID=${uuid}\(.*xfs.*\)defaults\(.*\)|\UUID=${uuid}\1defaults,prjquota\2|" /etc/fstab
+            sed -i "s|UUID=${uuid}\(.*xfs.*\)defaults\(.*\)|UUID=${uuid}\1defaults,prjquota\2|" /etc/fstab
             warn "Updated existing fstab entry to add prjquota for UUID=${uuid}"
         else
             info "fstab entry for UUID=${uuid} already present with prjquota"
@@ -639,11 +660,96 @@ phase_disk_setup() {
 
     # Migrate any existing data from root, then create subdirs and symlinks
     _migrate_existing_data
-    _ensure_subdirs_and_symlinks
+    _ensure_subdirs_and_bind_mounts
 
     success "Container runtime volume ready: ${vol_free} GB at ${CONTAINER_RUNTIME_MOUNT}"
     info "  Docker data:     ${DOCKER_DATA_DIR}  (← ${DOCKER_SYMLINK})"
     info "  containerd data: ${CONTAINERD_DATA_DIR}  (← ${CONTAINERD_SYMLINK})"
+}
+
+# -----------------------------------------------------------------------------
+# Helper: provision a fully pre-allocated XFS loopback image on the root
+# filesystem and register it in /etc/fstab for automatic mounting at boot.
+#
+# fstab handles the full mount chain natively:
+#   1. loop mount  — kernel calls losetup itself when it sees the loop option
+#   2. bind mounts — processed after the loop mount, in fstab order
+# No systemd service or helper scripts are required.
+# -----------------------------------------------------------------------------
+_provision_loopback_image() {
+    local img_size_gb="$1"
+    local img_path="${LOOPBACK_IMG}"
+
+    # Idempotent: if already mounted, just verify the bind mounts are in place
+    if mountpoint -q "${CONTAINER_RUNTIME_MOUNT}" 2>/dev/null; then
+        success "${CONTAINER_RUNTIME_MOUNT} already mounted from loopback — verifying layout..."
+        _migrate_existing_data
+        _ensure_subdirs_and_bind_mounts
+        return 0
+    fi
+
+    # Create the image file — fully pre-allocated (not sparse) so XFS gets
+    # contiguous space and prjquota accounting is accurate from the start.
+    # fallocate is instant; falls back to dd if the fs doesn't support it.
+    if [[ -f "${img_path}" ]]; then
+        warn "Loopback image already exists at ${img_path} — reusing (will reformat)"
+        confirm "Reformat existing loopback image? ALL DATA IN IMAGE LOST." || exit 1
+    fi
+
+    info "Pre-allocating ${img_size_gb} GB image at ${img_path}..."
+    if fallocate -l "${img_size_gb}G" "${img_path}" 2>/dev/null; then
+        success "Image pre-allocated with fallocate (${img_size_gb} GB)"
+    else
+        warn "fallocate not supported — falling back to dd (this will take a while)..."
+        dd if=/dev/zero of="${img_path}" bs=1G count="${img_size_gb}" status=progress
+        success "Image created with dd (${img_size_gb} GB)"
+    fi
+    chmod 600 "${img_path}"
+
+    # Format as XFS — same flags as a real block device
+    info "Formatting loopback image as XFS (reflink=1, ftype=1, prjquota)..."
+    mkfs.xfs -f \
+        -L container_rt \
+        -m reflink=1 \
+        -i maxpct=25 \
+        "${img_path}"
+    success "XFS formatted: ${img_path}"
+
+    # Mount now for this session (fstab will handle subsequent boots)
+    mkdir -p "${CONTAINER_RUNTIME_MOUNT}"
+    mount -o loop,noatime,prjquota "${img_path}" "${CONTAINER_RUNTIME_MOUNT}"
+    success "Mounted ${img_path} → ${CONTAINER_RUNTIME_MOUNT} (XFS loopback, prjquota)"
+
+    # Register the loop mount in fstab.
+    # The kernel's loop option handles losetup automatically — no helper needed.
+    # nofail: don't block boot if the image file is somehow missing.
+    if ! grep -q "${img_path}" /etc/fstab; then
+        echo "${img_path}  ${CONTAINER_RUNTIME_MOUNT}  xfs  loop,noatime,prjquota,nofail  0  0" \
+            >> /etc/fstab
+        info "Added fstab loop mount: ${img_path} → ${CONTAINER_RUNTIME_MOUNT}"
+    else
+        info "fstab loop entry already present for ${img_path}"
+    fi
+
+    # Verify size
+    local vol_free; vol_free=$(free_gb_on_mount "${CONTAINER_RUNTIME_MOUNT}")
+    (( vol_free < MIN_CONTAINER_VOL_GB )) && \
+        warn "Loopback volume only ${vol_free} GB — recommend at least ${MIN_CONTAINER_VOL_GB} GB for GPU workloads"
+
+    # Migrate existing data then set up bind mounts + fstab entries.
+    # _ensure_subdirs_and_bind_mounts appends the two bind entries after the
+    # loop mount entry already written above, so fstab ordering is guaranteed:
+    #   line N:   image → /data/container-runtime  (loop)
+    #   line N+1: /data/container-runtime/docker    → /var/lib/docker   (bind)
+    #   line N+2: /data/container-runtime/containerd → /var/lib/containerd (bind)
+    _migrate_existing_data
+    _ensure_subdirs_and_bind_mounts
+
+    success "Loopback container runtime ready: ${vol_free} GB at ${CONTAINER_RUNTIME_MOUNT}"
+    info "  Image:           ${img_path} (${img_size_gb} GB, fully allocated)"
+    info "  Docker data:     ${DOCKER_DATA_DIR}  (← ${DOCKER_SYMLINK})"
+    info "  containerd data: ${CONTAINERD_DATA_DIR}  (← ${CONTAINERD_SYMLINK})"
+    info "  fstab entries:   loop mount + 2 bind mounts — active on every boot"
 }
 
 # -----------------------------------------------------------------------------
@@ -698,12 +804,12 @@ _migrate_existing_data() {
 # -----------------------------------------------------------------------------
 # Helper: create subdirectories on the volume and bind-mount them at the
 # canonical /var/lib paths. Bind mounts are registered in /etc/fstab so they
-# survive reboots. This replaces the previous symlink approach, which caused
-# os.rename() failures in tools (e.g. vast.ai installer) that call rename(2)
-# on /var/lib/docker — the kernel rejects rename on a symlink target path.
+# survive reboots — this applies to both real block/LVM devices and loopback
+# mounts (the loopback image fstab entry is written first in
+# _provision_loopback_image, so fstab ordering is: loop → bind → bind).
 # Idempotent — safe to call on re-runs.
 # -----------------------------------------------------------------------------
-_ensure_subdirs_and_symlinks() {
+_ensure_subdirs_and_bind_mounts() {
     # Create subdirs on the volume with correct ownership
     mkdir -p "${DOCKER_DATA_DIR}" "${CONTAINERD_DATA_DIR}"
     chmod 710 "${DOCKER_DATA_DIR}"
@@ -726,9 +832,9 @@ _ensure_subdirs_and_symlinks() {
             info "Created mountpoint directory: ${tgt}"
         fi
 
-        # Add fstab entry if not already present
+        # Register in fstab if not already present (idempotent)
         if ! grep -q "^${src}[[:space:]]" /etc/fstab; then
-            echo "${src}  ${tgt}  none  bind  0  0" >> /etc/fstab
+            echo "${src}  ${tgt}  none  bind,nofail  0  0" >> /etc/fstab
             info "Added fstab bind mount: ${src} → ${tgt}"
         else
             info "fstab bind mount already present: ${src} → ${tgt}"
@@ -1025,6 +1131,17 @@ sed 's/^/  /' "${DAEMON_JSON}" 2>/dev/null || echo "  (not found)"
 echo -e "${BOLD}Storage layout:${RESET}"
 if mountpoint -q "${CONTAINER_RUNTIME_MOUNT}" 2>/dev/null; then
     df -h "${CONTAINER_RUNTIME_MOUNT}" | awk 'NR==1{print "  "$0} NR==2{print "  "$0}'
+    # Show whether this is a loopback or block device mount
+    local rt_source
+    rt_source=$(findmnt -n -o SOURCE "${CONTAINER_RUNTIME_MOUNT}" 2>/dev/null || echo "?")
+    if [[ -f "${LOOPBACK_IMG}" ]]; then
+        local img_size
+        img_size=$(du -sh "${LOOPBACK_IMG}" 2>/dev/null | cut -f1 || echo "?")
+        echo -e "  Source: loopback image ${LOOPBACK_IMG} (${img_size}, via ${rt_source})"
+        echo -e "  Boot persistence: fstab loop mount + bind mounts"
+    else
+        echo -e "  Source: ${rt_source} (block device)"
+    fi
     for tgt in "${DOCKER_SYMLINK}" "${CONTAINERD_SYMLINK}"; do
         if mountpoint -q "${tgt}" 2>/dev/null; then
             local src
