@@ -45,13 +45,24 @@ An earlier version of this script used symlinks at `/var/lib/docker` and `/var/l
 
 Bind mount fstab entries are written alongside the XFS volume entry so both survive reboots:
 
+**Real block device or LVM:**
 ```
-# XFS shared volume
+# XFS volume (UUID-keyed — survives disk renames)
 UUID=<uuid>  /data/container-runtime  xfs  defaults,noatime,nofail,prjquota  0  2
 
-# Bind mounts — survive reboot, registered by _ensure_subdirs_and_bind_mounts
-/data/container-runtime/docker      /var/lib/docker      none  bind  0  0
-/data/container-runtime/containerd  /var/lib/containerd  none  bind  0  0
+# Bind mounts — registered by _ensure_subdirs_and_bind_mounts
+/data/container-runtime/docker      /var/lib/docker      none  bind,nofail  0  0
+/data/container-runtime/containerd  /var/lib/containerd  none  bind,nofail  0  0
+```
+
+**Loopback image (root fallback):**
+```
+# Loop mount — kernel handles losetup automatically via the loop option
+/var/lib/container-runtime.img  /data/container-runtime  xfs  loop,noatime,prjquota,nofail  0  0
+
+# Bind mounts — written immediately after the loop entry, in fstab order
+/data/container-runtime/docker      /var/lib/docker      none  bind,nofail  0  0
+/data/container-runtime/containerd  /var/lib/containerd  none  bind,nofail  0  0
 ```
 
 ### Why XFS over ext4
@@ -88,6 +99,7 @@ If the script detects an existing fstab entry for the UUID that is **missing** `
 | Python | 3.6+ (used for JSON generation and log rotation) |
 | Network | Outbound HTTPS to `download.docker.com`, `github.com`, `nvidia.github.io` |
 | LVM tools | `vgs`, `lvcreate` — only needed when using LVM storage |
+| `util-linux` | `fallocate` — only needed for loopback image path (pre-installed on Ubuntu) |
 
 ---
 
@@ -166,10 +178,14 @@ docker-install.sh
         │       ├─► Scan for free disks (unpartitioned, unmounted)
         │       ├─► Scan LVM VGs for free space (via vgs --units g)
         │       ├─► Run storage decision tree (see below)
-        │       ├─► Format selected device: mkfs.xfs -m reflink=1 -i maxpct=25
-        │       ├─► Write fstab entry: xfs defaults,noatime,nofail,prjquota
-        │       │     (patches prjquota into any existing entry missing it)
-        │       ├─► mount -a
+        │       ├─► Format selected device/image: mkfs.xfs -m reflink=1 -i maxpct=25
+        │       ├─► Mount now for this session
+        │       ├─► Write fstab entries (in order):
+        │       │     block/LVM: UUID=...  xfs  defaults,noatime,nofail,prjquota
+        │       │     loopback:  /var/lib/container-runtime.img  xfs  loop,noatime,prjquota,nofail
+        │       │     both:      bind entry for /var/lib/docker
+        │       │                bind entry for /var/lib/containerd
+        │       │     (prjquota patched into any pre-existing block device fstab entry)
         │       ├─► Migrate existing data from /var/lib/docker + /var/lib/containerd
         │       └─► Create subdirs + bind-mount both into /var/lib/ (idempotent)
         │               Converts any existing symlinks to bind mounts automatically
@@ -266,12 +282,13 @@ Is there free space in any LVM VG? (detected via vgs --units g)
         → fstab entry with noatime,nofail,prjquota
      NO ↓
 
-No dedicated storage available:
+No dedicated storage available — create loopback image on root:
     → Print warning + df -h /
-    → Warn if root has < 10 GB free
-    → Warn NOT recommended for GPU/ML workloads
+    → Hard fail if root has < 20 GB free (not enough to create a usable image)
+    → Compute image size = 80% of root free space (in whole GB)
+    → Warn NOT recommended for production GPU/ML workloads
     → Require explicit confirmation (auto-confirm in non-interactive)
-    → Create subdirs + bind mounts on root (same layout, no separate volume)
+    → Call _provision_loopback_image <size_gb> (see below)
 ```
 
 ### Data Migration
@@ -301,6 +318,45 @@ For each of /var/lib/docker and /var/lib/containerd:
 
 The `.pre-migration.bak` directories are intentionally left on disk. Remove them manually once you have confirmed the new layout is working correctly.
 
+### Loopback Image Provisioning (`_provision_loopback_image`)
+
+Used only when no dedicated disk or LVM space is found. Provides the same XFS features and bind-mount layout as a real block device while keeping container data isolated from root.
+
+**Sequence:**
+
+```
+1. fallocate -l <size>G /var/lib/container-runtime.img
+     (fully pre-allocated — no sparse file; falls back to dd if fallocate
+      is unsupported on the underlying filesystem)
+
+2. chmod 600 /var/lib/container-runtime.img
+
+3. mkfs.xfs -f -L container_rt -m reflink=1 -i maxpct=25 <image>
+     (same XFS flags as a real block device: reflink + overlay2-safe ftype)
+
+4. mount -o loop,noatime,prjquota <image> /data/container-runtime
+     (kernel handles losetup automatically when it sees the loop option)
+
+5. Write three fstab entries (in order):
+     /var/lib/container-runtime.img  /data/container-runtime          xfs   loop,noatime,prjquota,nofail  0  0
+     /data/container-runtime/docker  /var/lib/docker                  none  bind,nofail                   0  0
+     /data/container-runtime/containerd  /var/lib/containerd          none  bind,nofail                   0  0
+
+6. _migrate_existing_data               (same as real device path)
+
+7. _ensure_subdirs_and_bind_mounts      (same as real device path)
+```
+
+**Why fstab works for loop mounts**
+
+The kernel handles the `loop` fstab option natively — it allocates a loop device and calls `losetup` itself before mounting, so there is no need for a helper service or script. Boot-time ordering is guaranteed by the position of entries in fstab: the loop mount is written first, and the two bind mounts are appended directly after it by `_ensure_subdirs_and_bind_mounts`. The kernel processes fstab entries in order, so the bind source directories always exist before the bind mounts are attempted.
+
+`nofail` is applied to all three entries so a missing image file does not block boot.
+
+No systemd service or helper scripts are installed for the loopback path.
+
+---
+
 ### Bind Mount Setup (`_ensure_subdirs_and_bind_mounts`)
 
 After migration, bind mounts are created. This function is idempotent — safe to call on re-runs:
@@ -320,8 +376,9 @@ For each (source → target) pair:
 | Threshold | Action |
 |---|---|
 | Shared volume < 100 GB | Warning printed |
-| Root free space < 10 GB | Warning printed |
+| Root free space < 20 GB | Hard fail — not enough space to create a loopback image |
 | LVM allocation | 80% of free VG extents (`lvcreate -l 80%FREE`) |
+| Loopback image size | 80% of root free space at time of provisioning |
 
 ---
 
@@ -481,6 +538,8 @@ sudo /opt/provision/docker-install.sh --uninstall
 - The docker system group.
 - NVIDIA drivers — managed by `base-install.sh`.
 
+> **Loopback uninstall note:** when the loopback path was used, `--uninstall` additionally removes `/var/lib/container-runtime.img` and its fstab entry. All container data in the image is destroyed. The kernel detaches the loop device automatically when the image file is removed.
+
 ---
 
 ## Troubleshooting
@@ -559,6 +618,30 @@ findmnt /var/lib/docker
 sudo rm -rf /var/lib/docker.pre-migration.bak
 sudo rm -rf /var/lib/containerd.pre-migration.bak
 df -h /
+```
+
+### Loopback Image Not Mounting After Reboot
+
+If `/data/container-runtime` is not mounted after a reboot on a loopback node:
+
+```bash
+# Check what fstab has
+grep 'container-runtime' /etc/fstab
+
+# Attempt to mount everything in fstab (safe — skips already-mounted entries)
+sudo mount -a
+
+# If mount -a fails, check for errors
+dmesg | grep -i 'loop\|container-runtime' | tail -20
+
+# Manually mount if needed
+sudo mount -o loop,noatime,prjquota /var/lib/container-runtime.img /data/container-runtime
+sudo mount --bind /data/container-runtime/docker    /var/lib/docker
+sudo mount --bind /data/container-runtime/containerd /var/lib/containerd
+sudo systemctl restart docker containerd
+
+# If the image file is missing — data is unrecoverable
+ls -lh /var/lib/container-runtime.img
 ```
 
 ### Volume Running Low on Space
