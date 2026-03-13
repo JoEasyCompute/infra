@@ -5,7 +5,7 @@
 # Target:   AMD Radeon AI Pro R9700 (RDNA4 / gfx1201)
 # Supports: Ubuntu 22.04 / 24.04 (x86_64)
 # Installs: AMDGPU DKMS driver, ROCm stack, rocm-bandwidth-test
-# Version:  1.0 (2026-03-03)
+# Version:  1.1 (2026-03-13)
 # ═══════════════════════════════════════════════════════════════
 #
 # Notes:
@@ -28,7 +28,7 @@ LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee -a "${LOG_FILE}") 2> >(tee -a "${LOG_FILE}" >&2)
 
 echo "================================================================"
-echo " AMD GPU Node Installation Script  (v1.0 -- 2026-03-03)"
+echo " AMD GPU Node Installation Script  (v1.1 -- 2026-03-13)"
 echo " Target: Radeon AI Pro R9700 (RDNA4 / gfx1201)"
 echo " Log: ${LOG_FILE}"
 echo " Started: $(date)"
@@ -305,6 +305,18 @@ configure_gcc_alternatives() {
 install_rocm_repos() {
     section "AMD ROCm Repository & Signing Key"
 
+    # The amdgpu driver repo uses a build number (e.g. 30.30), NOT the ROCm
+    # version string. The ROCm apt repo DOES use the ROCm version string.
+    # Mapping: ROCm 7.2 -> amdgpu 30.30 | ROCm 7.1 -> amdgpu 30.20.1
+    # Source: https://repo.radeon.com/amdgpu/ (directory listing)
+    local AMDGPU_BUILD_VERSION
+    case "${ROCM_VERSION}" in
+        "7.2") AMDGPU_BUILD_VERSION="30.30" ;;
+        "7.1") AMDGPU_BUILD_VERSION="30.20.1" ;;
+        *)     error "No known amdgpu build version for ROCm ${ROCM_VERSION}" ;;
+    esac
+    info "ROCm ${ROCM_VERSION} -> AMDGPU driver build: ${AMDGPU_BUILD_VERSION}"
+
     # GPG keyring directory (recommended location per AMD docs)
     sudo mkdir -p --mode=0755 /etc/apt/keyrings
 
@@ -316,12 +328,14 @@ install_rocm_repos() {
     success "GPG key installed -> /etc/apt/keyrings/rocm.gpg"
 
     # AMDGPU driver repo (provides amdgpu-dkms)
-    info "Adding AMDGPU driver repository..."
-    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/amdgpu/${ROCM_VERSION}/ubuntu ${UBUNTU_CODENAME} main" \
+    # NOTE: this URL uses the build number (e.g. 30.30), NOT the ROCm version.
+    info "Adding AMDGPU driver repository (build ${AMDGPU_BUILD_VERSION})..."
+    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/amdgpu/${AMDGPU_BUILD_VERSION}/ubuntu ${UBUNTU_CODENAME} main" \
         | sudo tee /etc/apt/sources.list.d/amdgpu.list > /dev/null
 
     # ROCm software repo
-    info "Adding ROCm software repository..."
+    # NOTE: this URL DOES use the ROCm version string.
+    info "Adding ROCm software repository (${ROCM_VERSION})..."
     printf "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/%s %s main\ndeb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/graphics/%s/ubuntu %s main\n" \
         "${ROCM_VERSION}" "${UBUNTU_CODENAME}" "${ROCM_VERSION}" "${UBUNTU_CODENAME}" \
         | sudo tee /etc/apt/sources.list.d/rocm.list > /dev/null
@@ -331,7 +345,7 @@ install_rocm_repos() {
         | sudo tee /etc/apt/preferences.d/rocm-pin-600 > /dev/null
 
     sudo apt-get update -q || error "apt-get update after ROCm repo setup failed"
-    success "AMD ROCm repositories configured (ROCm ${ROCM_VERSION}, ${UBUNTU_CODENAME})"
+    success "AMD ROCm repositories configured (ROCm ${ROCM_VERSION} / amdgpu ${AMDGPU_BUILD_VERSION}, ${UBUNTU_CODENAME})"
 }
 
 # ================================================================
