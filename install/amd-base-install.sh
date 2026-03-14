@@ -5,7 +5,7 @@
 # Target:   AMD Radeon AI Pro R9700 (RDNA4 / gfx1201)
 # Supports: Ubuntu 22.04 / 24.04 (x86_64)
 # Installs: AMDGPU DKMS driver, ROCm stack, rocm-bandwidth-test
-# Version:  1.1 (2026-03-13)
+# Version:  1.3 (2026-03-14)
 # ═══════════════════════════════════════════════════════════════
 #
 # Notes:
@@ -28,7 +28,7 @@ LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee -a "${LOG_FILE}") 2> >(tee -a "${LOG_FILE}" >&2)
 
 echo "================================================================"
-echo " AMD GPU Node Installation Script  (v1.1 -- 2026-03-13)"
+echo " AMD GPU Node Installation Script  (v1.3 -- 2026-03-14)"
 echo " Target: Radeon AI Pro R9700 (RDNA4 / gfx1201)"
 echo " Log: ${LOG_FILE}"
 echo " Started: $(date)"
@@ -176,8 +176,61 @@ preflight_checks() {
         success "No conflicting AMDGPU/ROCm packages"
     fi
 
-    # Kernel headers -- required for amdgpu-dkms
+    # Kernel version check -- amdgpu-dkms only builds successfully against
+    # kernels that AMD has qualified. For ROCm 7.x:
+    #   Ubuntu 22.04: supported kernels are 5.15.x (GA) and 6.8.x (HWE).
+    #                 Kernels 6.11+ are NOT yet supported and will fail to build.
+    #   Ubuntu 24.04: supported kernel is 6.8.x (GA).
+    #                 Kernels 6.11+ are NOT yet supported and will fail to build.
+    # Source: https://rocm.docs.amd.com/projects/install-on-linux/en/latest/reference/system-requirements.html
     local kver; kver=$(uname -r)
+    local kmaj kmin
+    kmaj=$(echo "${kver}" | cut -d. -f1)
+    kmin=$(echo "${kver}" | cut -d. -f2)
+    local knum=$(( kmaj * 100 + kmin ))   # e.g. 5.15 -> 515, 6.8 -> 608, 6.11 -> 611
+
+    if [[ "${UBUNTU_VERSION_ID}" == "22.04" ]]; then
+        # 22.04 supports: 5.15.x (GA) and 6.8.x (HWE). Anything above 6.8 is unsupported.
+        if (( knum == 515 )) || (( knum == 608 )); then
+            success "Kernel ${kver}: supported for ROCm ${ROCM_VERSION} on Ubuntu 22.04"
+        elif (( knum > 608 )); then
+            warn "Kernel ${kver} is NEWER than supported range for ROCm 7.x on Ubuntu 22.04"
+            warn "amdgpu-dkms WILL LIKELY FAIL TO BUILD. Supported kernels: 5.15.x (GA), 6.8.x (HWE)"
+            warn "Fix: boot into the 6.8 HWE kernel or install it:"
+            warn "  sudo apt install linux-generic-hwe-22.04 && sudo reboot"
+            warn "  Then re-run this script after rebooting into 6.8."
+            if [[ "${NON_INTERACTIVE}" == false ]]; then
+                read -rp "  Continue anyway? [y/N]: " kver_confirm
+                [[ "${kver_confirm,,}" == "y" ]] || error "Aborted. Reboot into a supported kernel first."
+            fi
+            (( warnings++ )) || true
+        else
+            # Below 5.15 — very unlikely on a fresh 22.04, but catch it
+            warn "Kernel ${kver} is older than expected for Ubuntu 22.04 (expected 5.15+)"
+            (( warnings++ )) || true
+        fi
+    elif [[ "${UBUNTU_VERSION_ID}" == "24.04" ]]; then
+        # 24.04 GA kernel is 6.8. Kernels above 6.8 (e.g. 6.11 HWE) are unsupported.
+        if (( knum == 608 )); then
+            success "Kernel ${kver}: supported for ROCm ${ROCM_VERSION} on Ubuntu 24.04"
+        elif (( knum > 608 )); then
+            warn "Kernel ${kver} is NEWER than supported range for ROCm 7.x on Ubuntu 24.04"
+            warn "amdgpu-dkms WILL LIKELY FAIL TO BUILD. Supported kernel: 6.8.x (GA)"
+            warn "Fix: revert to GA kernel or pin it:"
+            warn "  sudo apt install linux-image-6.8.0-generic linux-headers-6.8.0-generic"
+            warn "  Then reboot and select 6.8 in GRUB before re-running this script."
+            if [[ "${NON_INTERACTIVE}" == false ]]; then
+                read -rp "  Continue anyway? [y/N]: " kver_confirm
+                [[ "${kver_confirm,,}" == "y" ]] || error "Aborted. Reboot into a supported kernel first."
+            fi
+            (( warnings++ )) || true
+        else
+            warn "Kernel ${kver} is older than the 24.04 GA kernel (6.8) -- unexpected"
+            (( warnings++ )) || true
+        fi
+    fi
+
+    # Kernel headers -- required for amdgpu-dkms
     if apt-cache show "linux-headers-${kver}" &>/dev/null; then
         success "Kernel headers: available for ${kver}"
     else
@@ -235,6 +288,7 @@ confirm_install() {
     echo -e "  AMDGPU driver:  amdgpu-dkms (ROCm ${ROCM_VERSION} repo)"
     echo -e "  ROCm version:   ${ROCM_VERSION}"
     echo -e "  GPU target:     Radeon AI Pro R9700 (gfx1201 / RDNA4)"
+    echo -e "  PyTorch arch:   PYTORCH_ROCM_ARCH=gfx1201"
     echo -e "  Log file:       ${LOG_FILE}"
     echo -e "${BOLD}=======================================${NC}"
     echo ""
@@ -409,6 +463,93 @@ PROFEOF
     success "ROCm PATH configured -- /opt/rocm/bin added for all users"
 }
 
+
+# ================================================================
+# STEP 9.5 -- AI/ML environment: PyTorch arch targeting + pip install guidance
+# ================================================================
+configure_ml_environment() {
+    section "AI/ML Environment Configuration"
+
+    # ── PYTORCH_ROCM_ARCH ─────────────────────────────────────
+    # Tells PyTorch (and other ROCm-enabled tools) which GPU architecture to
+    # compile kernels for at runtime. Without this, PyTorch may target a
+    # generic or wrong arch, producing slow or broken kernels on gfx1201.
+    #
+    # For R9700 (RDNA4 / gfx1201) this must be set to "gfx1201".
+    # For multi-GPU nodes with different arch GPUs, use semicolons:
+    #   export PYTORCH_ROCM_ARCH="gfx1100;gfx1201"
+    #
+    # HSA_OVERRIDE_GFX_VERSION: NOT needed for R9700 under ROCm 7.x.
+    # gfx1201 is natively recognized. Kept here as a commented reference
+    # in case a future ROCm regression requires a workaround.
+
+    # Append env vars to the shared profile.d file (already created in step 9)
+    sudo tee -a /etc/profile.d/rocm.sh > /dev/null << 'MLEOF'
+
+# AI/ML environment for R9700 (RDNA4 / gfx1201) -- added by base-install-amd.sh
+# PyTorch kernel compilation target -- must match installed GPU arch.
+export PYTORCH_ROCM_ARCH="gfx1201"
+
+# HIP visible devices -- unset means all GPUs visible (correct default).
+# Override per-job with: HIP_VISIBLE_DEVICES=0,1 python train.py
+# export HIP_VISIBLE_DEVICES=0
+
+# HSA_OVERRIDE_GFX_VERSION -- NOT needed for R9700 under ROCm 7.x.
+# Uncomment only if a future ROCm regression requires a workaround.
+# export HSA_OVERRIDE_GFX_VERSION=12.0.1
+MLEOF
+
+    # Apply to current session as well
+    export PYTORCH_ROCM_ARCH="gfx1201"
+    success "PYTORCH_ROCM_ARCH=gfx1201 set for all users via /etc/profile.d/rocm.sh"
+
+    # ── PyTorch for ROCm ──────────────────────────────────────
+    # The standard 'pip install torch' gives a CUDA build -- it will NOT use
+    # the AMD GPU. You must install the ROCm-specific PyTorch wheel.
+    #
+    # We do NOT pip-install PyTorch here because:
+    #   1. The correct index URL changes with each ROCm release.
+    #   2. Most workloads use Docker images (rocm/pytorch) or venvs, so a
+    #      system-wide pip install would conflict.
+    #   3. The driver must be loaded (post-reboot) before torch.cuda is useful.
+    #
+    # Post-reboot install command for ROCm ${ROCM_VERSION} + gfx1201:
+    #   pip install torch torchvision torchaudio     #       --index-url https://download.pytorch.org/whl/rocm${ROCM_VERSION}
+    #
+    # Or use AMD's official Docker image (recommended for production):
+    #   docker pull rocm/pytorch:rocm${ROCM_VERSION}_ubuntu22.04_py3.10_pytorch_release_2.8.0
+    #
+    # Verify GPU is visible to PyTorch after reboot:
+    #   python3 -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+    #   (ROCm exposes AMD GPUs through torch.cuda -- this is intentional)
+
+    info "PyTorch for ROCm -- post-reboot install instructions:"
+    echo ""
+    echo "    # Option A: pip (system or venv)"
+    echo "    pip install torch torchvision torchaudio \"
+    echo "        --index-url https://download.pytorch.org/whl/rocm${ROCM_VERSION}"
+    echo ""
+    echo "    # Option B: AMD Docker image (recommended)"
+    echo "    docker pull rocm/pytorch:rocm${ROCM_VERSION}_ubuntu22.04_py3.10_pytorch_release_2.8.0"
+    echo ""
+    echo "    # Verify (ROCm surfaces AMD GPUs through torch.cuda intentionally):"
+    echo '    python3 -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"'
+    echo ""
+
+    # ── Other ROCm-native tools ───────────────────────────────
+    info "Other ROCm-native tools available after reboot:"
+    echo ""
+    echo "    # vLLM (ROCm build)"
+    echo "    pip install vllm  # picks up ROCm automatically if PYTORCH_ROCM_ARCH is set"
+    echo ""
+    echo "    # llama.cpp (HIP backend)"
+    echo "    cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1201 .."
+    echo "    cmake --build build --config Release"
+    echo ""
+
+    success "AI/ML environment configured"
+}
+
 # ================================================================
 # STEP 10 -- rocm-bandwidth-test
 # ================================================================
@@ -558,7 +699,7 @@ uninstall_node() {
     echo "  * /etc/apt/sources.list.d/amdgpu.list, rocm.list"
     echo "  * /etc/apt/preferences.d/rocm-pin-600"
     echo "  * /etc/apt/keyrings/rocm.gpg"
-    echo "  * /etc/profile.d/rocm.sh PATH entry"
+    echo "  * /etc/profile.d/rocm.sh PATH + ML env vars (PYTORCH_ROCM_ARCH etc.)"
     echo "  * /opt/rocm directory"
     echo "  * GCC update-alternatives entries"
     echo "  * Storage tools: smartmontools, lvm2, mdadm, lsof, ioping"
@@ -764,6 +905,7 @@ main() {
         install_rocm_repos
         install_amd_stack
         configure_rocm_path
+        configure_ml_environment
         install_bandwidth_test
         setup_repos
         validate_install
