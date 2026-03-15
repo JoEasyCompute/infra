@@ -1,4 +1,5 @@
 .DS_Store
+install/backup/
 test/build/
 test/fulltest_*.log
 test/logs/
