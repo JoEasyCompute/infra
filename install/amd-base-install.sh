@@ -2,20 +2,20 @@
 
 # ═══════════════════════════════════════════════════════════════
 # base-install-amd.sh — AMD GPU Node Base Installation Script
-# Target:   AMD Radeon AI Pro R9700 (RDNA4 / gfx1201)
+# Target:   Any supported AMD GPU (ROCm-compatible)
 # Supports: Ubuntu 22.04 / 24.04 (x86_64)
 # Installs: AMDGPU DKMS driver, ROCm stack, rocm-bandwidth-test
-# Version:  1.3 (2026-03-14)
+# Version:  2.0 (2026-03-15)
 # ═══════════════════════════════════════════════════════════════
 #
 # Notes:
-#   * ROCm 7.2 is the current production release for R9700 (gfx1201).
+#   * ROCm 7.2 is the current production release.
 #   * Ubuntu 22.04 requires kernel 5.15+ (stock LTS kernel is fine).
 #   * Ubuntu 24.04 requires kernel 6.8+ (stock noble HWE kernel is fine).
-#   * The R9700 requires the user to be in the 'render' and 'video' groups.
+#   * AMD GPUs require the user to be in the 'render' and 'video' groups.
 #   * No DCGM equivalent exists for AMD; rocm-smi and rocminfo are used instead.
-#   * P2P / xGMI between consumer RDNA4 cards is not officially supported
-#     by ROCm -- multi-GPU workloads will use PCIe peer transfers.
+#   * P2P / xGMI support varies by GPU family. Consumer/pro RDNA cards use
+#     PCIe peer transfers; Instinct cards support xGMI natively.
 #
 # No set -e -- explicit error checking on every critical step.
 # set -u catches unbound variables. set -o pipefail catches pipe failures.
@@ -28,8 +28,8 @@ LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee -a "${LOG_FILE}") 2> >(tee -a "${LOG_FILE}" >&2)
 
 echo "================================================================"
-echo " AMD GPU Node Installation Script  (v1.3 -- 2026-03-14)"
-echo " Target: Radeon AI Pro R9700 (RDNA4 / gfx1201)"
+echo " AMD GPU Node Installation Script  (v2.0 -- 2026-03-15)"
+echo " Target: Any ROCm-compatible AMD GPU"
 echo " Log: ${LOG_FILE}"
 echo " Started: $(date)"
 echo "================================================================"
@@ -267,7 +267,7 @@ select_rocm_version() {
     fi
     echo ""
     echo -e "${BOLD}Select ROCm Version:${NC}"
-    echo "  1) 7.2  -- current production release, recommended for R9700 [default]"
+    echo "  1) 7.2  -- current production release [default]"
     echo "  2) 7.1  -- previous stable"
     echo ""
     read -rp "Enter choice [1-2, default=1]: " rocm_choice
@@ -287,8 +287,8 @@ confirm_install() {
     echo -e "  Ubuntu:         ${UBUNTU_VERSION_ID} (${UBUNTU_CODENAME})"
     echo -e "  AMDGPU driver:  amdgpu-dkms (ROCm ${ROCM_VERSION} repo)"
     echo -e "  ROCm version:   ${ROCM_VERSION}"
-    echo -e "  GPU target:     Radeon AI Pro R9700 (gfx1201 / RDNA4)"
-    echo -e "  PyTorch arch:   PYTORCH_ROCM_ARCH=gfx1201"
+    echo -e "  GPU target:     Any ROCm-compatible AMD GPU"
+    echo -e "  PyTorch arch:   auto-detected post-reboot (Step 9.5)"
     echo -e "  Log file:       ${LOG_FILE}"
     echo -e "${BOLD}=======================================${NC}"
     echo ""
@@ -459,7 +459,7 @@ PROFEOF
 
     # HSA_OVERRIDE_GFX_VERSION is NOT needed for R9700 (gfx1201 is natively
     # recognized by ROCm 7.x). Document it anyway for reference.
-    info "GPU target arch: gfx1201 (RDNA4 -- native ROCm 7.x support, no HSA_OVERRIDE needed)"
+    info "GPU arch will be auto-detected post-reboot via rocminfo"
     success "ROCm PATH configured -- /opt/rocm/bin added for all users"
 }
 
@@ -470,80 +470,127 @@ PROFEOF
 configure_ml_environment() {
     section "AI/ML Environment Configuration"
 
-    # ── PYTORCH_ROCM_ARCH ─────────────────────────────────────
-    # Tells PyTorch (and other ROCm-enabled tools) which GPU architecture to
-    # compile kernels for at runtime. Without this, PyTorch may target a
-    # generic or wrong arch, producing slow or broken kernels on gfx1201.
+    # ── Auto-detect installed GPU arch(es) via rocminfo ───────
+    # PYTORCH_ROCM_ARCH must match the architecture(s) of the installed GPU(s).
+    # We detect this at install time using rocminfo so the script works for any
+    # AMD GPU — R9700 (gfx1201), RX 7900 XTX (gfx1100), MI300X (gfx942), etc.
     #
-    # For R9700 (RDNA4 / gfx1201) this must be set to "gfx1201".
-    # For multi-GPU nodes with different arch GPUs, use semicolons:
-    #   export PYTORCH_ROCM_ARCH="gfx1100;gfx1201"
-    #
-    # HSA_OVERRIDE_GFX_VERSION: NOT needed for R9700 under ROCm 7.x.
-    # gfx1201 is natively recognized. Kept here as a commented reference
-    # in case a future ROCm regression requires a workaround.
+    # rocminfo requires the amdgpu kernel module to be loaded, so it is only
+    # available if the GPU was present and the driver already loaded before this
+    # script ran (e.g. a second run after a reboot). On a first-run fresh install
+    # the module is not loaded yet, so we fall back to a safe placeholder and
+    # print clear instructions for the user to complete after rebooting.
 
-    # Append env vars to the shared profile.d file (already created in step 9)
-    sudo tee -a /etc/profile.d/rocm.sh > /dev/null << 'MLEOF'
+    local detected_arches=""
 
-# AI/ML environment for R9700 (RDNA4 / gfx1201) -- added by base-install-amd.sh
-# PyTorch kernel compilation target -- must match installed GPU arch.
-export PYTORCH_ROCM_ARCH="gfx1201"
+    if command -v rocminfo &>/dev/null && rocminfo &>/dev/null 2>&1; then
+        # Extract unique gfx arch strings, join with semicolons for PyTorch
+        detected_arches=$(rocminfo 2>/dev/null \
+            | grep -oP 'gfx\d+' \
+            | sort -u \
+            | tr '\n' ';' \
+            | sed 's/;$//')
+    fi
+
+    if [[ -n "${detected_arches}" ]]; then
+        info "Detected GPU arch(es): ${detected_arches}"
+        info "Setting PYTORCH_ROCM_ARCH=${detected_arches}"
+
+        # Write the detected value persistently
+        sudo tee -a /etc/profile.d/rocm.sh > /dev/null << MLEOF
+
+# AI/ML environment -- added by base-install-amd.sh
+# PyTorch kernel compilation target -- auto-detected from installed GPU(s).
+# For mixed-arch multi-GPU nodes, separate arches with semicolons e.g. gfx1100;gfx1201
+export PYTORCH_ROCM_ARCH="${detected_arches}"
 
 # HIP visible devices -- unset means all GPUs visible (correct default).
 # Override per-job with: HIP_VISIBLE_DEVICES=0,1 python train.py
 # export HIP_VISIBLE_DEVICES=0
 
-# HSA_OVERRIDE_GFX_VERSION -- NOT needed for R9700 under ROCm 7.x.
-# Uncomment only if a future ROCm regression requires a workaround.
+# HSA_OVERRIDE_GFX_VERSION -- only needed if ROCm does not natively recognize
+# your GPU. Uncomment and set to your GPU's gfx version if required.
+# export HSA_OVERRIDE_GFX_VERSION=12.0.1
+MLEOF
+        export PYTORCH_ROCM_ARCH="${detected_arches}"
+        success "PYTORCH_ROCM_ARCH=${detected_arches} written to /etc/profile.d/rocm.sh"
+
+    else
+        # Driver not loaded yet (normal on first install before reboot).
+        # Write a placeholder with clear instructions.
+        warn "GPU arch could not be auto-detected (amdgpu module not loaded yet -- normal before first reboot)"
+        warn "PYTORCH_ROCM_ARCH placeholder written -- update it after rebooting (see instructions below)"
+
+        sudo tee -a /etc/profile.d/rocm.sh > /dev/null << 'MLEOF'
+
+# AI/ML environment -- added by base-install-amd.sh
+# PYTORCH_ROCM_ARCH could not be auto-detected because the amdgpu kernel module
+# was not loaded at install time. After rebooting, run:
+#   rocminfo | grep -oP 'gfx\d+' | sort -u
+# and replace PLACEHOLDER below with the detected arch(es), semicolon-separated.
+# Examples: gfx1201 (R9700), gfx1100 (RX 7900 XTX), gfx942 (MI300X)
+#           gfx1100;gfx1201 (mixed multi-GPU node)
+export PYTORCH_ROCM_ARCH="PLACEHOLDER"
+
+# HIP visible devices -- unset means all GPUs visible (correct default).
+# Override per-job with: HIP_VISIBLE_DEVICES=0,1 python train.py
+# export HIP_VISIBLE_DEVICES=0
+
+# HSA_OVERRIDE_GFX_VERSION -- only needed if ROCm does not natively recognize
+# your GPU. Uncomment and set to your GPU's gfx version if required.
 # export HSA_OVERRIDE_GFX_VERSION=12.0.1
 MLEOF
 
-    # Apply to current session as well
-    export PYTORCH_ROCM_ARCH="gfx1201"
-    success "PYTORCH_ROCM_ARCH=gfx1201 set for all users via /etc/profile.d/rocm.sh"
+        info ""
+        info "After rebooting, detect and set your GPU arch:"
+        info "  1. rocminfo | grep -oP 'gfx[0-9]+' | sort -u"
+        info "  2. sudo sed -i 's/PYTORCH_ROCM_ARCH=.*/PYTORCH_ROCM_ARCH=\"<your_arch>\"/' /etc/profile.d/rocm.sh"
+        info "  Or re-run this script after reboot -- it will auto-detect and set the correct value."
+        info ""
+    fi
 
-    # ── PyTorch for ROCm ──────────────────────────────────────
+    # ── Common ML env vars reference ─────────────────────────
+    # The profile.d file above contains PYTORCH_ROCM_ARCH. Additional
+    # per-job overrides you may want at runtime:
+    #
+    #   HIP_VISIBLE_DEVICES=0,1    -- restrict to specific GPUs
+    #   ROCR_VISIBLE_DEVICES=0,1   -- HSA-level GPU visibility (lower level)
+    #   GPU_MAX_HW_QUEUES=8        -- tune HW queue depth for multi-stream workloads
+    #
+    # HSA_OVERRIDE_GFX_VERSION: only needed for GPUs not natively recognized by
+    # the installed ROCm version. Most current GPUs (gfx900+) are recognized
+    # natively by ROCm 7.x. Check: rocminfo | grep "Name:" | grep gfx
+
+    # ── PyTorch install instructions ──────────────────────────
     # The standard 'pip install torch' gives a CUDA build -- it will NOT use
-    # the AMD GPU. You must install the ROCm-specific PyTorch wheel.
-    #
-    # We do NOT pip-install PyTorch here because:
-    #   1. The correct index URL changes with each ROCm release.
-    #   2. Most workloads use Docker images (rocm/pytorch) or venvs, so a
-    #      system-wide pip install would conflict.
-    #   3. The driver must be loaded (post-reboot) before torch.cuda is useful.
-    #
-    # Post-reboot install command for ROCm ${ROCM_VERSION} + gfx1201:
-    #   pip install torch torchvision torchaudio     #       --index-url https://download.pytorch.org/whl/rocm${ROCM_VERSION}
-    #
-    # Or use AMD's official Docker image (recommended for production):
-    #   docker pull rocm/pytorch:rocm${ROCM_VERSION}_ubuntu22.04_py3.10_pytorch_release_2.8.0
-    #
-    # Verify GPU is visible to PyTorch after reboot:
-    #   python3 -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
-    #   (ROCm exposes AMD GPUs through torch.cuda -- this is intentional)
+    # the AMD GPU. You must use the ROCm-specific index URL.
+    # PyTorch is not installed here because:
+    #   1. The index URL changes per ROCm release
+    #   2. Most workloads use Docker images or per-project venvs
+    #   3. The driver must be loaded (post-reboot) before torch.cuda works
 
-    info "PyTorch for ROCm -- post-reboot install instructions:"
+    info "PyTorch for ROCm -- post-reboot install commands:"
     echo ""
-    echo "    # Option A: pip (system or venv)"
-    echo "    pip install torch torchvision torchaudio \"
+    echo "    # 1. Confirm your GPU arch after reboot:"
+    echo "    rocminfo | grep -oP 'gfx[0-9]+' | sort -u"
+    echo ""
+    echo "    # 2a. pip install (system or venv):"
+    echo "    pip install torch torchvision torchaudio \\"
     echo "        --index-url https://download.pytorch.org/whl/rocm${ROCM_VERSION}"
     echo ""
-    echo "    # Option B: AMD Docker image (recommended)"
+    echo "    # 2b. AMD Docker image (recommended for production):"
     echo "    docker pull rocm/pytorch:rocm${ROCM_VERSION}_ubuntu22.04_py3.10_pytorch_release_2.8.0"
     echo ""
-    echo "    # Verify (ROCm surfaces AMD GPUs through torch.cuda intentionally):"
+    echo "    # 3. Verify (ROCm surfaces AMD GPUs through torch.cuda intentionally):"
     echo '    python3 -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"'
     echo ""
-
-    # ── Other ROCm-native tools ───────────────────────────────
-    info "Other ROCm-native tools available after reboot:"
+    info "Other ROCm-native tools:"
     echo ""
-    echo "    # vLLM (ROCm build)"
-    echo "    pip install vllm  # picks up ROCm automatically if PYTORCH_ROCM_ARCH is set"
+    echo "    # vLLM -- picks up ROCm automatically when PYTORCH_ROCM_ARCH is set"
+    echo "    pip install vllm"
     echo ""
-    echo "    # llama.cpp (HIP backend)"
-    echo "    cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1201 .."
+    echo "    # llama.cpp -- HIP backend (replace gfx1201 with your arch)"
+    echo '    cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=$(rocminfo | grep -oP '"'"'gfx[0-9]+'"'"' | sort -u | tr '"'"'\n'"'"' '"'"','"'"' | sed '"'"'s/,$//'"'"') ..'
     echo "    cmake --build build --config Release"
     echo ""
 
@@ -604,12 +651,10 @@ validate_install() {
 
     # rocminfo -- shows GPU topology and gfx arch
     if command -v rocminfo &>/dev/null; then
-        local gfx_ver
-        gfx_ver=$(rocminfo 2>/dev/null | grep -oP 'gfx\d+' | head -1 || echo "unknown")
-        success "rocminfo: GPU arch detected as ${gfx_ver}"
-        if [[ "${gfx_ver}" != "gfx1201" ]]; then
-            warn "Expected gfx1201 (R9700) but got ${gfx_ver} -- verify GPU"
-        fi
+        local gfx_arches
+        gfx_arches=$(rocminfo 2>/dev/null | grep -oP 'gfx\d+' | sort -u | tr '
+' ' ' || echo "unknown")
+        success "rocminfo: GPU arch(es) detected: ${gfx_arches}"
     else
         warn "rocminfo not available (reboot required)"; (( warnings++ )) || true
     fi
@@ -657,7 +702,7 @@ offer_reboot() {
     echo ""
     echo -e "${BOLD}=======================================${NC}"
     echo -e "${GREEN}${BOLD} Installation complete!${NC}"
-    echo -e "  ROCm: ${ROCM_VERSION}  |  GPU: R9700 (gfx1201)  |  Ubuntu: ${UBUNTU_VERSION_ID}"
+    echo -e "  ROCm: ${ROCM_VERSION}  |  Ubuntu: ${UBUNTU_VERSION_ID}"
     echo -e "  Full log: ${LOG_FILE}"
     echo -e "${BOLD}=======================================${NC}"
     echo ""
