@@ -4,7 +4,7 @@ GPU node base installation script for vast.ai and production deployments.
 Installs the full NVIDIA/CUDA stack on a fresh Ubuntu node, with a matching
 uninstall path that restores the system to a clean OS state for reprovisioning.
 
-**Version:** 1.8  
+**Version:** 1.9  
 **Supports:** Ubuntu 22.04 / 24.04 (x86_64)
 
 ---

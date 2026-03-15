@@ -117,6 +117,7 @@ nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link
     link_width="N/A"
     numa_node="?"
     degraded=0
+    negotiated_below_max=0
     
     # lspci might fail if device is in a bad state, suppress stderr
     lspci_output=$(lspci -s "$pci_lower" -vv 2>/dev/null)
@@ -141,9 +142,11 @@ nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link
         fi
     fi
 
-    # Additional degradation logic
+    # Negotiated speed/width below max is often normal while the GPU is idle.
+    # Keep that fact visible, but only treat it as degraded if lspci explicitly
+    # reports a downgraded link state.
     if [[ "$gen_cur" -lt "$gen_max" || "$width_cur" -lt "$width_max" ]]; then
-        degraded=1
+        negotiated_below_max=1
     fi
 
     # Formatting for display
@@ -156,6 +159,9 @@ nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link
     if [[ "$degraded" -eq 1 ]]; then
         status_text="Degraded"
         status_color="${RED}Degraded${NC}"
+    elif [[ "$negotiated_below_max" -eq 1 ]]; then
+        status_text="BelowMax"
+        status_color="${YELLOW}BelowMax${NC}"
     else
         status_text="OK"
         status_color="${GREEN}OK${NC}"

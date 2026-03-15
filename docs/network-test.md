@@ -34,7 +34,7 @@ Discovery → Interface Health → Connectivity → Latency → MTU Probe → Ba
 
 ```bash
 # Copy to your provision directory
-cp network-test.sh /opt/provision/
+cp test/network-test.sh /opt/provision/
 chmod +x /opt/provision/network-test.sh
 ```
 
@@ -45,7 +45,7 @@ chmod +x /opt/provision/network-test.sh
 Start the iperf3 server on the target machine:
 
 ```bash
-sudo ./network-test.sh --server
+sudo /opt/provision/network-test.sh --server
 ```
 
 Options:
@@ -58,7 +58,7 @@ The server runs in foreground until stopped with Ctrl+C.
 Run the full test suite against a target server:
 
 ```bash
-sudo ./network-test.sh --client <target>
+sudo /opt/provision/network-test.sh --client <target>
 ```
 
 Options:
@@ -70,13 +70,13 @@ Examples:
 
 ```bash
 # Basic test
-sudo ./network-test.sh --client 192.168.1.100
+sudo /opt/provision/network-test.sh --client 192.168.1.100
 
 # Custom port and duration
-sudo ./network-test.sh --client 192.168.1.100 --port 5202 --duration 15
+sudo /opt/provision/network-test.sh --client 192.168.1.100 --port 5202 --duration 15
 
 # Full test with stress mode
-sudo ./network-test.sh --client 192.168.1.100 --stress
+sudo /opt/provision/network-test.sh --client 192.168.1.100 --stress
 ```
 
 ### Local-Only Mode
@@ -84,7 +84,7 @@ sudo ./network-test.sh --client 192.168.1.100 --stress
 Check local interface health without a remote target:
 
 ```bash
-sudo ./network-test.sh --local-only
+sudo /opt/provision/network-test.sh --local-only
 ```
 
 Useful for validating interface configuration and checking error counters before deploying.
@@ -329,15 +329,15 @@ For multi-node GPU clusters, validate network before running GPU tests:
 
 ```bash
 # On all nodes, start server in background
-./network-test.sh --server &
+/opt/provision/network-test.sh --server &
 
 # From head node, test connectivity to each worker
 for node in worker1 worker2 worker3; do
-    ./network-test.sh --client $node
+    /opt/provision/network-test.sh --client $node
 done
 
 # Then run GPU validation
-./fulltest.sh
+./test/fulltest.sh
 ```
 
 ### Automated Validation
@@ -373,8 +373,8 @@ iptables -L -n | grep 5201
 ufw status
 
 # Try a different port
-./network-test.sh --server --port 5202
-./network-test.sh --client target --port 5202
+/opt/provision/network-test.sh --server --port 5202
+/opt/provision/network-test.sh --client target --port 5202
 ```
 
 ### "iperf3 not available"

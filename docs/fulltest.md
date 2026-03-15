@@ -38,10 +38,10 @@ Supports: RTX 4090 / RTX 5090, A4000, A100, H100 on Ubuntu 22.04 / 24.04.
 ## Installation
 
 ```bash
-chmod +x fulltest.sh
+chmod +x test/fulltest.sh
 
 # First run — clones repos and builds binaries into ./build/
-./fulltest.sh
+./test/fulltest.sh
 ```
 
 All cloned repos and compiled binaries are placed under `./build/` next to the script. Nothing is written to system directories except NCCL and apt packages.
@@ -51,33 +51,33 @@ All cloned repos and compiled binaries are placed under `./build/` next to the s
 ## Usage
 
 ```
-./fulltest.sh [test...] [--gpu <index[,index...]>] [--burn-duration <seconds>] [--clean] [--list] [--help]
+./test/fulltest.sh [test...] [--gpu <index[,index...]>] [--burn-duration <seconds>] [--clean] [--list] [--help]
 ```
 
 ### Run all tests on all GPUs
 ```bash
-./fulltest.sh
+./test/fulltest.sh
 ```
 
 ### Run all tests on specific GPU(s)
 ```bash
-./fulltest.sh --gpu 3            # single GPU
-./fulltest.sh --gpu 2,4,5        # subset of GPUs
+./test/fulltest.sh --gpu 3            # single GPU
+./test/fulltest.sh --gpu 2,4,5        # subset of GPUs
 ```
 
 ### Run specific tests only
 ```bash
-./fulltest.sh preflight ecc pcie clocks       # hardware health checks only
-./fulltest.sh nccl pytorch                    # communication + framework only
-./fulltest.sh memtest                         # VRAM integrity only
-./fulltest.sh stress                          # stress test only (default 5 min)
+./test/fulltest.sh preflight ecc pcie clocks       # hardware health checks only
+./test/fulltest.sh nccl pytorch                    # communication + framework only
+./test/fulltest.sh memtest                         # VRAM integrity only
+./test/fulltest.sh stress                          # stress test only (default 5 min)
 ```
 
 ### Combine: specific tests on specific GPUs
 ```bash
-./fulltest.sh --gpu 3 memtest stress
-./fulltest.sh --gpu 2,4,5 memtest stress
-./fulltest.sh --gpu 0,1 preflight ecc pcie
+./test/fulltest.sh --gpu 3 memtest stress
+./test/fulltest.sh --gpu 2,4,5 memtest stress
+./test/fulltest.sh --gpu 0,1 preflight ecc pcie
 ```
 
 ---
@@ -98,37 +98,37 @@ All cloned repos and compiled binaries are placed under `./build/` next to the s
 
 ```bash
 # Full suite, all GPUs
-./fulltest.sh
+./test/fulltest.sh
 
 # Full suite, GPU 3 only (e.g. after a card swap)
-./fulltest.sh --gpu 3
+./test/fulltest.sh --gpu 3
 
 # Full suite on GPUs 2, 4, and 5 (e.g. after swapping multiple cards)
-./fulltest.sh --gpu 2,4,5
+./test/fulltest.sh --gpu 2,4,5
 
 # 30-minute stress test on GPU 5 only
-./fulltest.sh --gpu 5 stress --burn-duration 1800
+./test/fulltest.sh --gpu 5 stress --burn-duration 1800
 
 # memtest + stress on a specific subset
-./fulltest.sh --gpu 2,4,5 memtest stress
+./test/fulltest.sh --gpu 2,4,5 memtest stress
 
 # 1-hour stress test on all GPUs
-./fulltest.sh stress --burn-duration 3600
+./test/fulltest.sh stress --burn-duration 3600
 
 # Quick hardware health check only
-./fulltest.sh preflight ecc pcie clocks
+./test/fulltest.sh preflight ecc pcie clocks
 
 # NCCL + PyTorch DDP only (comms stack validation)
-./fulltest.sh nccl pytorch
+./test/fulltest.sh nccl pytorch
 
 # Wipe all build artifacts and start fresh
-./fulltest.sh --clean
+./test/fulltest.sh --clean
 
 # Wipe build artifacts then immediately run NCCL
-./fulltest.sh --clean nccl
+./test/fulltest.sh --clean nccl
 
 # List available test names
-./fulltest.sh --list
+./test/fulltest.sh --list
 ```
 
 ---
@@ -152,13 +152,13 @@ When specified:
 
 ```bash
 # Test GPU 3 only
-./fulltest.sh --gpu 3 memtest stress
+./test/fulltest.sh --gpu 3 memtest stress
 
 # Test GPUs 2, 4, and 5 together
-./fulltest.sh --gpu 2,4,5
+./test/fulltest.sh --gpu 2,4,5
 
 # Invalid index gives a clean error
-./fulltest.sh --gpu 9
+./test/fulltest.sh --gpu 9
 # ERROR: --gpu invalid index(es): 9. System has GPUs 0-7.
 ```
 
@@ -261,7 +261,7 @@ To fix manually:
 ```bash
 apt-cache madison libnccl2 | grep cuda12
 sudo apt-get install libnccl2=<version> libnccl-dev=<version>
-./fulltest.sh --clean nccl
+./test/fulltest.sh --clean nccl
 ```
 
 ---
@@ -481,10 +481,10 @@ build/
 **Force full rebuild:**
 ```bash
 # Clean and exit
-./fulltest.sh --clean
+./test/fulltest.sh --clean
 
 # Clean then immediately run specific tests
-./fulltest.sh --clean nccl memtest
+./test/fulltest.sh --clean nccl memtest
 ```
 
 ---
@@ -510,7 +510,7 @@ Defined near the top of the script — edit directly to change defaults:
 ```bash
 apt-cache madison libnccl2 | grep cuda12
 sudo apt-get install libnccl2=<version> libnccl-dev=<version>
-./fulltest.sh --clean nccl
+./test/fulltest.sh --clean nccl
 ```
 
 ### PCIe test shows Gen1 warning
@@ -531,7 +531,7 @@ nvidia-smi -q -d CLOCK
 The script patches `sm_110` out of CMakeLists automatically. If the build still fails, force a clean rebuild:
 
 ```bash
-./fulltest.sh --clean cuda-samples
+./test/fulltest.sh --clean cuda-samples
 ```
 
 ### gpu-fryer unavailable (Rust not installed)
@@ -541,10 +541,10 @@ Rust is installed automatically via `rustup`. If `cargo` is still unavailable, t
 ### `--gpu` reports invalid index
 
 ```bash
-./fulltest.sh --gpu 9
+./test/fulltest.sh --gpu 9
 # ERROR: --gpu invalid index(es): 9. System has GPUs 0-7.
 
-./fulltest.sh --gpu 2,9,4
+./test/fulltest.sh --gpu 2,9,4
 # ERROR: --gpu invalid index(es): 9. System has GPUs 0-7.
 ```
 

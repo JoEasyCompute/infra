@@ -17,16 +17,16 @@ Generates and installs a systemd service (`nvidia-runtime-policy.service`) that 
 
 ```bash
 # Make executable
-chmod +x gpu-power-limit.sh
+chmod +x install/gpu-power-limit.sh
 
 # Preview what would be installed (no changes made)
-./gpu-power-limit.sh --dry-run
+./install/gpu-power-limit.sh --dry-run
 
 # Auto-detect GPU, apply preset, install and start service
-sudo ./gpu-power-limit.sh
+sudo ./install/gpu-power-limit.sh
 
 # Force a specific wattage across all GPUs
-sudo ./gpu-power-limit.sh --override 350
+sudo ./install/gpu-power-limit.sh --override 350
 ```
 
 ---
@@ -119,16 +119,16 @@ Before writing anything, the script validates the resolved wattage against each 
 
 ```bash
 # Dry-run on a 4090 node — preview the 300W preset
-./gpu-power-limit.sh --dry-run
+./install/gpu-power-limit.sh --dry-run
 
 # Install on a 5090 node — applies 450W preset automatically
-sudo ./gpu-power-limit.sh
+sudo ./install/gpu-power-limit.sh
 
 # Override to 250W regardless of GPU model
-sudo ./gpu-power-limit.sh --override 250
+sudo ./install/gpu-power-limit.sh --override 250
 
 # Dry-run with override — preview a custom wattage before committing
-./gpu-power-limit.sh --dry-run --override 250
+./install/gpu-power-limit.sh --dry-run --override 250
 ```
 
 ---
