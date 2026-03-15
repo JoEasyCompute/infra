@@ -65,7 +65,7 @@ All scripts share a common directory at `/opt/provision/` for state, logs, and c
 ```bash
 # 1. Copy scripts to the provision directory
 sudo mkdir -p /opt/provision
-sudo cp base-install.sh docker-install.sh fulltest.sh provision.sh /opt/provision/
+sudo cp install/base-install.sh install/docker-install.sh install/provision.sh test/fulltest.sh /opt/provision/
 sudo chmod +x /opt/provision/*.sh
 
 # 2. Run — handles everything including reboots automatically
