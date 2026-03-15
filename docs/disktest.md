@@ -30,7 +30,7 @@ sudo apt install fio smartmontools nvme-cli ioping pciutils
 Root is required for SMART data, raw block device I/O, and auto-installing dependencies.
 
 ```bash
-sudo ./disktest.sh [OPTIONS]
+sudo ./test/disktest.sh [OPTIONS]
 ```
 
 Running without root will warn and proceed in a limited mode (SMART checks may fail, auto-install is disabled).
@@ -40,11 +40,11 @@ Running without root will warn and proceed in a limited mode (SMART checks may f
 ## Installation
 
 ```bash
-# Download
-curl -O https://github.com/joeasycompute/infra/disktest.sh
-chmod +x disktest.sh
+# From this repo
+chmod +x test/disktest.sh
 
-# Or clone alongside fulltest.sh in your validation toolkit
+# Or copy into your validation toolkit
+cp test/disktest.sh /opt/provision/
 ```
 
 ---
@@ -53,22 +53,22 @@ chmod +x disktest.sh
 
 ```bash
 # Preview what would run — no disk I/O
-sudo ./disktest.sh --dry-run
+sudo ./test/disktest.sh --dry-run
 
 # Health check only (safe on any system)
-sudo ./disktest.sh --health
+sudo ./test/disktest.sh --health
 
 # Quick check on all disks (~3 min per disk)
-sudo ./disktest.sh --quick
+sudo ./test/disktest.sh --quick
 
 # Full test on all disks (~15 min per disk)
-sudo ./disktest.sh --full
+sudo ./test/disktest.sh --full
 
 # Target a single drive
-sudo ./disktest.sh --full --device /dev/nvme0n1
+sudo ./test/disktest.sh --full --device /dev/nvme0n1
 
 # Full test with JSON output for CI/automation
-sudo ./disktest.sh --full --json
+sudo ./test/disktest.sh --full --json
 ```
 
 ---
@@ -153,7 +153,7 @@ Devices that fail safety checks will still have SMART / health checks run agains
 
 To override (e.g. on a dedicated test bench where you know what you're doing):
 ```bash
-sudo ./disktest.sh --full --force --device /dev/sda
+sudo ./test/disktest.sh --full --force --device /dev/sda
 ```
 
 > ⚠️ `--force` on a live system with mounted filesystems **will corrupt data**.
@@ -194,7 +194,7 @@ Every `fio` job runs under a timeout scaled to its expected duration plus a buff
 `--dry-run` completes all discovery, safety checks, and scheduler analysis, then prints the full test plan with time estimates and exits without touching any disk. Use this before running on unfamiliar systems.
 
 ```bash
-sudo ./disktest.sh --stress --dry-run
+sudo ./test/disktest.sh --stress --dry-run
 ```
 
 Example output:
@@ -245,13 +245,13 @@ All detailed output is written to a timestamped directory (default `/tmp/disktes
 
 Override the log directory:
 ```bash
-sudo ./disktest.sh --full --log-dir /var/log/disktests/node-07
+sudo ./test/disktest.sh --full --log-dir /var/log/disktests/node-07
 ```
 
 ### JSON Output
 
 ```bash
-sudo ./disktest.sh --full --json 2>/dev/null | jq .summary
+sudo ./test/disktest.sh --full --json 2>/dev/null | jq .summary
 ```
 
 ```json
@@ -291,10 +291,10 @@ MAX_LATENCY_US=500
 ### New Node Certification (vast.ai / bare metal)
 ```bash
 # 1. Preview the plan first
-sudo ./disktest.sh --full --dry-run
+sudo ./test/disktest.sh --full --dry-run
 
 # 2. Run full validation and save a baseline
-sudo ./disktest.sh --full --json --save-baseline --log-dir /var/log/disktests/$(hostname)
+sudo ./test/disktest.sh --full --json --save-baseline --log-dir /var/log/disktests/$(hostname)
 
 # 3. Store the baseline JSON in your node inventory
 ```
@@ -302,26 +302,26 @@ sudo ./disktest.sh --full --json --save-baseline --log-dir /var/log/disktests/$(
 ### Nightly Health Check (cron)
 ```bash
 # /etc/cron.d/disktest
-0 3 * * * root /opt/disktest.sh --health --json >> /var/log/disktest_nightly.log 2>&1
+0 3 * * * root /opt/provision/disktest.sh --health --json >> /var/log/disktest_nightly.log 2>&1
 ```
 
 ### Post-Incident Drive Investigation
 ```bash
 # Health only — zero writes to a suspect drive
-sudo ./disktest.sh --health --device /dev/sdb
+sudo ./test/disktest.sh --health --device /dev/sdb
 
 # Then if clean, escalate to quick
-sudo ./disktest.sh --quick --device /dev/sdb
+sudo ./test/disktest.sh --quick --device /dev/sdb
 ```
 
 ### Excluding the OS Disk
 ```bash
-sudo ./disktest.sh --full --exclude /dev/sda
+sudo ./test/disktest.sh --full --exclude /dev/sda
 ```
 
 ### Parallel Output for Fleet Automation
 ```bash
-sudo ./disktest.sh --full --json 2>/dev/null > /tmp/results_$(hostname).json
+sudo ./test/disktest.sh --full --json 2>/dev/null > /tmp/results_$(hostname).json
 ```
 
 ---

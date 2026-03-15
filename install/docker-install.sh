@@ -34,8 +34,8 @@ LOG_MAX_RUNS=3                 # keep last N run blocks in the human log
 CONTAINER_RUNTIME_MOUNT="/data/container-runtime"   # XFS volume mountpoint
 DOCKER_DATA_DIR="${CONTAINER_RUNTIME_MOUNT}/docker"
 CONTAINERD_DATA_DIR="${CONTAINER_RUNTIME_MOUNT}/containerd"
-DOCKER_SYMLINK="/var/lib/docker"                    # bind-mounted from DOCKER_DATA_DIR
-CONTAINERD_SYMLINK="/var/lib/containerd"            # bind-mounted from CONTAINERD_DATA_DIR
+DOCKER_MOUNTPOINT="/var/lib/docker"                 # bind-mounted from DOCKER_DATA_DIR
+CONTAINERD_MOUNTPOINT="/var/lib/containerd"         # bind-mounted from CONTAINERD_DATA_DIR
 
 # Loopback image — used when no dedicated disk or LVM space is available
 LOOPBACK_IMG="/var/lib/container-runtime.img"       # fully allocated XFS image on root
@@ -98,6 +98,8 @@ UNINSTALL=false
 WITH_COMPOSE=false
 RESET_STATE=false
 CALLED_BY_PROVISION=false   # set by provision.sh to suppress reboot prompt
+SKIP_NVIDIA_TOOLKIT=false
+SKIP_NOUVEAU_BLACKLIST=false
 
 usage() {
     cat <<EOF
@@ -111,6 +113,8 @@ Options:
   --with-compose        Also install Docker Compose v2 (latest stable)
   --uninstall           Remove Docker, NVIDIA toolkit, Compose and undo mounts
   --reset-state         Clear phase state file and re-run all phases from scratch
+  --skip-nvidia-toolkit Skip NVIDIA Container Toolkit install
+  --skip-nouveau-blacklist Skip Nouveau blacklist step
   --called-by-provision Internal flag set by provision.sh
   -h, --help            Show this help
 
@@ -121,6 +125,7 @@ Examples:
   sudo $0 --with-compose                    # install with Compose
   sudo $0 --uninstall                       # clean removal
   sudo $0 --reset-state                     # force full re-run
+  sudo $0 --skip-nvidia-toolkit --skip-nouveau-blacklist
 EOF
     exit 0
 }
@@ -133,6 +138,8 @@ while [[ $# -gt 0 ]]; do
         --with-compose)       WITH_COMPOSE=true ;;
         --uninstall)          UNINSTALL=true ;;
         --reset-state)        RESET_STATE=true ;;
+        --skip-nvidia-toolkit) SKIP_NVIDIA_TOOLKIT=true ;;
+        --skip-nouveau-blacklist) SKIP_NOUVEAU_BLACKLIST=true ;;
         --called-by-provision) CALLED_BY_PROVISION=true ;;
         -h|--help) usage ;;
         *) echo -e "${RED}[ERROR]${RESET} Unknown argument: $1" >&2; usage ;;
@@ -319,7 +326,7 @@ if [[ "$UNINSTALL" == true ]]; then
 
     # Remove bind mounts and their fstab entries
     info "Removing /var/lib bind mounts..."
-    for tgt in "${DOCKER_SYMLINK}" "${CONTAINERD_SYMLINK}"; do
+    for tgt in "${DOCKER_MOUNTPOINT}" "${CONTAINERD_MOUNTPOINT}"; do
         if mountpoint -q "${tgt}" 2>/dev/null; then
             umount "${tgt}" || true
         fi
@@ -332,21 +339,24 @@ if [[ "$UNINSTALL" == true ]]; then
     if mountpoint -q "${CONTAINER_RUNTIME_MOUNT}" 2>/dev/null; then
         warn "Unmounting ${CONTAINER_RUNTIME_MOUNT}..."
         umount "${CONTAINER_RUNTIME_MOUNT}" || true
-        sed -i "\|${CONTAINER_RUNTIME_MOUNT}|d" /etc/fstab
-        info "Removed fstab entry — underlying disk/LV NOT wiped (manual step)"
+        info "Unmounted ${CONTAINER_RUNTIME_MOUNT}"
     fi
+    sed -i "\|${CONTAINER_RUNTIME_MOUNT}|d" /etc/fstab
+    info "Removed runtime mount fstab entries — underlying disk/LV NOT wiped (manual step)"
 
     # Remove loopback image and its fstab entry if present
     if [[ -f "${LOOPBACK_IMG}" ]]; then
         warn "Removing loopback image ${LOOPBACK_IMG} — all container data will be LOST"
-        sed -i "\|${LOOPBACK_IMG}|d" /etc/fstab
         rm -f "${LOOPBACK_IMG}"
-        info "Removed loopback image and fstab entry"
+        info "Removed loopback image"
     fi
+    sed -i "\|${LOOPBACK_IMG}|d" /etc/fstab
+    info "Removed loopback image fstab entries"
 
     # Remove any leftover data directories and config
     rm -rf "${CONTAINER_RUNTIME_MOUNT}" /etc/docker
     rm -f /etc/modprobe.d/blacklist-nouveau.conf
+    update-initramfs -u 2>/dev/null || true
     rm -f "$STATE_FILE"
 
     success "Uninstall complete — reboot recommended"
@@ -441,7 +451,7 @@ phase_disk_setup() {
     CURRENT_PHASE="DISK_SETUP"
 
     # If the shared volume is already mounted at our target path, just verify
-    # the subdirs and symlinks are in place and return early
+    # the subdirs and bind mounts are in place and return early
     if mountpoint -q "${CONTAINER_RUNTIME_MOUNT}" 2>/dev/null; then
         success "${CONTAINER_RUNTIME_MOUNT} already mounted — verifying layout..."
         _ensure_subdirs_and_bind_mounts
@@ -658,13 +668,13 @@ phase_disk_setup() {
     (( vol_free < MIN_CONTAINER_VOL_GB )) && \
         warn "Volume only ${vol_free} GB free — recommend at least ${MIN_CONTAINER_VOL_GB} GB for GPU workloads"
 
-    # Migrate any existing data from root, then create subdirs and symlinks
+    # Migrate any existing data from root, then create subdirs and bind mounts
     _migrate_existing_data
     _ensure_subdirs_and_bind_mounts
 
     success "Container runtime volume ready: ${vol_free} GB at ${CONTAINER_RUNTIME_MOUNT}"
-    info "  Docker data:     ${DOCKER_DATA_DIR}  (← ${DOCKER_SYMLINK})"
-    info "  containerd data: ${CONTAINERD_DATA_DIR}  (← ${CONTAINERD_SYMLINK})"
+    info "  Docker data:     ${DOCKER_DATA_DIR}  (← bind mount at ${DOCKER_MOUNTPOINT})"
+    info "  containerd data: ${CONTAINERD_DATA_DIR}  (← bind mount at ${CONTAINERD_MOUNTPOINT})"
 }
 
 # -----------------------------------------------------------------------------
@@ -692,8 +702,9 @@ _provision_loopback_image() {
     # contiguous space and prjquota accounting is accurate from the start.
     # fallocate is instant; falls back to dd if the fs doesn't support it.
     if [[ -f "${img_path}" ]]; then
-        warn "Loopback image already exists at ${img_path} — reusing (will reformat)"
-        confirm "Reformat existing loopback image? ALL DATA IN IMAGE LOST." || exit 1
+        warn "Loopback image already exists at ${img_path}"
+        confirm "Delete and recreate existing loopback image? ALL DATA IN IMAGE LOST." || exit 1
+        rm -f "${img_path}"
     fi
 
     info "Pre-allocating ${img_size_gb} GB image at ${img_path}..."
@@ -747,26 +758,28 @@ _provision_loopback_image() {
 
     success "Loopback container runtime ready: ${vol_free} GB at ${CONTAINER_RUNTIME_MOUNT}"
     info "  Image:           ${img_path} (${img_size_gb} GB, fully allocated)"
-    info "  Docker data:     ${DOCKER_DATA_DIR}  (← ${DOCKER_SYMLINK})"
-    info "  containerd data: ${CONTAINERD_DATA_DIR}  (← ${CONTAINERD_SYMLINK})"
+    info "  Docker data:     ${DOCKER_DATA_DIR}  (← bind mount at ${DOCKER_MOUNTPOINT})"
+    info "  containerd data: ${CONTAINERD_DATA_DIR}  (← bind mount at ${CONTAINERD_MOUNTPOINT})"
     info "  fstab entries:   loop mount + 2 bind mounts — active on every boot"
 }
 
 # -----------------------------------------------------------------------------
 # Helper: migrate existing /var/lib/docker and /var/lib/containerd data
-# to the new volume before symlinking. Called only when the volume is freshly
-# mounted and the source paths are real directories (not yet symlinks).
+# to the new volume before bind-mounting. Called only when the volume is freshly
+# mounted and the source paths are real directories (not yet bind mountpoints).
 # -----------------------------------------------------------------------------
 _migrate_existing_data() {
-    for src_path in "${DOCKER_SYMLINK}" "${CONTAINERD_SYMLINK}"; do
+    for src_path in "${DOCKER_MOUNTPOINT}" "${CONTAINERD_MOUNTPOINT}"; do
         # Only migrate if the path exists, is a real directory (not a symlink),
         # and has actual content
-        if [[ -d "${src_path}" ]] && [[ ! -L "${src_path}" ]]; then
+        if mountpoint -q "${src_path}" 2>/dev/null; then
+            info "${src_path} is already a mountpoint — skipping migration"
+        elif [[ -d "${src_path}" ]] && [[ ! -L "${src_path}" ]]; then
             local item_count
             item_count=$(find "${src_path}" -maxdepth 1 -mindepth 1 2>/dev/null | wc -l)
             if (( item_count > 0 )); then
                 local dest
-                if [[ "${src_path}" == "${DOCKER_SYMLINK}" ]]; then
+                if [[ "${src_path}" == "${DOCKER_MOUNTPOINT}" ]]; then
                     dest="${DOCKER_DATA_DIR}"
                 else
                     dest="${CONTAINERD_DATA_DIR}"
@@ -791,12 +804,12 @@ _migrate_existing_data() {
                 mv "${src_path}" "${src_path}.pre-migration.bak"
                 success "Migrated ${src_path} → ${dest} (backup: ${src_path}.pre-migration.bak)"
             else
-                # Empty directory — just remove it so we can symlink cleanly
+                # Empty directory — just remove it so we can create the bind mount cleanly
                 rm -rf "${src_path}"
                 info "${src_path} was empty — removed"
             fi
         elif [[ -L "${src_path}" ]]; then
-            info "${src_path} is already a symlink — skipping migration"
+            info "${src_path} is already a symlink — it will be replaced with a bind mount"
         fi
     done
 }
@@ -849,8 +862,8 @@ _ensure_subdirs_and_bind_mounts() {
         fi
     }
 
-    _setup_bind_mount "${DOCKER_DATA_DIR}"    "${DOCKER_SYMLINK}"
-    _setup_bind_mount "${CONTAINERD_DATA_DIR}" "${CONTAINERD_SYMLINK}"
+    _setup_bind_mount "${DOCKER_DATA_DIR}"    "${DOCKER_MOUNTPOINT}"
+    _setup_bind_mount "${CONTAINERD_DATA_DIR}" "${CONTAINERD_MOUNTPOINT}"
 }
 
 # -----------------------------------------------------------------------------
@@ -1006,6 +1019,11 @@ phase_nvidia_toolkit() {
 # -----------------------------------------------------------------------------
     CURRENT_PHASE="NVIDIA_TOOLKIT"
 
+    if [[ "$SKIP_NVIDIA_TOOLKIT" == true ]]; then
+        info "Skipping NVIDIA Container Toolkit by request"
+        return 0
+    fi
+
     if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
         success "NVIDIA driver: $(nvidia-smi --query-gpu=driver_version \
             --format=csv,noheader | head -1)"
@@ -1063,6 +1081,11 @@ PYEOF
 phase_nouveau_blacklist() {
 # -----------------------------------------------------------------------------
     CURRENT_PHASE="NOUVEAU_BLACKLIST"
+
+    if [[ "$SKIP_NOUVEAU_BLACKLIST" == true ]]; then
+        info "Skipping Nouveau blacklist by request"
+        return 0
+    fi
 
     local blacklist_file="/etc/modprobe.d/blacklist-nouveau.conf"
     if grep -q "blacklist nouveau" "$blacklist_file" 2>/dev/null; then
@@ -1142,7 +1165,7 @@ if mountpoint -q "${CONTAINER_RUNTIME_MOUNT}" 2>/dev/null; then
     else
         echo -e "  Source: ${rt_source} (block device)"
     fi
-    for tgt in "${DOCKER_SYMLINK}" "${CONTAINERD_SYMLINK}"; do
+    for tgt in "${DOCKER_MOUNTPOINT}" "${CONTAINERD_MOUNTPOINT}"; do
         if mountpoint -q "${tgt}" 2>/dev/null; then
             local src
             src=$(findmnt -n -o SOURCE "${tgt}" 2>/dev/null || echo "?")

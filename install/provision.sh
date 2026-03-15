@@ -305,16 +305,16 @@ fi
 # -----------------------------------------------------------------------------
 # Build sub-script argument strings
 # -----------------------------------------------------------------------------
-DOCKER_ARGS="--non-interactive --called-by-provision"
+DOCKER_ARGS="--called-by-provision"
+[[ "$NON_INTERACTIVE" == true ]] && DOCKER_ARGS="--non-interactive ${DOCKER_ARGS}"
 [[ "$WITH_COMPOSE" == true ]] && DOCKER_ARGS+=" --with-compose"
 [[ -n "$FORCE_VG" ]]          && DOCKER_ARGS+=" --vg ${FORCE_VG}"
 [[ -n "$FORCE_DISK" ]]        && DOCKER_ARGS+=" --disk ${FORCE_DISK}"
 
 BASE_ARGS=""
-[[ "$NON_INTERACTIVE" == true ]] && BASE_ARGS+=" --non-interactive"
+[[ "$NON_INTERACTIVE" == true ]] && BASE_ARGS+=" --yes"
 
 FULLTEST_ARGS=""
-[[ "$NON_INTERACTIVE" == true ]] && FULLTEST_ARGS+=" --non-interactive"
 
 # Helper: run a stage with state tracking
 run_stage() {
@@ -407,15 +407,31 @@ if ! stage_done "stage2_docker"; then
         warn "This is expected only if no free disk or LVM space was available"
     else
         success "Container runtime volume mounted: $(df -h /data/container-runtime | awk 'NR==2{print $2" total, "$4" free"}')"
-        # Verify both symlinks resolve correctly
+        # Verify both bind mounts are active and sourced from the runtime volume.
         for link in /var/lib/docker /var/lib/containerd; do
-            if [[ -L "$link" ]]; then
-                success "  ${link} → $(readlink "$link")"
-            else
-                error "  ${link} is not a symlink — DISK_SETUP may have failed mid-run"
+            if ! mountpoint -q "$link" 2>/dev/null; then
+                error "  ${link} is not a mountpoint — DISK_SETUP may have failed mid-run"
                 error "  Reset and re-run: sudo ${PROVISION_DIR}/provision.sh --reset-state"
                 exit 1
             fi
+
+            src=$(findmnt -n -o SOURCE --target "$link" 2>/dev/null || true)
+            case "$link" in
+                /var/lib/docker)
+                    expected="/data/container-runtime/docker"
+                    ;;
+                /var/lib/containerd)
+                    expected="/data/container-runtime/containerd"
+                    ;;
+            esac
+
+            if [[ "$src" != "$expected" ]]; then
+                error "  ${link} source mismatch — expected ${expected}, got ${src:-'(unknown)'}"
+                error "  Reset and re-run: sudo ${PROVISION_DIR}/provision.sh --reset-state"
+                exit 1
+            fi
+
+            success "  ${link} bind-mounted from ${src}"
         done
     fi
 
@@ -473,8 +489,8 @@ echo
 echo -e "${BOLD}Storage:${RESET}"
 if mountpoint -q /data/container-runtime 2>/dev/null; then
     df -h /data/container-runtime | awk 'NR==2{printf "  /data/container-runtime  %s total  %s used  %s free\n", $2, $3, $4}'
-    echo "  /var/lib/docker     → $(readlink /var/lib/docker     2>/dev/null || echo '(not set)')"
-    echo "  /var/lib/containerd → $(readlink /var/lib/containerd 2>/dev/null || echo '(not set)')"
+    echo "  /var/lib/docker     ← $(findmnt -n -o SOURCE --target /var/lib/docker 2>/dev/null || echo '(not mounted)')"
+    echo "  /var/lib/containerd ← $(findmnt -n -o SOURCE --target /var/lib/containerd 2>/dev/null || echo '(not mounted)')"
     xfs_info /data/container-runtime 2>/dev/null | grep -E 'reflink|ftype' | sed 's/^/  xfs: /' || true
 else
     df -h / | awk 'NR==2{printf "  / (root)  %s total  %s used  %s free\n", $2, $3, $4}'
@@ -484,6 +500,6 @@ fi
 echo
 info "Provision log:  ${LOG_FILE}"
 info "JSON log:       ${JSONL_FILE}"
-info "Full test logs: ${LOG_DIR}/fulltest*.log"
+info "Full test logs: ${PROVISION_DIR}/fulltest_*.log"
 
 _jlog "success" "COMPLETE" "all stages complete"

@@ -5,6 +5,7 @@ set -euo pipefail
 
 BASE_DIR="/opt/ipmi-watch"
 CSV_FILE="$BASE_DIR/targets.csv"
+LEGACY_CSV_FILE="$BASE_DIR/target.csv"
 STATE_FILE="$BASE_DIR/state.json"
 LOCK_FILE="/var/lock/ipmi-watch.lock"
 
@@ -28,6 +29,10 @@ exec 9>"$LOCK_FILE"
 flock -n 9 || exit 0
 
 mkdir -p "$BASE_DIR"
+
+if [[ ! -f "$CSV_FILE" ]] && [[ -f "$LEGACY_CSV_FILE" ]]; then
+  CSV_FILE="$LEGACY_CSV_FILE"
+fi
 
 # Initialise state file if missing
 if [[ ! -f "$STATE_FILE" ]]; then

@@ -107,7 +107,7 @@ If the script detects an existing fstab entry for the UUID that is **missing** `
 
 ```bash
 sudo mkdir -p /opt/provision
-sudo cp docker-install.sh /opt/provision/
+sudo cp install/docker-install.sh /opt/provision/
 sudo chmod +x /opt/provision/docker-install.sh
 ```
 
@@ -129,6 +129,8 @@ sudo /opt/provision/docker-install.sh [OPTIONS]
 | `--with-compose` | Also install Docker Compose v2 (latest stable, checksum-verified) |
 | `--uninstall` | Full removal — Docker, toolkit, Compose, bind mounts, and volume |
 | `--reset-state` | Clear phase state file and re-run all phases from scratch |
+| `--skip-nvidia-toolkit` | Skip NVIDIA Container Toolkit install (useful on AMD hosts) |
+| `--skip-nouveau-blacklist` | Skip Nouveau blacklist step (useful on AMD hosts) |
 | `--called-by-provision` | Internal flag set by `provision.sh` — do not use manually |
 | `-h, --help` | Show help and exit |
 
@@ -152,6 +154,9 @@ sudo /opt/provision/docker-install.sh --non-interactive --disk /dev/sdb
 
 # Force a complete re-run
 sudo /opt/provision/docker-install.sh --reset-state --non-interactive
+
+# Reuse on an AMD host
+sudo /opt/provision/docker-install.sh --non-interactive --skip-nvidia-toolkit --skip-nouveau-blacklist
 
 # Clean uninstall
 sudo /opt/provision/docker-install.sh --uninstall

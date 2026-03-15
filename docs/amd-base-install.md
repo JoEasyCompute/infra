@@ -1,4 +1,4 @@
-# base-install-amd.sh — AMD GPU Node Installation Guide
+# amd-base-install.sh — AMD GPU Node Installation Guide
 
 **Version:** 2.0 (2026-03-15)  
 **Supported GPUs:** Any ROCm-compatible AMD GPU  
@@ -8,7 +8,7 @@
 
 ## Overview
 
-`base-install-amd.sh` provisions a bare Ubuntu server with the full AMD GPU software stack needed for compute and AI/ML workloads. It installs the AMDGPU DKMS kernel driver, the ROCm software stack, auto-detects the installed GPU architecture to configure the PyTorch environment, and clones the `joeasycompute/infra` repo.
+`amd-base-install.sh` provisions a bare Ubuntu server with the full AMD GPU software stack needed for compute and AI/ML workloads. It installs the AMDGPU DKMS kernel driver, the ROCm software stack, auto-detects the installed GPU architecture to configure the PyTorch environment, and clones the `joeasycompute/infra` repo.
 
 The script is GPU-agnostic — it works for any ROCm-supported AMD GPU including consumer Radeon (RX 7000/9000 series), professional Radeon PRO/AI PRO, and Instinct data centre cards. Common examples:
 
@@ -86,19 +86,19 @@ sudo reboot
 
 ```bash
 # Interactive install (prompts for ROCm version)
-sudo bash base-install-amd.sh
+sudo bash install/amd-base-install.sh
 
 # Explicit ROCm version
-sudo bash base-install-amd.sh --rocm 7.2
+sudo bash install/amd-base-install.sh --rocm 7.2
 
 # Non-interactive / CI (defaults: ROCm 7.2)
-sudo bash base-install-amd.sh --yes
+sudo bash install/amd-base-install.sh --yes
 
 # Full uninstall (interactive)
-sudo bash base-install-amd.sh --uninstall
+sudo bash install/amd-base-install.sh --uninstall
 
 # Full uninstall (non-interactive)
-sudo bash base-install-amd.sh --uninstall --yes
+sudo bash install/amd-base-install.sh --uninstall --yes
 ```
 
 ### ROCm version selection
@@ -244,7 +244,7 @@ sudo sed -i "s/PYTORCH_ROCM_ARCH=.*/PYTORCH_ROCM_ARCH=\"${ARCH}\"/" /etc/profile
 source /etc/profile.d/rocm.sh
 
 # Or simply re-run the script -- it will auto-detect and replace the placeholder
-sudo bash ~/infra/install/base-install-amd.sh --rocm 7.2
+sudo bash ~/infra/install/amd-base-install.sh --rocm 7.2
 ```
 
 ---
@@ -318,7 +318,7 @@ The `--uninstall` path performs a full clean removal and restores the system to 
 
 ## Key Differences from base-install.sh (NVIDIA)
 
-| Aspect | AMD (`base-install-amd.sh`) | NVIDIA (`base-install.sh`) |
+| Aspect | AMD (`amd-base-install.sh`) | NVIDIA (`base-install.sh`) |
 |--------|----------------------------|-----------------------------|
 | Driver package | `amdgpu-dkms` | `nvidia-dkms-{ver}-open` |
 | Extra kernel pkg | `linux-modules-extra-$(uname -r)` required | Not required |
