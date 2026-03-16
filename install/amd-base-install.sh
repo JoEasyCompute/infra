@@ -44,6 +44,13 @@ warn()    { echo -e "${YELLOW}[WARN]${NC}    $*"; }
 error()   { echo -e "${RED}[ERROR]${NC}   $*"; exit 1; }
 section() { echo -e "\n${BOLD}${CYAN}-- $* --${NC}"; }
 
+APT_LOCK_TIMEOUT=1800
+
+apt_get() {
+    sudo DEBIAN_FRONTEND=noninteractive \
+        apt-get -o DPkg::Lock::Timeout="${APT_LOCK_TIMEOUT}" "$@"
+}
+
 # --- CLI argument parsing ----------------------------------------
 ROCM_VERSION=""
 NON_INTERACTIVE=false
@@ -308,23 +315,23 @@ install_base_packages() {
     section "Base System Packages"
 
     info "Bootstrapping prerequisites..."
-    sudo apt-get update -q \
+    apt_get update -q \
         || error "apt-get update failed"
-    sudo apt-get install -y \
+    apt_get install -y \
         software-properties-common apt-transport-https ca-certificates curl gnupg wget \
         || error "Bootstrap package install failed"
 
     # Kernel headers and modules-extra -- both required for amdgpu-dkms
     local kver; kver=$(uname -r)
     info "Installing kernel headers for: ${kver}"
-    sudo apt-get install -y \
+    apt_get install -y \
         "linux-headers-${kver}" \
         linux-headers-generic \
         "linux-modules-extra-${kver}" \
         || warn "Kernel headers install had warnings -- DKMS build may fail"
 
     info "Installing base packages..."
-    sudo apt-get install -y \
+    apt_get install -y \
         git cmake build-essential dkms alsa-utils \
         gcc-11 g++-11 gcc-12 g++-12 lsb-release \
         ipmitool jq pciutils iproute2 util-linux dmidecode lshw \
@@ -366,7 +373,7 @@ install_rocm_repos() {
         sudo rm -f /etc/apt/sources.list.d/amdgpu.list \
                    /etc/apt/sources.list.d/rocm.list \
                    /etc/apt/preferences.d/rocm-pin-600
-        sudo apt-get update -q 2>/dev/null || true   # flush stale cache; errors OK here
+        apt_get update -q 2>/dev/null || true   # flush stale cache; errors OK here
         success "Stale repo files removed"
     fi
 
@@ -409,7 +416,7 @@ install_rocm_repos() {
     printf "Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n" \
         | sudo tee /etc/apt/preferences.d/rocm-pin-600 > /dev/null
 
-    sudo apt-get update -q || error "apt-get update after ROCm repo setup failed"
+    apt_get update -q || error "apt-get update after ROCm repo setup failed"
     success "AMD ROCm repositories configured (ROCm ${ROCM_VERSION} / amdgpu ${AMDGPU_BUILD_VERSION}, ${UBUNTU_CODENAME})"
 }
 
@@ -419,7 +426,7 @@ install_rocm_repos() {
 install_amd_stack() {
     section "AMDGPU Driver + ROCm Stack"
     info "Installing amdgpu-dkms kernel driver..."
-    sudo apt-get install -V -y \
+    apt_get install -V -y \
         amdgpu-dkms \
         || error "amdgpu-dkms install failed -- check kernel headers and DKMS"
     success "amdgpu-dkms installed"
@@ -427,7 +434,7 @@ install_amd_stack() {
     info "Installing ROCm ${ROCM_VERSION} stack..."
     # 'rocm' meta-package pulls in: HIP runtime, OpenCL, rocm-smi, rocminfo,
     # ROCm libraries (rocBLAS, rocFFT, MIOpen, etc.), and profiling tools.
-    sudo apt-get install -V -y \
+    apt_get install -V -y \
         rocm \
         || error "ROCm stack install failed -- check apt output above"
     success "ROCm stack installed"
@@ -610,7 +617,7 @@ install_bandwidth_test() {
         success "rocm-bandwidth-test: available at /opt/rocm/bin/rocm-bandwidth-test"
     else
         info "Attempting explicit install of rocm-bandwidth-test..."
-        sudo apt-get install -y rocm-bandwidth-test \
+        apt_get install -y rocm-bandwidth-test \
             || warn "rocm-bandwidth-test not separately packaged -- included in rocm meta-package (reboot first)"
     fi
 }
@@ -773,7 +780,7 @@ uninstall_node() {
         echo "${pkgs_to_remove}" | tr ' ' '\n' | sed 's/^/    /' | grep -v '^$'
         echo ""
         # shellcheck disable=SC2086
-        sudo apt-get purge -y ${pkgs_to_remove} \
+        apt_get purge -y ${pkgs_to_remove} \
             || warn "Some packages failed to purge -- continuing"
         success "AMD/ROCm packages purged"
     else
@@ -839,7 +846,7 @@ uninstall_node() {
                /etc/apt/sources.list.d/rocm.list
     sudo rm -f /etc/apt/preferences.d/rocm-pin-600
     sudo rm -f /etc/apt/keyrings/rocm.gpg
-    sudo apt-get update -q || warn "apt-get update had warnings (non-fatal)"
+    apt_get update -q || warn "apt-get update had warnings (non-fatal)"
     success "AMD ROCm apt sources and keyring removed"
 
     # -- 7. Remove GCC alternatives -------------------------------
@@ -872,8 +879,8 @@ uninstall_node() {
 
     # -- 9. apt autoremove + update -------------------------------
     section "Final apt Cleanup"
-    sudo apt-get autoremove -y  || warn "autoremove had warnings (non-fatal)"
-    sudo apt-get update -q      || warn "apt-get update had warnings (non-fatal)"
+    apt_get autoremove -y  || warn "autoremove had warnings (non-fatal)"
+    apt_get update -q      || warn "apt-get update had warnings (non-fatal)"
     success "apt cleanup complete"
 
     # -- 10. Final verification -----------------------------------
