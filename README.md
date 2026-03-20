@@ -128,6 +128,14 @@ How it works:
 6. Stage 3 validates `rocm-smi`, `rocminfo`, and Docker.
 7. On success, the resume service is disabled and the run is marked complete.
 
+AMD container note:
+
+- this path does not install an AMD equivalent to `nvidia-container-toolkit`
+- it uses standard Docker plus ROCm on the host
+- AMD GPU containers are expected to access GPUs through device passthrough such as:
+  - `/dev/kfd`
+  - `/dev/dri`
+
 Shared runtime location used by the AMD orchestrator:
 
 ```text
@@ -227,7 +235,9 @@ sudo /opt/provision-amd/provision-amd.sh --status
 | `install/amd-base-install.sh` | AMDGPU + ROCm base install | [docs/amd-base-install.md](/Users/josephcheung/Desktop/dev/infra/docs/amd-base-install.md) |
 | `test/disktest.sh` | Disk health, throughput, and stress validation | [docs/disktest.md](/Users/josephcheung/Desktop/dev/infra/docs/disktest.md) |
 | `test/network-test.sh` | Network connectivity, latency, MTU, and bandwidth validation | [docs/network-test.md](/Users/josephcheung/Desktop/dev/infra/docs/network-test.md) |
+| `test/network-batch.sh` | SSH-based orchestration helper for chain, pair, rotate, grouped, and plan-export network validation | [docs/network-batch.md](/Users/josephcheung/Desktop/dev/infra/docs/network-batch.md) |
 | `install/gpu-power-limit.sh` | Installs a persistent NVIDIA power-limit policy service | [docs/gpu-power-limit.md](/Users/josephcheung/Desktop/dev/infra/docs/gpu-power-limit.md) |
+| Combined acceptance workflow | Client-facing 60-node validation kit combining GPU, network, disk, burn, reboot, and variance checks | [docs/client-acceptance-test-kit.md](/Users/josephcheung/Desktop/dev/infra/docs/client-acceptance-test-kit.md) |
 
 ## Provisioning Details
 
@@ -281,6 +291,14 @@ It can also be reused on AMD hosts with:
 - `--skip-nvidia-toolkit`
 - `--skip-nouveau-blacklist`
 
+On AMD hosts, this means:
+
+- `docker-install.sh` still installs Docker CE, containerd, storage layout, and optional Compose
+- it does not install an AMD-specific Docker runtime/toolkit equivalent
+- AMD GPU containers are expected to use standard Docker device passthrough for ROCm, typically exposing:
+  - `/dev/kfd`
+  - `/dev/dri`
+
 ### `install/provision-amd.sh`
 
 Current top-level behavior:
@@ -299,6 +317,7 @@ Current top-level behavior:
 - verifies `rocm-smi` is operational before stage 2
 - reuses `docker-install.sh` while skipping NVIDIA-only phases
 - validates `rocm-smi`, `rocminfo`, and Docker in stage 3
+- does not configure a separate AMD Docker runtime; AMD GPU container access is expected via ROCm device passthrough
 
 ### `test/fulltest.sh`
 
@@ -372,6 +391,8 @@ Script reference guides now live under [docs/](/Users/josephcheung/Desktop/dev/i
 - [docs/fulltest.md](/Users/josephcheung/Desktop/dev/infra/docs/fulltest.md)
 - [docs/disktest.md](/Users/josephcheung/Desktop/dev/infra/docs/disktest.md)
 - [docs/network-test.md](/Users/josephcheung/Desktop/dev/infra/docs/network-test.md)
+- [docs/network-batch.md](/Users/josephcheung/Desktop/dev/infra/docs/network-batch.md)
+- [docs/client-acceptance-test-kit.md](/Users/josephcheung/Desktop/dev/infra/docs/client-acceptance-test-kit.md)
 - [docs/gpu-power-limit.md](/Users/josephcheung/Desktop/dev/infra/docs/gpu-power-limit.md)
 - [docs/amd-base-install.md](/Users/josephcheung/Desktop/dev/infra/docs/amd-base-install.md)
 
