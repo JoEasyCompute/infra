@@ -1,0 +1,17 @@
+{
+  "systems": {
+    "maas-h100-fixture-01": {
+      "site_code": "lon1",
+      "rack_name": "rack-a1",
+      "sku_code": "gpu-h100x8-2tb-15tb-100g",
+      "source": "placement-file"
+    }
+  },
+  "zones": {
+    "lon-a": {
+      "site_code": "lon1",
+      "rack_name": "rack-a1"
+    }
+  },
+  "default": null
+}

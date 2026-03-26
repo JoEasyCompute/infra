@@ -32,6 +32,14 @@ function getDatabaseDebug() {
   };
 }
 
+function getMaasDebug() {
+  return {
+    baseUrl: process.env.MAAS_BASE_URL || null,
+    apiVersion: process.env.MAAS_API_VERSION || "2.0",
+    hasApiKey: Boolean(process.env.MAAS_API_KEY)
+  };
+}
+
 export function getConfig() {
   return {
     serviceName: process.env.SERVICE_NAME || "fleet-catalog",
@@ -39,6 +47,10 @@ export function getConfig() {
     port: Number.parseInt(process.env.PORT || process.env.FLEET_CATALOG_PORT || "3000", 10),
     apiPrefix: process.env.API_PREFIX || "/api/v1",
     databaseUrl: process.env.DATABASE_URL || buildDatabaseUrl(),
-    databaseDebug: getDatabaseDebug()
+    databaseDebug: getDatabaseDebug(),
+    maasBaseUrl: process.env.MAAS_BASE_URL || null,
+    maasApiKey: process.env.MAAS_API_KEY || null,
+    maasApiVersion: process.env.MAAS_API_VERSION || "2.0",
+    maasDebug: getMaasDebug()
   };
 }

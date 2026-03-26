@@ -31,6 +31,8 @@ The first runnable service is [services/fleet-catalog](services/fleet-catalog), 
 * normalizes raw MAAS machine payloads into platform state fields
 * upserts normalized machine and GPU inventory into PostgreSQL
 * records machine state transitions during sync
+* provides a fixture-driven MAAS adapter layer ahead of live MAAS integration
+* includes a manual MAAS sync runner with placement-map-based resolution
 
 ## Local development
 

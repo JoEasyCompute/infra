@@ -99,6 +99,23 @@ The write path:
 * replaces GPU inventory for that machine
 * appends a row to `machine_state_transitions`
 
+## Fixture-driven MAAS adapter
+
+Before a live MAAS host is connected, the raw MAAS adapter can be exercised with fixture files under [services/fleet-catalog/test/fixtures](/Users/josephcheung/Desktop/dev/ezc-platfrom/services/fleet-catalog/test/fixtures).
+
+Run adapter and sync-related tests with:
+
+```bash
+node --test services/fleet-catalog/test/*.test.js
+```
+
+For live MAAS integration later, create `services/fleet-catalog/config/maas-placement.json` from the example file and run:
+
+```bash
+cd services/fleet-catalog
+npm run sync:maas
+```
+
 ## Expected topology
 
 Minimal working layout:

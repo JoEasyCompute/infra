@@ -216,6 +216,12 @@ Machine sync behavior:
 
 This keeps MAAS-specific API handling in a thin adapter layer while preserving a stable internal contract for the catalog service.
 
+Adapter boundary:
+
+* raw MAAS response shape belongs in the adapter
+* normalized machine sync shape belongs in the catalog service contract
+* placement context such as `site_code` remains platform-owned input
+
 ## Transition rules
 
 Examples:

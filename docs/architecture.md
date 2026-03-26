@@ -40,6 +40,10 @@ Current implemented responsibilities:
 * read machine inventory from PostgreSQL
 * expose machine detail with GPU inventory
 * normalize MAAS-derived payloads into platform state fields
+* adapt raw MAAS-style machine payloads into the internal sync contract
+* fetch raw MAAS machine JSON through a thin client layer
+* resolve placement through a platform-owned mapping file
+* run manual batch sync from MAAS into the catalog write path
 * sync normalized machine/GPU payloads into PostgreSQL
 * append machine state transition history
 

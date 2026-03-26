@@ -8,6 +8,8 @@ System-of-record service for normalized machine inventory.
 * normalize MAAS payloads into platform inventory/state fields
 * centralize sellability derivation rules
 * upsert normalized machine and GPU inventory into PostgreSQL
+* provide a fixture-driven MAAS adapter boundary for later live integration
+* provide a thin MAAS client layer for live fetch integration
 
 ## Planned responsibilities
 
@@ -31,7 +33,7 @@ From `services/fleet-catalog`:
 cd services/fleet-catalog
 npm install
 cp .env.example .env
-npm run dev
+npm start
 ```
 
 The API expects a PostgreSQL database reachable through `DATABASE_URL`.
@@ -56,3 +58,50 @@ The sync path:
 * upserts the machine by `maas_system_id`
 * replaces GPU inventory for that machine
 * records a row in `machine_state_transitions`
+
+## MAAS adapter boundary
+
+`src/maas-adapter.js` is the raw-MAAS-facing layer.
+
+It is responsible for:
+
+* accepting raw MAAS-style machine payloads
+* extracting CPU, memory, network, storage, power, and GPU facts
+* translating them into the normalized internal sync contract
+
+This keeps MAAS-specific response handling separate from the catalog write path.
+
+## MAAS client boundary
+
+`src/maas-client.js` is the live fetch layer.
+
+It is responsible for:
+
+* authenticating to MAAS using `MAAS_API_KEY`
+* fetching raw machine JSON from the MAAS API
+* returning raw MAAS responses without applying DB writes
+
+`src/maas-integration.js` bridges the live client to the adapter layer by:
+
+* fetching one or more MAAS machines
+* applying platform-owned placement context
+* building normalized sync payloads for the existing write path
+
+## MAAS sync runner
+
+`src/maas-sync-runner.js` performs a batch sync by:
+
+* fetching raw machines from MAAS
+* resolving placement from a platform-owned placement map
+* building normalized sync payloads
+* calling the existing transactional write path
+
+The default placement map file is `config/maas-placement.json`.
+Use [maas-placement.example.json](/Users/josephcheung/Desktop/dev/ezc-platfrom/services/fleet-catalog/config/maas-placement.example.json) as the starting point.
+
+Run the manual sync with:
+
+```bash
+cd services/fleet-catalog
+npm run sync:maas
+```

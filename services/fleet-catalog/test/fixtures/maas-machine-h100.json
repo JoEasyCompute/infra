@@ -1,0 +1,73 @@
+{
+  "system_id": "maas-h100-fixture-01",
+  "hostname": "gpu-h100-fixture-01",
+  "status_name": "Ready",
+  "zone": {
+    "name": "lon-a"
+  },
+  "pool": {
+    "name": "retail"
+  },
+  "power_type": "redfish",
+  "power_parameters": {
+    "power_address": "10.0.10.31"
+  },
+  "tag_names": ["h100", "nvswitch", "100g"],
+  "annotations": {
+    "gpu_family": "hopper",
+    "topology": "nvswitch"
+  },
+  "cpu_vendor": "AMD",
+  "cpu_model": "EPYC 9654",
+  "cpu_sockets": 2,
+  "cpu_count": 192,
+  "memory_gb": 2048,
+  "interfaces": [
+    {
+      "name": "eno1",
+      "link_speed_mbps": 100000
+    }
+  ],
+  "block_devices": [
+    {
+      "type": "nvme",
+      "size_bytes": 8246337208320
+    },
+    {
+      "type": "nvme",
+      "size_bytes": 8246337208320
+    }
+  ],
+  "nvlink_present": true,
+  "numa_topology": {
+    "nodes": 2
+  },
+  "gpu_devices": [
+    {
+      "vendor": "NVIDIA",
+      "model": "H100 SXM",
+      "vram_gb": 80,
+      "pci_bus_address": "0000:81:00.0",
+      "pcie_generation": 5,
+      "pcie_link_width": 16,
+      "serial_number": "H100-FIXTURE-000",
+      "uuid": "GPU-H100-FIXTURE-000",
+      "ecc_enabled": true,
+      "mig_capable": true,
+      "nvlink_group": "fabric-a"
+    },
+    {
+      "vendor": "NVIDIA",
+      "model": "H100 SXM",
+      "vram_gb": 80,
+      "pci_bus_address": "0000:82:00.0",
+      "pcie_generation": 5,
+      "pcie_link_width": 16,
+      "serial_number": "H100-FIXTURE-001",
+      "uuid": "GPU-H100-FIXTURE-001",
+      "ecc_enabled": true,
+      "mig_capable": true,
+      "nvlink_group": "fabric-a"
+    }
+  ]
+}
