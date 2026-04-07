@@ -6,3 +6,4 @@ test/logs/
 docs/client-acceptance-test-kit.md
 logs/network-batch/*.txt
 .firecrawl
+.omx/
