@@ -47,6 +47,7 @@ Current platform status:
 ├── test/
 │   ├── fulltest.sh             # NVIDIA multi-GPU acceptance test
 │   ├── disktest.sh             # Disk validation and fio-based health/perf suite
+│   ├── ramtest.sh              # System RAM burn-in using stressapptest
 │   └── network-test.sh         # Network connectivity and throughput test
 ├── gpucheck/                   # Inventory / hardware inspection scripts
 ├── monitor/                    # Monitoring helpers, including IPMI watcher
@@ -234,6 +235,7 @@ sudo /opt/provision-amd/provision-amd.sh --status
 | `test/fulltest.sh` | NVIDIA GPU acceptance and health validation | [docs/fulltest.md](/Users/josephcheung/Desktop/dev/infra/docs/fulltest.md) |
 | `install/amd-base-install.sh` | AMDGPU + ROCm base install | [docs/amd-base-install.md](/Users/josephcheung/Desktop/dev/infra/docs/amd-base-install.md) |
 | `test/disktest.sh` | Disk health, throughput, and stress validation | [docs/disktest.md](/Users/josephcheung/Desktop/dev/infra/docs/disktest.md) |
+| `test/ramtest.sh` | System RAM burn-in and ECC-aware memory validation | [docs/ramtest.md](/Users/josephcheung/Desktop/dev/infra/docs/ramtest.md) |
 | `test/network-test.sh` | Network connectivity, latency, MTU, and bandwidth validation | [docs/network-test.md](/Users/josephcheung/Desktop/dev/infra/docs/network-test.md) |
 | `test/network-batch.sh` | SSH-based orchestration helper for chain, pair, rotate, grouped, and plan-export network validation | [docs/network-batch.md](/Users/josephcheung/Desktop/dev/infra/docs/network-batch.md) |
 | `install/gpu-power-limit.sh` | Installs a persistent NVIDIA power-limit policy service | [docs/gpu-power-limit.md](/Users/josephcheung/Desktop/dev/infra/docs/gpu-power-limit.md) |
@@ -390,6 +392,7 @@ Script reference guides now live under [docs/](/Users/josephcheung/Desktop/dev/i
 - [docs/docker-install.md](/Users/josephcheung/Desktop/dev/infra/docs/docker-install.md)
 - [docs/fulltest.md](/Users/josephcheung/Desktop/dev/infra/docs/fulltest.md)
 - [docs/disktest.md](/Users/josephcheung/Desktop/dev/infra/docs/disktest.md)
+- [docs/ramtest.md](/Users/josephcheung/Desktop/dev/infra/docs/ramtest.md)
 - [docs/network-test.md](/Users/josephcheung/Desktop/dev/infra/docs/network-test.md)
 - [docs/network-batch.md](/Users/josephcheung/Desktop/dev/infra/docs/network-batch.md)
 - [docs/client-acceptance-test-kit.md](/Users/josephcheung/Desktop/dev/infra/docs/client-acceptance-test-kit.md)
