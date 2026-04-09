@@ -12,23 +12,30 @@ CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
 
 # ─── Defaults ─────────────────────────────────────────────────────────────────
 MODE="full"           # quick | full | stress | health
-TARGET_DEV=""         # empty = all block devices
+TARGET_DEVS=()        # empty = all block devices
 OUTPUT_JSON=false
 BASELINE_FILE=""
 SAVE_BASELINE=false
+INTERACTIVE=true
+INTERACTIVE_EXPLICIT=false
+MODE_EXPLICIT=false
+TARGETS_EXPLICIT=false
 DRY_RUN=false         # show plan without running any I/O
 FORCE=false           # bypass in-use / RAID safety checks
 RUNTIME_SHORT=30      # seconds per fio job in quick mode
 RUNTIME_FULL=60       # seconds per fio job in full mode
 RUNTIME_STRESS=300    # seconds for stress test
 LOG_DIR="/tmp/disktest_$(date +%Y%m%d_%H%M%S)"
+REPORT_DIR=""
 RESULTS=()
 FAILED_TESTS=()
 WARNED_TESTS=()
+CURRENT_DEVICE=""
 
 # Per-device safety verdicts (populated by check_device_safety)
 declare -A DEV_SAFE       # true | false
 declare -A DEV_SAFE_MSG   # reason if unsafe
+declare -A DEVICE_RESULT_LINES
 
 # ─── Thresholds ───────────────────────────────────────────────────────────────
 MIN_SEQ_READ_MB=200       # MB/s minimum sequential read
@@ -42,9 +49,21 @@ SMART_REALLOCATED_MAX=10  # max reallocated sectors before warning
 # =============================================================================
 
 log()   { echo -e "${CYAN}[$(date +%H:%M:%S)]${RESET} $*"; }
-pass()  { echo -e "${GREEN}[PASS]${RESET} $*"; RESULTS+=("PASS: $*"); }
-fail()  { echo -e "${RED}[FAIL]${RESET} $*"; RESULTS+=("FAIL: $*"); FAILED_TESTS+=("$*"); }
-warn()  { echo -e "${YELLOW}[WARN]${RESET} $*"; RESULTS+=("WARN: $*"); WARNED_TESTS+=("$*"); }
+append_device_result() {
+    local level="$1"
+    local message="$2"
+    [[ -n "${CURRENT_DEVICE:-}" ]] || return 0
+
+    local existing="${DEVICE_RESULT_LINES[$CURRENT_DEVICE]:-}"
+    if [[ -n "$existing" ]]; then
+        DEVICE_RESULT_LINES["$CURRENT_DEVICE"]="${existing}"$'\n'"${level}: ${message}"
+    else
+        DEVICE_RESULT_LINES["$CURRENT_DEVICE"]="${level}: ${message}"
+    fi
+}
+pass()  { echo -e "${GREEN}[PASS]${RESET} $*"; RESULTS+=("PASS: $*"); append_device_result "PASS" "$*"; }
+fail()  { echo -e "${RED}[FAIL]${RESET} $*"; RESULTS+=("FAIL: $*"); FAILED_TESTS+=("$*"); append_device_result "FAIL" "$*"; }
+warn()  { echo -e "${YELLOW}[WARN]${RESET} $*"; RESULTS+=("WARN: $*"); WARNED_TESTS+=("$*"); append_device_result "WARN" "$*"; }
 info()  { echo -e "       $*"; }
 header(){ echo -e "\n${BOLD}${CYAN}━━━ $* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"; }
 die()   { echo -e "${RED}FATAL: $*${RESET}" >&2; exit 1; }
@@ -61,10 +80,12 @@ ${BOLD}MODES:${RESET}
   --full            All tests: health, sequential, random, latency (~15 min) [default]
   --stress          Extended endurance + thermal test (~30+ min)
   --health          SMART/NVMe health checks only (no I/O tests)
+  --interactive     Prompt for mode/disk selection / confirmation in TTY mode [default]
+  --non-interactive Disable prompts and run directly
   --dry-run         Show exactly what would run without touching any disk
 
 ${BOLD}TARGETING:${RESET}
-  --device DEV      Test only this device (e.g. /dev/nvme0n1, /dev/sda)
+  --device DEV      Test only this device (repeatable; accepts comma-separated list)
   --exclude DEV     Skip this device (repeatable)
   --force           Skip in-use / RAID / LVM safety checks (dangerous!)
 
@@ -75,9 +96,12 @@ ${BOLD}OUTPUT:${RESET}
   --compare FILE    Compare results against a saved baseline
 
 ${BOLD}EXAMPLES:${RESET}
+  sudo ./disktest.sh                            # guided interactive flow (default on TTY)
   sudo ./disktest.sh --full
   sudo ./disktest.sh --dry-run                      # preview plan, no I/O
+  sudo ./disktest.sh --non-interactive --health --json
   sudo ./disktest.sh --quick --device /dev/nvme0n1
+  sudo ./disktest.sh --full --device /dev/nvme0n1 --device /dev/nvme1n1
   sudo ./disktest.sh --stress --device /dev/sda --json
   sudo ./disktest.sh --full --save-baseline
   sudo ./disktest.sh --quick --compare /tmp/disktest_baseline.json
@@ -93,13 +117,22 @@ EXCLUDE_DEVS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --quick)    MODE="quick" ;;
-        --full)     MODE="full" ;;
-        --stress)   MODE="stress" ;;
-        --health)   MODE="health" ;;
+        --quick)    MODE="quick"; MODE_EXPLICIT=true ;;
+        --full)     MODE="full"; MODE_EXPLICIT=true ;;
+        --stress)   MODE="stress"; MODE_EXPLICIT=true ;;
+        --health)   MODE="health"; MODE_EXPLICIT=true ;;
+        --interactive) INTERACTIVE=true; INTERACTIVE_EXPLICIT=true ;;
+        --non-interactive) INTERACTIVE=false ;;
         --dry-run)  DRY_RUN=true ;;
         --force)    FORCE=true ;;
-        --device)   TARGET_DEV="$2"; shift ;;
+        --device)
+            TARGETS_EXPLICIT=true
+            IFS=',' read -r -a _device_args <<< "$2"
+            for _device in "${_device_args[@]}"; do
+                [[ -n "$_device" ]] && TARGET_DEVS+=("$_device")
+            done
+            shift
+            ;;
         --exclude)  EXCLUDE_DEVS+=("$2"); shift ;;
         --json)     OUTPUT_JSON=true ;;
         --log-dir)  LOG_DIR="$2"; shift ;;
@@ -247,7 +280,10 @@ check_prereqs() {
     $HAS_LSPCI  || info "lspci unavailable — PCIe topology info will be skipped"
 
     mkdir -p "$LOG_DIR"
+    REPORT_DIR="$LOG_DIR/reports"
+    mkdir -p "$REPORT_DIR"
     log "Log directory: $LOG_DIR"
+    log "Per-disk reports: $REPORT_DIR"
 }
 
 # =============================================================================
@@ -262,19 +298,35 @@ discover_devices() {
     header "Device Discovery"
 
     local devices=()
+    local -A seen=()
 
-    if [[ -n "$TARGET_DEV" ]]; then
-        [[ -b "$TARGET_DEV" ]] || die "Device not found: $TARGET_DEV"
-        devices=("$TARGET_DEV")
+    if [[ ${#TARGET_DEVS[@]} -gt 0 ]]; then
+        for dev in "${TARGET_DEVS[@]}"; do
+            [[ -b "$dev" ]] || die "Device not found: $dev"
+            [[ -n "${seen[$dev]:-}" ]] && continue
+            seen["$dev"]=1
+            devices+=("$dev")
+        done
     else
         # Enumerate non-partition block devices
         while IFS= read -r dev; do
-            local skip=false
-            for excl in "${EXCLUDE_DEVS[@]:-}"; do
-                [[ "/dev/$dev" == "$excl" ]] && skip=true
-            done
-            $skip || devices+=("/dev/$dev")
+            local candidate="/dev/$dev"
+            [[ -n "${seen[$candidate]:-}" ]] && continue
+            seen["$candidate"]=1
+            devices+=("$candidate")
         done < <(lsblk -d -n -o NAME,TYPE | awk '$2=="disk"{print $1}')
+    fi
+
+    if [[ ${#EXCLUDE_DEVS[@]} -gt 0 ]]; then
+        local filtered=()
+        for dev in "${devices[@]}"; do
+            local skip=false
+            for excl in "${EXCLUDE_DEVS[@]}"; do
+                [[ "$dev" == "$excl" ]] && skip=true && break
+            done
+            $skip || filtered+=("$dev")
+        done
+        devices=("${filtered[@]}")
     fi
 
     [[ ${#devices[@]} -eq 0 ]] && die "No block devices found"
@@ -307,6 +359,128 @@ discover_devices() {
     DEVICES=("${devices[@]}")
 }
 
+normalize_interactive_mode() {
+    $INTERACTIVE || return 0
+
+    if [[ ! -t 0 || ! -t 1 ]]; then
+        if $INTERACTIVE_EXPLICIT; then
+            die "--interactive requires a TTY"
+        fi
+        INTERACTIVE=false
+    fi
+}
+
+interactive_select_mode() {
+    $INTERACTIVE || return 0
+    $MODE_EXPLICIT && return 0
+
+    header "Interactive Mode Selection"
+    info "  [1] health  — SMART / NVMe health only"
+    info "  [2] quick   — health + sequential read/write"
+    info "  [3] full    — standard validation suite"
+    info "  [4] stress  — full suite + sustained stress"
+    info "Press Enter to accept the default: full. Type 'q' to cancel."
+
+    while true; do
+        local reply
+        printf "Mode [3]: "
+        read -r reply || die "Interactive mode selection cancelled"
+
+        case "${reply,,}" in
+            ""|3|full)
+                MODE="full"
+                ;;
+            1|health)
+                MODE="health"
+                ;;
+            2|quick)
+                MODE="quick"
+                ;;
+            4|stress)
+                MODE="stress"
+                ;;
+            q|quit)
+                die "Interactive mode selection cancelled"
+                ;;
+            *)
+                warn "Invalid mode selection: ${reply:-<empty>}"
+                continue
+                ;;
+        esac
+
+        log "Interactive mode: $MODE"
+        return 0
+    done
+}
+
+interactive_select_devices() {
+    $INTERACTIVE || return 0
+    $TARGETS_EXPLICIT && return 0
+    [[ ${#DEVICES[@]} -gt 0 ]] || return 0
+
+    header "Interactive Disk Selection"
+
+    local idx=1
+    for dev in "${DEVICES[@]}"; do
+        info "  [$idx] ${BOLD}$dev${RESET} [${DEV_TYPE[$dev]}] ${DEV_SIZE[$dev]} — ${DEV_MODEL[$dev]}"
+        ((idx++))
+    done
+
+    echo ""
+    info "Enter disk numbers separated by spaces or commas."
+    info "Press Enter or type 'all' to select all disks. Type 'q' to cancel."
+
+    while true; do
+        local reply
+        printf "Selection: "
+        read -r reply || die "Interactive selection cancelled"
+
+        case "${reply,,}" in
+            ""|all)
+                log "Interactive selection: all ${#DEVICES[@]} disk(s)"
+                return 0
+                ;;
+            q|quit)
+                die "Interactive selection cancelled"
+                ;;
+        esac
+
+        local normalized="${reply//,/ }"
+        local -a selected=()
+        local -A seen_indices=()
+        local valid=true
+        local token
+
+        for token in $normalized; do
+            if [[ ! "$token" =~ ^[0-9]+$ ]]; then
+                warn "Invalid selection token: $token"
+                valid=false
+                break
+            fi
+            if (( token < 1 || token > ${#DEVICES[@]} )); then
+                warn "Selection out of range: $token"
+                valid=false
+                break
+            fi
+            [[ -n "${seen_indices[$token]:-}" ]] && continue
+            seen_indices["$token"]=1
+            selected+=("${DEVICES[$((token-1))]}")
+        done
+
+        if ! $valid || [[ ${#selected[@]} -eq 0 ]]; then
+            info "Please choose one or more valid disk numbers."
+            continue
+        fi
+
+        DEVICES=("${selected[@]}")
+        log "Interactive selection: ${#DEVICES[@]} disk(s)"
+        for dev in "${DEVICES[@]}"; do
+            info "  ${BOLD}$dev${RESET} [${DEV_TYPE[$dev]}] ${DEV_SIZE[$dev]} — ${DEV_MODEL[$dev]}"
+        done
+        return 0
+    done
+}
+
 # =============================================================================
 # #2 — DEVICE SAFETY CHECK
 # Detects mounted partitions, RAID members, LVM PVs, ZFS vdevs
@@ -319,6 +493,7 @@ check_device_safety() {
     local any_unsafe=false
 
     for dev in "${DEVICES[@]}"; do
+        CURRENT_DEVICE="$dev"
         local safe=true
         local reasons=()
         local name
@@ -411,6 +586,8 @@ check_device_safety() {
         fi
     done
 
+    CURRENT_DEVICE=""
+
     if $any_unsafe && ! $FORCE; then
         echo ""
         echo -e "${YELLOW}${BOLD}NOTE:${RESET} Unsafe devices will have raw I/O tests skipped."
@@ -500,13 +677,26 @@ print_runtime_estimate() {
     fi
 
     # Give user 3 seconds to abort on full/stress runs against multiple disks
-    if [[ "$MODE" != "health" && $safe_devs -gt 1 && $total_mins -gt 5 ]]; then
+    if ! $INTERACTIVE && [[ "$MODE" != "health" && $safe_devs -gt 1 && $total_mins -gt 5 ]]; then
         echo ""
         echo -ne "${YELLOW}Starting in 3 seconds — Ctrl+C to abort...${RESET}"
         sleep 1; echo -ne " 2..."
         sleep 1; echo -ne " 1..."
         sleep 1; echo ""
     fi
+}
+
+interactive_confirm_run() {
+    $INTERACTIVE || return 0
+
+    echo ""
+    printf "Proceed with %s disk(s) in %s mode? [y/N]: " "${#DEVICES[@]}" "$MODE"
+    local reply
+    read -r reply || die "Interactive confirmation cancelled"
+    case "${reply,,}" in
+        y|yes) ;;
+        *) die "Run cancelled by user" ;;
+    esac
 }
 
 # =============================================================================
@@ -520,6 +710,7 @@ advise_schedulers() {
     local changed=false
 
     for dev in "${DEVICES[@]}"; do
+        CURRENT_DEVICE="$dev"
         local name
         name=$(basename "$dev")
         local type="${DEV_TYPE[$dev]:-unknown}"
@@ -588,6 +779,8 @@ advise_schedulers() {
             fi
         fi
     done
+
+    CURRENT_DEVICE=""
 
     $changed && info "Scheduler changes are runtime-only and will reset on reboot."
     info "To persist, add udev rules or configure in /etc/udev/rules.d/"
@@ -1126,34 +1319,138 @@ show_topology() {
     fi
 }
 
-# =============================================================================
-# JSON OUTPUT
-# =============================================================================
-
 emit_json() {
     local json_file="$LOG_DIR/disktest_results.json"
+    local results_file="$LOG_DIR/disktest_results.lines"
+    printf '%s\n' "${RESULTS[@]:-}" > "$results_file"
 
-    python3 - "$json_file" <<PYEOF
-import json, sys, datetime
+    python3 - "$json_file" "$results_file" "$REPORT_DIR" "$MODE" "${DEVICES[@]}" <<'PYEOF'
+import datetime
+import glob
+import json
+import socket
+import sys
 
+json_file = sys.argv[1]
+results_file = sys.argv[2]
+report_dir = sys.argv[3]
+mode = sys.argv[4]
+devices = sys.argv[5:]
+timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+with open(results_file, "r", encoding="utf-8") as fh:
+    all_results = [line.rstrip("\n") for line in fh if line.strip()]
 results = {
-    "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
-    "host": open("/etc/hostname").read().strip() if open("/etc/hostname") else "unknown",
-    "mode": "${MODE}",
-    "devices": {},
+    "timestamp": timestamp,
+    "host": socket.gethostname(),
+    "mode": mode,
+    "devices": devices,
+    "report_dir": report_dir,
+    "disk_reports": sorted(glob.glob(f"{report_dir}/*_report.json")),
     "summary": {
-        "passed": len([r for r in """${RESULTS[*]:-}""".split("\n") if r.startswith("PASS")]),
-        "failed": len([r for r in """${RESULTS[*]:-}""".split("\n") if r.startswith("FAIL")]),
-        "warned": len([r for r in """${RESULTS[*]:-}""".split("\n") if r.startswith("WARN")]),
+        "passed": len([r for r in all_results if r.startswith("PASS:")]),
+        "failed": len([r for r in all_results if r.startswith("FAIL:")]),
+        "warned": len([r for r in all_results if r.startswith("WARN:")]),
     },
-    "all_results": """${RESULTS[*]:-}""".split("\n") if """${RESULTS[*]:-}""" else []
+    "all_results": all_results,
 }
 
-with open(sys.argv[1], "w") as f:
+with open(json_file, "w", encoding="utf-8") as f:
     json.dump(results, f, indent=2)
 
 print(json.dumps(results, indent=2))
 PYEOF
+
+    rm -f "$results_file"
+}
+
+write_device_report() {
+    local dev="$1"
+    local devname
+    devname=$(basename "$dev")
+
+    local json_file="$REPORT_DIR/${devname}_report.json"
+    local text_file="$REPORT_DIR/${devname}_report.txt"
+
+    DISKTEST_DEVICE_RESULTS="${DEVICE_RESULT_LINES[$dev]:-}" python3 - \
+        "$json_file" "$text_file" "$dev" "$devname" "$MODE" \
+        "${DEV_TYPE[$dev]:-unknown}" "${DEV_SIZE[$dev]:-?}" "${DEV_MODEL[$dev]:-unknown}" \
+        "${DEV_SAFE[$dev]:-false}" "${DEV_SAFE_MSG[$dev]:-}" "$LOG_DIR" <<'PYEOF'
+import datetime
+import glob
+import json
+import os
+import socket
+import sys
+
+json_path, text_path, dev, devname, mode, dev_type, size, model, safe, safe_msg, log_dir = sys.argv[1:12]
+timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+lines = [line for line in os.environ.get("DISKTEST_DEVICE_RESULTS", "").splitlines() if line]
+passed = sum(1 for line in lines if line.startswith("PASS:"))
+failed = sum(1 for line in lines if line.startswith("FAIL:"))
+warned = sum(1 for line in lines if line.startswith("WARN:"))
+overall = "fail" if failed else "pass_with_warnings" if warned else "pass"
+
+artifact_patterns = [
+    f"smart_{devname}.txt",
+    f"nvme_{devname}.txt",
+    f"fio_{devname}_*.json",
+]
+artifacts = []
+for pattern in artifact_patterns:
+    artifacts.extend(glob.glob(os.path.join(log_dir, pattern)))
+artifacts = sorted({os.path.abspath(path) for path in artifacts})
+
+report = {
+    "timestamp": timestamp,
+    "host": socket.gethostname(),
+    "mode": mode,
+    "device": dev,
+    "device_name": devname,
+    "device_type": dev_type,
+    "size": size,
+    "model": model,
+    "safe_for_raw_io": safe.lower() == "true",
+    "safety_reason": safe_msg,
+    "summary": {
+        "passed": passed,
+        "failed": failed,
+        "warned": warned,
+        "overall": overall,
+    },
+    "results": lines,
+    "artifacts": artifacts,
+}
+
+with open(json_path, "w", encoding="utf-8") as fh:
+    json.dump(report, fh, indent=2)
+
+with open(text_path, "w", encoding="utf-8") as fh:
+    fh.write("Disk Test Report\n")
+    fh.write(f"Generated: {report['timestamp']}\n")
+    fh.write(f"Host: {report['host']}\n")
+    fh.write(f"Mode: {mode}\n")
+    fh.write(f"Device: {dev} ({dev_type}, {size}, {model})\n")
+    fh.write(f"Safe for raw I/O: {'yes' if report['safe_for_raw_io'] else 'no'}\n")
+    if safe_msg:
+        fh.write(f"Safety reason: {safe_msg}\n")
+    fh.write(f"Overall: {overall}\n")
+    fh.write(f"Pass/Warn/Fail: {passed}/{warned}/{failed}\n\n")
+    fh.write("Results:\n")
+    if lines:
+        for line in lines:
+            fh.write(f"- {line}\n")
+    else:
+        fh.write("- No device-scoped results recorded\n")
+    fh.write("\nArtifacts:\n")
+    if artifacts:
+        for path in artifacts:
+            fh.write(f"- {path}\n")
+    else:
+        fh.write("- None\n")
+PYEOF
+
+    info "  Per-disk reports: $json_file, $text_file"
 }
 
 # =============================================================================
@@ -1192,6 +1489,7 @@ print_summary() {
     fi
 
     echo -e "Detailed logs: ${CYAN}$LOG_DIR/${RESET}"
+    echo -e "Per-disk reports: ${CYAN}$REPORT_DIR/${RESET}"
 
     if [[ "$failed" -gt 0 ]]; then
         echo -e "\n${RED}${BOLD}OVERALL: FAIL${RESET}"
@@ -1208,6 +1506,9 @@ print_summary() {
 # =============================================================================
 
 main() {
+    normalize_interactive_mode
+    interactive_select_mode
+
     echo -e "${BOLD}${CYAN}"
     echo "╔══════════════════════════════════════════════════════╗"
     echo "║              disktest.sh — Disk Test Suite           ║"
@@ -1217,6 +1518,7 @@ main() {
 
     check_prereqs
     discover_devices
+    interactive_select_devices
     show_topology
 
     # Safety checks before any I/O (populates DEV_SAFE[])
@@ -1227,6 +1529,7 @@ main() {
 
     # Print estimated runtime and abort if --dry-run
     print_runtime_estimate
+    interactive_confirm_run
 
     local runtime
     case "$MODE" in
@@ -1236,6 +1539,7 @@ main() {
     esac
 
     for dev in "${DEVICES[@]}"; do
+        CURRENT_DEVICE="$dev"
         header "Testing: $dev [${DEV_TYPE[$dev]}] ${DEV_SIZE[$dev]} — ${DEV_MODEL[$dev]}"
 
         if ! ${DEV_SAFE[$dev]:-false}; then
@@ -1247,6 +1551,8 @@ main() {
         check_smart "$dev"
 
         if [[ "$MODE" == "health" ]]; then
+            write_device_report "$dev"
+            CURRENT_DEVICE=""
             continue
         fi
 
@@ -1254,6 +1560,8 @@ main() {
         test_sequential "$dev" "$runtime"
 
         if [[ "$MODE" == "quick" ]]; then
+            write_device_report "$dev"
+            CURRENT_DEVICE=""
             continue
         fi
 
@@ -1265,6 +1573,9 @@ main() {
         if [[ "$MODE" == "stress" ]]; then
             test_stress "$dev" "$runtime"
         fi
+
+        write_device_report "$dev"
+        CURRENT_DEVICE=""
     done
 
     # Multi-disk parallel test (full/stress with 2+ safe disks)
