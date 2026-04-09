@@ -46,6 +46,12 @@ chmod +x test/fulltest.sh
 
 All cloned repos and compiled binaries are placed under `./build/` next to the script. Nothing is written to system directories except NCCL and apt packages.
 
+If a previous run left `./build/` or one of the cloned repos owned by root or otherwise unwritable, the script now warns before any rebuild/reclone step and tells you how to fix ownership. A common recovery command is:
+
+```bash
+sudo chown -R "$USER":"$(id -gn)" ./test/build
+```
+
 ---
 
 ## Usage
