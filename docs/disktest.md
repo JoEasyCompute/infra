@@ -149,10 +149,20 @@ sudo ./test/disktest.sh --full \
 If you prefer a guided workflow, `--interactive` presents:
 
 1. a mode picker (`health`, `quick`, `full`, `stress`)
-2. the discovered disks as a numbered list
+2. the discovered disks as a checkbox list
 3. a final confirmation before execution
 
 On an interactive TTY this guided flow is now the default, so running `./test/disktest.sh` with no flags will start the prompts automatically. Use `--non-interactive` when you want direct scripted execution.
+
+Interactive disk picker controls:
+
+- `↑` / `↓` — move between disks
+- `Space` — check / uncheck the focused disk
+- `a` — select all / deselect all
+- `Enter` — confirm the current selection
+- `q` — cancel
+
+All disks start selected by default.
 
 ### Output
 ```
