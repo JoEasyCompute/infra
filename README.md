@@ -234,7 +234,7 @@ sudo /opt/provision-amd/provision-amd.sh --status
 | `install/docker-install.sh` | Docker CE, NVIDIA Container Toolkit, and runtime storage layout | [docs/docker-install.md](/Users/josephcheung/Desktop/dev/infra/docs/docker-install.md) |
 | `test/fulltest.sh` | NVIDIA GPU acceptance and health validation | [docs/fulltest.md](/Users/josephcheung/Desktop/dev/infra/docs/fulltest.md) |
 | `install/amd-base-install.sh` | AMDGPU + ROCm base install | [docs/amd-base-install.md](/Users/josephcheung/Desktop/dev/infra/docs/amd-base-install.md) |
-| `test/disktest.sh` | Disk health, throughput, and stress validation | [docs/disktest.md](/Users/josephcheung/Desktop/dev/infra/docs/disktest.md) |
+| `test/disktest.sh` | Disk health, throughput, and stress validation with guided interactive mode and per-disk reports | [docs/disktest.md](/Users/josephcheung/Desktop/dev/infra/docs/disktest.md) |
 | `test/ramtest.sh` | System RAM burn-in and ECC-aware memory validation | [docs/ramtest.md](/Users/josephcheung/Desktop/dev/infra/docs/ramtest.md) |
 | `test/network-test.sh` | Network connectivity, latency, MTU, and bandwidth validation | [docs/network-test.md](/Users/josephcheung/Desktop/dev/infra/docs/network-test.md) |
 | `test/network-batch.sh` | SSH-based orchestration helper for chain, pair, rotate, grouped, and plan-export network validation | [docs/network-batch.md](/Users/josephcheung/Desktop/dev/infra/docs/network-batch.md) |

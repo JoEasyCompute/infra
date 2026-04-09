@@ -52,8 +52,17 @@ cp test/disktest.sh /opt/provision/
 ## Quick Start
 
 ```bash
+# Default launch on a TTY: guided mode + disk selection
+sudo ./test/disktest.sh
+
 # Preview what would run — no disk I/O
 sudo ./test/disktest.sh --dry-run
+
+# Force interactive setup explicitly
+sudo ./test/disktest.sh --interactive
+
+# Disable prompts for automation / CI
+sudo ./test/disktest.sh --non-interactive --health --json
 
 # Health check only (safe on any system)
 sudo ./test/disktest.sh --health
@@ -66,6 +75,9 @@ sudo ./test/disktest.sh --full
 
 # Target a single drive
 sudo ./test/disktest.sh --full --device /dev/nvme0n1
+
+# Target multiple specific drives
+sudo ./test/disktest.sh --full --device /dev/nvme0n1 --device /dev/nvme1n1
 
 # Full test with JSON output for CI/automation
 sudo ./test/disktest.sh --full --json
@@ -82,7 +94,7 @@ sudo ./test/disktest.sh --full --json
 | `--full` | Health + sequential + random + latency + FS layer | ~15 min |
 | `--stress` | Full + extended endurance + thermal check | ~30–40 min |
 
-> Default mode is `--full` if no mode flag is specified.
+> On a TTY, the script now starts in guided interactive mode by default. If no mode is chosen explicitly, the interactive default is `full`. In non-interactive runs, `full` remains the default mode.
 
 ### `--health`
 SMART status, reallocated/pending/uncorrectable sector counts, drive temperature, and NVMe-specific metrics (wear %, available spare). No I/O is performed. Safe to run on live production systems.
@@ -113,15 +125,34 @@ Everything in `--full`, plus a sustained write test designed to expose the SLC c
 --full        All tests (default)
 --stress      Full + extended endurance
 --health      SMART/NVMe health checks only, no I/O
+--interactive Prompt for mode selection, disk selection, and final confirmation
+--non-interactive Disable prompts and run directly
 --dry-run     Show test plan and time estimate, then exit — no disk I/O
 ```
 
 ### Targeting
 ```
---device DEV        Test only this device  (e.g. /dev/nvme0n1, /dev/sda)
+--device DEV        Test only this device; repeat flag to select multiple disks
 --exclude DEV       Skip this device (flag is repeatable)
 --force             Bypass safety checks for in-use / RAID / LVM devices (DANGEROUS)
 ```
+
+`--device` may be repeated, and each occurrence may also contain a comma-separated list. For example:
+
+```bash
+sudo ./test/disktest.sh --full \
+  --device /dev/nvme0n1 \
+  --device /dev/nvme1n1,/dev/sdb \
+  --exclude /dev/sdb
+```
+
+If you prefer a guided workflow, `--interactive` presents:
+
+1. a mode picker (`health`, `quick`, `full`, `stress`)
+2. the discovered disks as a numbered list
+3. a final confirmation before execution
+
+On an interactive TTY this guided flow is now the default, so running `./test/disktest.sh` with no flags will start the prompts automatically. Use `--non-interactive` when you want direct scripted execution.
 
 ### Output
 ```
@@ -216,6 +247,23 @@ Example output:
 
 DRY RUN — no I/O will be performed. Exiting.
 ```
+
+---
+
+## Per-Disk Reports
+
+Each run now writes a report for every selected disk into the run’s `reports/` subdirectory inside the log directory:
+
+- `reports/<device>_report.json` — machine-readable per-disk summary
+- `reports/<device>_report.txt` — human-readable tester report
+
+These reports include:
+
+- disk identity and model
+- whether the device was considered safe for raw I/O
+- pass/warn/fail counts for that disk
+- disk-scoped result lines
+- pointers to SMART / NVMe / fio artifacts for that disk
 
 ---
 
