@@ -233,6 +233,7 @@ sudo /opt/provision-amd/provision-amd.sh --status
 | `install/base-install.sh` | NVIDIA driver, CUDA, cuDNN, DCGM, and base tooling | [docs/base-install.md](/Users/josephcheung/Desktop/dev/infra/docs/base-install.md) |
 | `install/docker-install.sh` | Docker CE, NVIDIA Container Toolkit, and runtime storage layout | [docs/docker-install.md](/Users/josephcheung/Desktop/dev/infra/docs/docker-install.md) |
 | `test/fulltest.sh` | NVIDIA GPU acceptance and health validation | [docs/fulltest.md](/Users/josephcheung/Desktop/dev/infra/docs/fulltest.md) |
+| `test/gpu-fulltest-v2.sh` | Experimental prepare-then-run variant of the NVIDIA GPU validation flow | [docs/gpu-fulltest-v2.md](/Users/josephcheung/Desktop/dev/infra/docs/gpu-fulltest-v2.md) |
 | `install/amd-base-install.sh` | AMDGPU + ROCm base install | [docs/amd-base-install.md](/Users/josephcheung/Desktop/dev/infra/docs/amd-base-install.md) |
 | `test/disktest.sh` | Disk health, throughput, and stress validation with guided interactive mode and per-disk reports | [docs/disktest.md](/Users/josephcheung/Desktop/dev/infra/docs/disktest.md) |
 | `test/ramtest.sh` | System RAM burn-in and ECC-aware memory validation | [docs/ramtest.md](/Users/josephcheung/Desktop/dev/infra/docs/ramtest.md) |
@@ -391,6 +392,7 @@ Script reference guides now live under [docs/](/Users/josephcheung/Desktop/dev/i
 - [docs/base-install.md](/Users/josephcheung/Desktop/dev/infra/docs/base-install.md)
 - [docs/docker-install.md](/Users/josephcheung/Desktop/dev/infra/docs/docker-install.md)
 - [docs/fulltest.md](/Users/josephcheung/Desktop/dev/infra/docs/fulltest.md)
+- [docs/gpu-fulltest-v2.md](/Users/josephcheung/Desktop/dev/infra/docs/gpu-fulltest-v2.md)
 - [docs/disktest.md](/Users/josephcheung/Desktop/dev/infra/docs/disktest.md)
 - [docs/ramtest.md](/Users/josephcheung/Desktop/dev/infra/docs/ramtest.md)
 - [docs/network-test.md](/Users/josephcheung/Desktop/dev/infra/docs/network-test.md)

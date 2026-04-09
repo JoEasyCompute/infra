@@ -2,6 +2,7 @@
 install/backup/
 test/build/
 test/fulltest_*.log
+test/gpu_fulltest_v2_*.log
 test/logs/
 docs/client-acceptance-test-kit.md
 logs/network-batch/*.txt
