@@ -21,7 +21,26 @@ readonly LOG_FILE="$SCRIPT_DIR/fulltest_$(date +%Y%m%d_%H%M%S).log"
 CLEAN_BUILD=false
 BURN_DURATION=300   # seconds; override with --burn-duration <seconds>
 
-mkdir -p "$BUILD_DIR"
+if [ -e "$BUILD_DIR" ]; then
+    if [ ! -w "$BUILD_DIR" ] || [ ! -x "$BUILD_DIR" ]; then
+        echo "WARNING: Existing build directory '$BUILD_DIR' is not writable." >&2
+        echo "         Rebuilds and clean operations may fail until ownership is fixed." >&2
+        echo "         Common fix: sudo chown -R \"${SUDO_USER:-$USER}\":\"$(id -gn "${SUDO_USER:-$USER}" 2>/dev/null || echo "${SUDO_USER:-$USER}")\" '$BUILD_DIR'" >&2
+    fi
+else
+    build_parent="$(dirname "$BUILD_DIR")"
+    if [ ! -w "$build_parent" ] || [ ! -x "$build_parent" ]; then
+        echo "WARNING: Build directory parent '$build_parent' is not writable." >&2
+        echo "         New clones/builds may fail until ownership is fixed." >&2
+    fi
+fi
+
+mkdir -p "$BUILD_DIR" 2>/dev/null || {
+    echo "ERROR: Cannot create build directory: $BUILD_DIR" >&2
+    echo "       Check ownership/permissions for: $SCRIPT_DIR" >&2
+    echo "       This often happens when a previous run created root-owned artifacts." >&2
+    exit 1
+}
 
 # Write identification header to log immediately
 {
@@ -72,6 +91,90 @@ in_dir() {
     (cd "$dir" && "$@")
 }
 
+describe_path_permissions() {
+    local path="$1"
+    if command -v stat >/dev/null 2>&1; then
+        stat -c '%U:%G %A' "$path" 2>/dev/null && return 0
+        stat -f '%Su:%Sg %Sp' "$path" 2>/dev/null && return 0
+    fi
+    ls -ld "$path" 2>/dev/null | awk '{print $1, $3 ":" $4}'
+}
+
+log_permission_advice() {
+    local path="$1"
+    local action="$2"
+    local perms=""
+    perms=$(describe_path_permissions "$path" 2>/dev/null || true)
+
+    log "ERROR: Cannot ${action} because write permission is missing: $path"
+    [ -n "$perms" ] && log "       Current owner/perms: $perms"
+    log "       This often happens after a previous build created root-owned artifacts."
+    log "       Fix ownership, for example:"
+    log "         sudo chown -R $(id -un):$(id -gn) '$BUILD_DIR'"
+    log "       Then rerun the test or clean stale artifacts in the affected tree."
+}
+
+require_writable_existing_dir() {
+    local dir="$1"
+    local action="$2"
+    [ ! -e "$dir" ] && return 0
+    [ -d "$dir" ] || {
+        log "ERROR: Expected a directory for ${action}, but found: $dir"
+        return 1
+    }
+    [ -r "$dir" ] && [ -w "$dir" ] && [ -x "$dir" ] && return 0
+    log_permission_advice "$dir" "$action"
+    return 1
+}
+
+require_writable_parent_dir() {
+    local target="$1"
+    local action="$2"
+    local parent
+    parent=$(dirname "$target")
+    [ -d "$parent" ] || mkdir -p "$parent" 2>/dev/null || true
+    [ -d "$parent" ] || {
+        log "ERROR: Parent directory does not exist for ${action}: $parent"
+        return 1
+    }
+    [ -w "$parent" ] && [ -x "$parent" ] && return 0
+    log_permission_advice "$parent" "$action"
+    return 1
+}
+
+ensure_repo_clone_allowed() {
+    local repo_dir="$1"
+    local label="$2"
+    if [ -d "$repo_dir" ]; then
+        require_writable_existing_dir "$repo_dir" "reuse/build ${label}" || return 1
+    else
+        require_writable_parent_dir "$repo_dir" "clone ${label}" || return 1
+    fi
+}
+
+ensure_repo_rebuild_allowed() {
+    local repo_dir="$1"
+    local label="$2"
+    local build_subdir="${3:-$repo_dir/build}"
+    require_writable_existing_dir "$repo_dir" "rebuild ${label}" || return 1
+    require_writable_existing_dir "$build_subdir" "rewrite ${label} build directory" || return 1
+}
+
+ensure_build_dir_writable() {
+    local purpose="$1"
+    require_writable_parent_dir "$BUILD_DIR" "$purpose for $BUILD_DIR"
+}
+
+ensure_writable_or_parent() {
+    local path="$1"
+    local action="$2"
+    if [ -d "$path" ]; then
+        require_writable_existing_dir "$path" "$action" || return 1
+    else
+        require_writable_parent_dir "$path" "$action" || return 1
+    fi
+}
+
 # Idempotent apt package install
 apt_install() {
     for pkg in "$@"; do
@@ -101,6 +204,7 @@ cmake_build() {
     local src="$1" bin="$2"
 
     [ -f "$src/build/$bin" ] && { log "  Already built: $bin"; return 0; }
+    ensure_writable_or_parent "$src" "rebuilding $bin" || return 1
 
     log "  Building $bin..."
 
@@ -696,6 +800,7 @@ install_nccl_lib() {
 
 install_nccl_tests_bin() {
     local perf="$BUILD_DIR/nccl-tests/build/all_reduce_perf"
+    ensure_writable_or_parent "$BUILD_DIR/nccl-tests" "preparing nccl-tests" || return 1
     [ ! -d "$BUILD_DIR/nccl-tests" ] && \
         git clone https://github.com/NVIDIA/nccl-tests.git "$BUILD_DIR/nccl-tests"
 
@@ -752,6 +857,7 @@ test_nccl() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 test_cuda_samples() {
+    ensure_writable_or_parent "$BUILD_DIR/cuda-samples" "preparing cuda-samples" || return 1
     [ ! -d "$BUILD_DIR/cuda-samples" ] && \
         git clone https://github.com/NVIDIA/cuda-samples.git "$BUILD_DIR/cuda-samples"
 
@@ -791,6 +897,7 @@ test_cuda_samples() {
 
 test_nvbandwidth() {
     ensure_cmake || return 1
+    ensure_writable_or_parent "$BUILD_DIR/nvbandwidth" "preparing nvbandwidth" || return 1
 
     if command -v apt-get &>/dev/null; then
         sudo apt-get update -qq
@@ -956,6 +1063,7 @@ PYEOF
 
 test_memtest() {
     local bin="$BUILD_DIR/cuda_memtest/build/cuda_memtest"
+    ensure_writable_or_parent "$BUILD_DIR/cuda_memtest" "preparing cuda_memtest" || return 1
 
     if [ ! -d "$BUILD_DIR/cuda_memtest" ]; then
         git clone https://github.com/ComputationalRadiationPhysics/cuda_memtest.git \
@@ -1023,6 +1131,7 @@ test_memtest() {
 build_gpu_fryer() {
     local bin="$BUILD_DIR/gpu-fryer/gpu-fryer"
     [ -f "$bin" ] && { log "  gpu-fryer already built."; return 0; }
+    ensure_writable_or_parent "$BUILD_DIR/gpu-fryer" "preparing gpu-fryer" || return 1
 
     if ! command -v cargo &>/dev/null; then
         log "  cargo not found — installing Rust toolchain..."
@@ -1045,6 +1154,7 @@ build_gpu_fryer() {
 build_gpu_burn() {
     local bin="$BUILD_DIR/gpu-burn/gpu-burn"
     [ -f "$bin" ] && { log "  gpu-burn already built."; return 0; }
+    ensure_writable_or_parent "$BUILD_DIR/gpu-burn" "preparing gpu-burn" || return 1
 
     [ ! -d "$BUILD_DIR/gpu-burn" ] && \
         git clone https://github.com/wilicc/gpu-burn.git "$BUILD_DIR/gpu-burn"
@@ -1418,6 +1528,7 @@ done
 # Handle --clean
 if [ "$CLEAN_BUILD" = true ]; then
     echo "Cleaning build directory: $BUILD_DIR"
+    ensure_build_dir_writable "cleaning build artifacts" || exit 1
     rm -rf "$BUILD_DIR"
     mkdir -p "$BUILD_DIR"
     echo "Done."
