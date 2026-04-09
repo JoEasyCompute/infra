@@ -46,7 +46,7 @@ chmod +x test/fulltest.sh
 
 All cloned repos and compiled binaries are placed under `./build/` next to the script. Nothing is written to system directories except NCCL and apt packages.
 
-If a previous run left `./build/` or one of the cloned repos owned by root or otherwise unwritable, the script now warns before any rebuild/reclone step and tells you how to fix ownership. A common recovery command is:
+If a previous run left `./build/` or one of the cloned repos owned by root or otherwise unwritable, the script now warns before clone / rebuild / helper-script write / `--clean` operations and tells you how to fix ownership. A common recovery command is:
 
 ```bash
 sudo chown -R "$USER":"$(id -gn)" ./test/build
@@ -97,6 +97,8 @@ sudo chown -R "$USER":"$(id -gn)" ./test/build
 | `--clean` | — | Delete `./build/` and exit. Forces full rebuild on next run. Can be combined with tests to clean then immediately run. |
 | `--list` | — | Print available test names and exit. |
 | `--help` / `-h` | — | Show usage and exit. |
+
+If `--clean` or a rebuild path fails because `./build/` is not writable, the script now prints the affected path, current owner / permissions when available, and a suggested `chown` command instead of failing later in the build.
 
 ---
 

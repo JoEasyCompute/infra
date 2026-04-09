@@ -20,18 +20,23 @@ readonly LOG_FILE="$SCRIPT_DIR/fulltest_$(date +%Y%m%d_%H%M%S).log"
 
 CLEAN_BUILD=false
 BURN_DURATION=300   # seconds; override with --burn-duration <seconds>
+FIX_USER=$(id -un 2>/dev/null || true)
+[ -n "$FIX_USER" ] || FIX_USER=$(id -u 2>/dev/null || echo unknown)
+FIX_GROUP=$(id -gn 2>/dev/null || true)
+[ -n "$FIX_GROUP" ] || FIX_GROUP=$(id -g 2>/dev/null || echo unknown)
 
 if [ -e "$BUILD_DIR" ]; then
     if [ ! -w "$BUILD_DIR" ] || [ ! -x "$BUILD_DIR" ]; then
         echo "WARNING: Existing build directory '$BUILD_DIR' is not writable." >&2
         echo "         Rebuilds and clean operations may fail until ownership is fixed." >&2
-        echo "         Common fix: sudo chown -R \"${SUDO_USER:-$USER}\":\"$(id -gn "${SUDO_USER:-$USER}" 2>/dev/null || echo "${SUDO_USER:-$USER}")\" '$BUILD_DIR'" >&2
+        echo "         Common fix: sudo chown -R \"$FIX_USER\":\"$FIX_GROUP\" '$BUILD_DIR'" >&2
     fi
 else
     build_parent="$(dirname "$BUILD_DIR")"
     if [ ! -w "$build_parent" ] || [ ! -x "$build_parent" ]; then
         echo "WARNING: Build directory parent '$build_parent' is not writable." >&2
         echo "         New clones/builds may fail until ownership is fixed." >&2
+        echo "         Common fix: sudo chown -R \"$FIX_USER\":\"$FIX_GROUP\" '$build_parent'" >&2
     fi
 fi
 
@@ -110,7 +115,7 @@ log_permission_advice() {
     [ -n "$perms" ] && log "       Current owner/perms: $perms"
     log "       This often happens after a previous build created root-owned artifacts."
     log "       Fix ownership, for example:"
-    log "         sudo chown -R $(id -un):$(id -gn) '$BUILD_DIR'"
+    log "         sudo chown -R $FIX_USER:$FIX_GROUP '$BUILD_DIR'"
     log "       Then rerun the test or clean stale artifacts in the affected tree."
 }
 
@@ -162,7 +167,7 @@ ensure_repo_rebuild_allowed() {
 
 ensure_build_dir_writable() {
     local purpose="$1"
-    require_writable_parent_dir "$BUILD_DIR" "$purpose for $BUILD_DIR"
+    require_writable_existing_dir "$BUILD_DIR" "$purpose for $BUILD_DIR"
 }
 
 ensure_writable_or_parent() {
@@ -204,7 +209,7 @@ cmake_build() {
     local src="$1" bin="$2"
 
     [ -f "$src/build/$bin" ] && { log "  Already built: $bin"; return 0; }
-    ensure_writable_or_parent "$src" "rebuilding $bin" || return 1
+    ensure_repo_rebuild_allowed "$src" "$bin" "$src/build" || return 1
 
     log "  Building $bin..."
 
@@ -685,6 +690,7 @@ test_clocks() {
 
     # Kick off a background GEMM load on all GPUs via Python
     local load_script="$BUILD_DIR/_clock_load.py"
+    ensure_build_dir_writable "writing clock-load helper" || return 1
     cat > "$load_script" << 'PYEOF'
 import torch, time, sys
 gpus = list(range(torch.cuda.device_count()))
@@ -800,7 +806,7 @@ install_nccl_lib() {
 
 install_nccl_tests_bin() {
     local perf="$BUILD_DIR/nccl-tests/build/all_reduce_perf"
-    ensure_writable_or_parent "$BUILD_DIR/nccl-tests" "preparing nccl-tests" || return 1
+    ensure_repo_clone_allowed "$BUILD_DIR/nccl-tests" "nccl-tests" || return 1
     [ ! -d "$BUILD_DIR/nccl-tests" ] && \
         git clone https://github.com/NVIDIA/nccl-tests.git "$BUILD_DIR/nccl-tests"
 
@@ -816,6 +822,7 @@ install_nccl_tests_bin() {
         fi
     fi
 
+    ensure_repo_rebuild_allowed "$BUILD_DIR/nccl-tests" "nccl-tests" "$BUILD_DIR/nccl-tests/build" || return 1
     log "  Building nccl-tests..."
     in_dir "$BUILD_DIR/nccl-tests" bash -c "
         make clean 2>/dev/null || true
@@ -857,7 +864,7 @@ test_nccl() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 test_cuda_samples() {
-    ensure_writable_or_parent "$BUILD_DIR/cuda-samples" "preparing cuda-samples" || return 1
+    ensure_repo_clone_allowed "$BUILD_DIR/cuda-samples" "cuda-samples" || return 1
     [ ! -d "$BUILD_DIR/cuda-samples" ] && \
         git clone https://github.com/NVIDIA/cuda-samples.git "$BUILD_DIR/cuda-samples"
 
@@ -897,7 +904,7 @@ test_cuda_samples() {
 
 test_nvbandwidth() {
     ensure_cmake || return 1
-    ensure_writable_or_parent "$BUILD_DIR/nvbandwidth" "preparing nvbandwidth" || return 1
+    ensure_repo_clone_allowed "$BUILD_DIR/nvbandwidth" "nvbandwidth" || return 1
 
     if command -v apt-get &>/dev/null; then
         sudo apt-get update -qq
@@ -913,6 +920,7 @@ test_nvbandwidth() {
     nvb_bin=$(find_binary "$BUILD_DIR/nvbandwidth" "nvbandwidth")
 
     if [ -z "$nvb_bin" ]; then
+        ensure_repo_rebuild_allowed "$BUILD_DIR/nvbandwidth" "nvbandwidth" "$BUILD_DIR/nvbandwidth/build" || return 1
         log "  Building nvbandwidth..."
         in_dir "$BUILD_DIR/nvbandwidth" bash -c "
             cmake . -DCMAKE_CUDA_COMPILER='$NVCC_PATH'
@@ -1063,7 +1071,7 @@ PYEOF
 
 test_memtest() {
     local bin="$BUILD_DIR/cuda_memtest/build/cuda_memtest"
-    ensure_writable_or_parent "$BUILD_DIR/cuda_memtest" "preparing cuda_memtest" || return 1
+    ensure_repo_clone_allowed "$BUILD_DIR/cuda_memtest" "cuda_memtest" || return 1
 
     if [ ! -d "$BUILD_DIR/cuda_memtest" ]; then
         git clone https://github.com/ComputationalRadiationPhysics/cuda_memtest.git \
@@ -1071,6 +1079,7 @@ test_memtest() {
     fi
 
     if [ ! -f "$bin" ]; then
+        ensure_repo_rebuild_allowed "$BUILD_DIR/cuda_memtest" "cuda_memtest" "$BUILD_DIR/cuda_memtest/build" || return 1
         log "  Building cuda_memtest..."
         local archs_cmake
         archs_cmake=$(echo "$CUDA_ARCH_LIST" | tr ' ' ';')
@@ -1131,7 +1140,7 @@ test_memtest() {
 build_gpu_fryer() {
     local bin="$BUILD_DIR/gpu-fryer/gpu-fryer"
     [ -f "$bin" ] && { log "  gpu-fryer already built."; return 0; }
-    ensure_writable_or_parent "$BUILD_DIR/gpu-fryer" "preparing gpu-fryer" || return 1
+    ensure_repo_clone_allowed "$BUILD_DIR/gpu-fryer" "gpu-fryer" || return 1
 
     if ! command -v cargo &>/dev/null; then
         log "  cargo not found — installing Rust toolchain..."
@@ -1144,6 +1153,7 @@ build_gpu_fryer() {
     [ ! -d "$BUILD_DIR/gpu-fryer" ] && \
         git clone https://github.com/huggingface/gpu-fryer.git "$BUILD_DIR/gpu-fryer"
 
+    ensure_repo_rebuild_allowed "$BUILD_DIR/gpu-fryer" "gpu-fryer" "$BUILD_DIR/gpu-fryer/target" || return 1
     LIBRARY_PATH="$CUDA_HOME_DIR/lib64:${LIBRARY_PATH:-}" \
         in_dir "$BUILD_DIR/gpu-fryer" bash -c "
             cargo build --release
@@ -1154,7 +1164,7 @@ build_gpu_fryer() {
 build_gpu_burn() {
     local bin="$BUILD_DIR/gpu-burn/gpu-burn"
     [ -f "$bin" ] && { log "  gpu-burn already built."; return 0; }
-    ensure_writable_or_parent "$BUILD_DIR/gpu-burn" "preparing gpu-burn" || return 1
+    ensure_repo_clone_allowed "$BUILD_DIR/gpu-burn" "gpu-burn" || return 1
 
     [ ! -d "$BUILD_DIR/gpu-burn" ] && \
         git clone https://github.com/wilicc/gpu-burn.git "$BUILD_DIR/gpu-burn"
@@ -1164,6 +1174,7 @@ build_gpu_burn() {
     compute_cap=$(nvidia-smi $SMI_FILTER --query-gpu=compute_cap --format=csv,noheader \
         | tr -d '\r' | sort -u | head -1)
 
+    ensure_repo_rebuild_allowed "$BUILD_DIR/gpu-burn" "gpu-burn" "$BUILD_DIR/gpu-burn" || return 1
     in_dir "$BUILD_DIR/gpu-burn" bash -c "
         make clean 2>/dev/null || true
         make -j$(nproc) COMPUTE='$compute_cap' CUDAPATH='$CUDA_HOME_DIR'
@@ -1172,6 +1183,7 @@ build_gpu_burn() {
 
 run_pytorch_stress() {
     local script="$BUILD_DIR/_gpu_stress.py"
+    ensure_build_dir_writable "writing stress helper" || return 1
     cat > "$script" << PYEOF
 import torch, time, sys
 
@@ -1219,6 +1231,7 @@ run_burn_monitor() {
     local burn_pid="$1"
     local sample_interval=5
     local telemetry_file="$BUILD_DIR/_burn_telemetry.csv"
+    ensure_build_dir_writable "writing burn telemetry" || return 1
 
     # Header for the live telemetry log
     log ""
