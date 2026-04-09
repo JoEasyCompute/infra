@@ -420,64 +420,136 @@ interactive_select_devices() {
 
     header "Interactive Disk Selection"
 
-    local idx=1
-    for dev in "${DEVICES[@]}"; do
-        info "  [$idx] ${BOLD}$dev${RESET} [${DEV_TYPE[$dev]}] ${DEV_SIZE[$dev]} — ${DEV_MODEL[$dev]}"
-        ((idx++))
+    local total=${#DEVICES[@]}
+    local current=0
+    local menu_lines=$(( total + 4 ))
+    local redrawn=false
+    local status_message="All disks start selected."
+    local -a selected_flags=()
+    local -a selected=()
+    local i
+
+    for ((i=0; i<total; i++)); do
+        selected_flags[i]=1
     done
 
-    echo ""
-    info "Enter disk numbers separated by spaces or commas."
-    info "Press Enter or type 'all' to select all disks. Type 'q' to cancel."
+    _interactive_disk_cleanup() {
+        printf '\033[?25h'
+    }
 
-    while true; do
-        local reply
-        printf "Selection: "
-        read -r reply || die "Interactive selection cancelled"
-
-        case "${reply,,}" in
-            ""|all)
-                log "Interactive selection: all ${#DEVICES[@]} disk(s)"
-                return 0
-                ;;
-            q|quit)
-                die "Interactive selection cancelled"
-                ;;
-        esac
-
-        local normalized="${reply//,/ }"
-        local -a selected=()
-        local -A seen_indices=()
-        local valid=true
-        local token
-
-        for token in $normalized; do
-            if [[ ! "$token" =~ ^[0-9]+$ ]]; then
-                warn "Invalid selection token: $token"
-                valid=false
-                break
-            fi
-            if (( token < 1 || token > ${#DEVICES[@]} )); then
-                warn "Selection out of range: $token"
-                valid=false
-                break
-            fi
-            [[ -n "${seen_indices[$token]:-}" ]] && continue
-            seen_indices["$token"]=1
-            selected+=("${DEVICES[$((token-1))]}")
+    _interactive_disk_selected_count() {
+        local count=0
+        local idx
+        for ((idx=0; idx<total; idx++)); do
+            (( count += selected_flags[idx] ))
         done
+        echo "$count"
+    }
 
-        if ! $valid || [[ ${#selected[@]} -eq 0 ]]; then
-            info "Please choose one or more valid disk numbers."
-            continue
+    _interactive_disk_render() {
+        local idx marker cursor selected_count
+        selected_count=$(_interactive_disk_selected_count)
+
+        if $redrawn; then
+            printf '\033[%dA' "$menu_lines"
         fi
 
-        DEVICES=("${selected[@]}")
-        log "Interactive selection: ${#DEVICES[@]} disk(s)"
-        for dev in "${DEVICES[@]}"; do
-            info "  ${BOLD}$dev${RESET} [${DEV_TYPE[$dev]}] ${DEV_SIZE[$dev]} — ${DEV_MODEL[$dev]}"
+        printf '\r\033[2KUse ↑/↓ to move, Space to check/uncheck, Enter to confirm.\n'
+        printf '\r\033[2KPress a to toggle all disks, q to cancel.\n'
+        printf '\r\033[2KSelected: %d of %d\n' "$selected_count" "$total"
+        printf '\r\033[2K%s\n' "$status_message"
+
+        for ((idx=0; idx<total; idx++)); do
+            if (( selected_flags[idx] )); then
+                marker='x'
+            else
+                marker=' '
+            fi
+
+            if (( idx == current )); then
+                cursor='>'
+            else
+                cursor=' '
+            fi
+
+            printf '\r\033[2K%s [%s] [%d] %s [%s] %s — %s\n' \
+                "$cursor" "$marker" "$((idx+1))" "${DEVICES[idx]}" \
+                "${DEV_TYPE[${DEVICES[idx]}]}" "${DEV_SIZE[${DEVICES[idx]}]}" "${DEV_MODEL[${DEVICES[idx]}]}"
         done
-        return 0
+
+        redrawn=true
+    }
+
+    printf '\033[?25l'
+
+    while true; do
+        _interactive_disk_render
+
+        local key=""
+        local key2=""
+        local key3=""
+        IFS= read -rsn1 key || { _interactive_disk_cleanup; die "Interactive selection cancelled"; }
+
+        case "$key" in
+            "")
+                selected=()
+                for ((i=0; i<total; i++)); do
+                    (( selected_flags[i] )) && selected+=("${DEVICES[i]}")
+                done
+
+                if [[ ${#selected[@]} -eq 0 ]]; then
+                    status_message="Select at least one disk before continuing."
+                    continue
+                fi
+
+                DEVICES=("${selected[@]}")
+                _interactive_disk_cleanup
+                log "Interactive selection: ${#DEVICES[@]} disk(s)"
+                for dev in "${DEVICES[@]}"; do
+                    info "  ${BOLD}$dev${RESET} [${DEV_TYPE[$dev]}] ${DEV_SIZE[$dev]} — ${DEV_MODEL[$dev]}"
+                done
+                return 0
+                ;;
+            " ")
+                if (( selected_flags[current] )); then
+                    selected_flags[current]=0
+                else
+                    selected_flags[current]=1
+                fi
+                status_message="Toggled ${DEVICES[current]}"
+                ;;
+            [Aa])
+                local selected_count
+                selected_count=$(_interactive_disk_selected_count)
+                if (( selected_count == total )); then
+                    for ((i=0; i<total; i++)); do selected_flags[i]=0; done
+                    status_message="Deselected all disks."
+                else
+                    for ((i=0; i<total; i++)); do selected_flags[i]=1; done
+                    status_message="Selected all disks."
+                fi
+                ;;
+            [Qq])
+                _interactive_disk_cleanup
+                die "Interactive selection cancelled"
+                ;;
+            $'\x1b')
+                read -rsn1 -t 0.1 key2 || true
+                if [[ "$key2" == "[" ]]; then
+                    read -rsn1 -t 0.1 key3 || true
+                    case "$key3" in
+                        A)
+                            (( current = (current - 1 + total) % total ))
+                            status_message="Focused ${DEVICES[current]}"
+                            ;;
+                        B)
+                            (( current = (current + 1) % total ))
+                            status_message="Focused ${DEVICES[current]}"
+                            ;;
+                    esac
+                fi
+                ;;
+        esac
     done
 }
 
