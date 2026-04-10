@@ -864,28 +864,34 @@ advise_schedulers() {
 # =============================================================================
 
 TIMEOUT_SECS=0   # set per-test before calling run_fio_safe
+FIO_BW_READ=0
+FIO_BW_WRITE=0
+FIO_IOPS_READ=0
+FIO_IOPS_WRITE=0
+FIO_LAT_P99_US=0
 
 run_fio_safe() {
     # Identical signature to run_fio but respects TIMEOUT_SECS
     # Falls back to zeroed results on timeout rather than hanging
-    local dev="$1"; local label="$2"
+    local dev="$1"; shift
+    local label="$1"; shift
     local timeout_val=$(( TIMEOUT_SECS > 0 ? TIMEOUT_SECS : 120 ))
 
-    if command -v timeout &>/dev/null; then
-        # Run run_fio in a subshell under timeout
-        if ! timeout "$timeout_val" bash -c "
-            $(declare -f run_fio)
-            run_fio $(printf '%q ' "$@")
-        " 2>/dev/null; then
-            warn "$dev — fio job '$label' timed out after ${timeout_val}s (drive may be degraded)"
-            FIO_BW_READ=0; FIO_BW_WRITE=0
-            FIO_IOPS_READ=0; FIO_IOPS_WRITE=0
-            FIO_LAT_P99_US=0
-            return 1
-        fi
-    else
-        # timeout not available, fall back to plain run_fio
-        run_fio "$@"
+    local rc=0
+    FIO_TIMEOUT="$timeout_val" run_fio "$dev" "$label" "$@" || rc=$?
+
+    if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
+        warn "$dev — fio job '$label' timed out after ${timeout_val}s (drive may be degraded)"
+        FIO_BW_READ=0; FIO_BW_WRITE=0
+        FIO_IOPS_READ=0; FIO_IOPS_WRITE=0
+        FIO_LAT_P99_US=0
+        return 1
+    elif [[ "$rc" -ne 0 ]]; then
+        warn "$dev — fio job '$label' exited with code $rc; recording zeroed metrics"
+        FIO_BW_READ=0; FIO_BW_WRITE=0
+        FIO_IOPS_READ=0; FIO_IOPS_WRITE=0
+        FIO_LAT_P99_US=0
+        return "$rc"
     fi
 }
 
@@ -1001,16 +1007,31 @@ run_fio() {
     devname=$(basename "$dev")
     local outfile="$LOG_DIR/fio_${devname}_${label}.json"
 
-    fio \
-        --filename="$dev" \
-        --direct=1 \
-        --ioengine=libaio \
-        --group_reporting \
-        --output-format=json \
-        --output="$outfile" \
-        --name="$label" \
-        "${extra_args[@]}" \
-        > /dev/null 2>&1 || true
+    local -a fio_cmd=(
+        fio
+        --filename="$dev"
+        --direct=1
+        --ioengine=libaio
+        --group_reporting
+        --output-format=json
+        --output="$outfile"
+        --name="$label"
+        "${extra_args[@]}"
+    )
+
+    local fio_rc=0
+    if [[ -n "${FIO_TIMEOUT:-}" ]] && command -v timeout &>/dev/null; then
+        timeout "$FIO_TIMEOUT" "${fio_cmd[@]}" > /dev/null 2>&1 || fio_rc=$?
+    else
+        "${fio_cmd[@]}" > /dev/null 2>&1 || fio_rc=$?
+    fi
+
+    if [[ "$fio_rc" -ne 0 ]]; then
+        FIO_BW_READ=0; FIO_BW_WRITE=0
+        FIO_IOPS_READ=0; FIO_IOPS_WRITE=0
+        FIO_LAT_P99_US=0
+        return "$fio_rc"
+    fi
 
     # Parse JSON results
     if [[ -f "$outfile" ]]; then
@@ -1058,6 +1079,7 @@ print(round(lat/1000,1))
         FIO_BW_READ=0; FIO_BW_WRITE=0
         FIO_IOPS_READ=0; FIO_IOPS_WRITE=0
         FIO_LAT_P99_US=0
+        return 1
     fi
 }
 
