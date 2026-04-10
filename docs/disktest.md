@@ -37,6 +37,8 @@ Running without root will warn and proceed in a limited mode (SMART checks may f
 
 `disktest.sh` intentionally does **not** auto-run itself through `sudo`. This keeps behavior predictable for automation and avoids interactive password prompts inside the script. Run it with `sudo` explicitly for raw I/O modes (`--quick`, `--full`, `--stress`).
 
+In non-interactive mode, if you start a raw I/O mode without root, the script now emits an early warning with a sudo rerun hint before test execution begins.
+
 ---
 
 ## Installation

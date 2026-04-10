@@ -439,6 +439,16 @@ interactive_select_mode() {
     done
 }
 
+warn_noninteractive_permissions() {
+    $INTERACTIVE && return 0
+    [[ $EUID -eq 0 ]] && return 0
+    [[ "$MODE" == "health" ]] && return 0
+
+    warn "Non-interactive run in '$MODE' mode without root/sudo."
+    warn "Raw fio I/O tests require read+write access to block devices."
+    info "  Re-run with: sudo ./test/disktest.sh --$MODE --non-interactive"
+}
+
 interactive_select_devices() {
     $INTERACTIVE || return 0
     $TARGETS_EXPLICIT && return 0
@@ -1645,6 +1655,7 @@ print_summary() {
 main() {
     normalize_interactive_mode
     interactive_select_mode
+    warn_noninteractive_permissions
 
     echo -e "${BOLD}${CYAN}"
     echo "╔══════════════════════════════════════════════════════╗"
