@@ -35,6 +35,8 @@ sudo ./test/disktest.sh [OPTIONS]
 
 Running without root will warn and proceed in a limited mode (SMART checks may fail, auto-install is disabled).
 
+`disktest.sh` intentionally does **not** auto-run itself through `sudo`. This keeps behavior predictable for automation and avoids interactive password prompts inside the script. Run it with `sudo` explicitly for raw I/O modes (`--quick`, `--full`, `--stress`).
+
 ---
 
 ## Installation
@@ -184,6 +186,7 @@ Before any I/O begins, every device is inspected for conditions that would make 
 | Software RAID member | `/proc/mdstat` | Raw I/O skipped |
 | LVM Physical Volume | `pvs` | Raw I/O skipped |
 | ZFS vdev | `zpool status` | Raw I/O skipped |
+| Missing raw read/write permission | device access check (`-r`/`-w`) | Raw I/O skipped with sudo guidance |
 
 Devices that fail safety checks will still have SMART / health checks run against them. Only raw fio I/O tests are skipped.
 
@@ -198,6 +201,18 @@ sudo ./test/disktest.sh --full --force --device /dev/sda
 ```
 
 > ⚠️ `--force` on a live system with mounted filesystems **will corrupt data**.
+
+Common permission symptom:
+
+```
+[WARN] /dev/nvme0n1 — fio job 'seq_read' exited with code 1: ... open(/dev/nvme0n1), error=Permission denied
+```
+
+Use:
+
+```bash
+sudo ./test/disktest.sh --full --device /dev/nvme0n1
+```
 
 ---
 
@@ -298,6 +313,7 @@ All detailed output is written to a timestamped directory (default `/tmp/disktes
 | `smart_<dev>.txt` | Full `smartctl -a` output |
 | `nvme_<dev>.txt` | `nvme smart-log` output |
 | `fio_<dev>_<job>.json` | Raw fio JSON per test |
+| `fio_<dev>_<job>.stderr.log` | fio stderr for failed/timed-out jobs |
 | `fio_parallel_result.json` | Multi-disk parallel fio output |
 | `disktest_results.json` | Summary JSON (with `--json` or `--save-baseline`) |
 
