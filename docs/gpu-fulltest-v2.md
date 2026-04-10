@@ -80,6 +80,7 @@ Examples:
 - This script is intentionally **experimental**.
 - It should be validated on real GPU hosts before being treated as a replacement for `fulltest.sh`.
 - Build / permission handling inherited from the current fulltest improvements is still active here, so stale root-owned build trees should warn before rebuilds.
+- The PyTorch benchmark now keeps its generated DDP repro script on failure and prints a condensed failure summary plus a suggested debug rerun command.
 
 ---
 

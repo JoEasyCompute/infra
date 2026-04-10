@@ -1011,6 +1011,44 @@ find_torchrun() {
         -name torchrun 2>/dev/null | head -1
 }
 
+summarize_pytorch_failure() {
+    local output_file="$1"
+    local script_path="$2"
+    local torchrun_path="$3"
+
+    log "  PyTorch DDP diagnostic summary:"
+
+    local failed_rank
+    failed_rank=$(grep -oP 'local_rank: \K[0-9]+' "$output_file" 2>/dev/null | tail -1 || true)
+    if [ -n "$failed_rank" ]; then
+        log "    First reported failing local_rank: $failed_rank"
+    fi
+
+    if grep -q 'exitcode: -11' "$output_file" 2>/dev/null; then
+        log "    Detected exitcode -11 (SIGSEGV) in a torchrun child rank."
+        log "    This usually points to a native CUDA/NCCL/driver or GPU-specific crash, not a normal Python exception."
+    fi
+
+    local matched=false
+    while IFS= read -r line; do
+        matched=true
+        log "    $line"
+    done < <(grep -E 'ChildFailedError|failed \(exitcode:|local_rank:|Traceback|RuntimeError|CUDA error|NCCL|ProcessGroup|Segmentation fault' "$output_file" | tail -n 25 || true)
+
+    $matched || log "    No condensed error lines matched; inspect the full log for details."
+
+    log "    Repro script kept at: $script_path"
+    log "    Repro command: $torchrun_path --nproc_per_node $NUM_GPUS $script_path"
+    log "    For deeper logs, rerun with:"
+    log "      NCCL_DEBUG=INFO TORCH_DISTRIBUTED_DEBUG=DETAIL PYTHONFAULTHANDLER=1 \\"
+    log "      $torchrun_path --nproc_per_node $NUM_GPUS $script_path"
+
+    if [ -n "$failed_rank" ]; then
+        log "    Suggested isolation: ./test/fulltest.sh --gpu $failed_rank pytorch"
+    fi
+    log "    Cross-check the transport stack with: ./test/fulltest.sh nccl"
+}
+
 test_pytorch() {
     install_pytorch
 
@@ -1059,9 +1097,30 @@ PYEOF
         return 1
     fi
 
-    local rc=0
-    "$torchrun" --nproc_per_node "$NUM_GPUS" "$script" 2>&1 | tee -a "$LOG_FILE" || rc=$?
-    rm -f "$script"
+    local run_log
+    run_log=$(mktemp /tmp/_pytorch_ddp_run_XXXXXX.log) || {
+        log "ERROR: Cannot create temp log for DDP test output"
+        rm -f "$script"
+        return 1
+    }
+
+    local -a torch_env=(
+        PYTHONFAULTHANDLER=1
+        TORCH_SHOW_CPP_STACKTRACES=1
+        TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+    )
+
+    env "${torch_env[@]}" "$torchrun" --nproc_per_node "$NUM_GPUS" "$script" 2>&1 \
+        | tee "$run_log" | tee -a "$LOG_FILE"
+    local rc=${PIPESTATUS[0]}
+
+    if [ "$rc" -ne 0 ]; then
+        summarize_pytorch_failure "$run_log" "$script" "$torchrun"
+        rm -f "$run_log"
+        return "$rc"
+    fi
+
+    rm -f "$run_log" "$script"
     return $rc
 }
 

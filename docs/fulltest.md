@@ -332,6 +332,8 @@ Runs 100 forward passes of a 10,000×10,000 linear layer across all GPUs in scop
 
 **Fails if:** PyTorch install fails, `torchrun` not found, NCCL process group init fails, or any forward pass errors.
 
+**Failure diagnostics:** On failure, the script now keeps the generated DDP repro script in `/tmp`, emits a condensed summary of the failing `local_rank` / child exit code, and prints a direct `torchrun` repro command plus a suggested debug rerun with `NCCL_DEBUG=INFO` and `TORCH_DISTRIBUTED_DEBUG=DETAIL`.
+
 **PyTorch wheel selection:**
 
 | CUDA Version | Wheel |
