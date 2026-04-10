@@ -85,6 +85,7 @@ TORCH_CUDA=""
 PIP_EXTRA=""
 UBUNTU_MAJOR=""
 RESULTS_STRESS_LABEL="Sustained Compute Stress"
+PYTORCH_RUNTIME_WARNED=false
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Utilities
@@ -100,6 +101,22 @@ log_run() { "$@"; return $?; }
 in_dir() {
     local dir="$1"; shift
     (cd "$dir" && "$@")
+}
+
+warn_pytorch_python_runtime() {
+    $PYTORCH_RUNTIME_WARNED && return 0
+
+    local py_version py_path
+    py_version=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")' 2>/dev/null || echo "unknown")
+    py_path=$(command -v python3 2>/dev/null || echo "python3")
+    log "  PyTorch runtime    : python3 $py_version ($py_path)"
+
+    if python3 -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 12) else 1)' 2>/dev/null; then
+        log "  WARNING: Python 3.12+ has known torch.distributed / torchrun segfault history."
+        log "           If the pytorch test fails during DDP init, prefer Python 3.10/3.11 for this benchmark."
+    fi
+
+    PYTORCH_RUNTIME_WARNED=true
 }
 
 describe_path_permissions() {
@@ -524,6 +541,7 @@ prepare_nvbandwidth() {
 }
 
 prepare_pytorch() {
+    warn_pytorch_python_runtime
     install_pytorch || return 1
     TORCHRUN_BIN=$(find_torchrun)
     if [ -z "$TORCHRUN_BIN" ] || [ ! -x "$TORCHRUN_BIN" ]; then

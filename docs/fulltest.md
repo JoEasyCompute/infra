@@ -334,6 +334,8 @@ Runs 100 forward passes of a 10,000×10,000 linear layer across all GPUs in scop
 
 **Failure diagnostics:** On failure, the script now keeps the generated DDP repro script in `/tmp`, emits a condensed summary of the failing `local_rank` / child exit code, and prints a direct `torchrun` repro command plus a suggested debug rerun with `NCCL_DEBUG=INFO` and `TORCH_DISTRIBUTED_DEBUG=DETAIL`.
 
+**Python runtime warning:** The script now logs the active `python3` runtime before installing/running PyTorch. If it detects Python 3.12 or newer, it warns that `torch.distributed` / `torchrun` has known segfault history there and recommends Python 3.10/3.11 if DDP initialization crashes.
+
 **PyTorch wheel selection:**
 
 | CUDA Version | Wheel |
