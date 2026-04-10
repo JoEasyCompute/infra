@@ -392,6 +392,10 @@ interactive_select_mode() {
     $MODE_EXPLICIT && return 0
 
     header "Interactive Mode Selection"
+    if [[ $EUID -ne 0 ]]; then
+        warn "Raw fio I/O tests require sudo/root (quick/full/stress)."
+        info "  Health mode can run without root, but SMART visibility may still be limited."
+    fi
     info "  [1] health  — SMART / NVMe health only"
     info "  [2] quick   — health + sequential read/write"
     info "  [3] full    — standard validation suite"
@@ -424,6 +428,11 @@ interactive_select_mode() {
                 continue
                 ;;
         esac
+
+        if [[ $EUID -ne 0 && "$MODE" != "health" ]]; then
+            warn "Selected mode '$MODE' needs raw device access."
+            info "  Re-run with: sudo ./test/disktest.sh --$MODE"
+        fi
 
         log "Interactive mode: $MODE"
         return 0
@@ -649,6 +658,14 @@ check_device_safety() {
             if [[ -n "$openers" ]]; then
                 # Warn but don't block — kernel itself opens block devs
                 warn "$dev — currently open by: $openers"
+            fi
+        fi
+
+        # ── 6. Raw device read/write permission for fio I/O paths ────────────
+        if [[ "$MODE" != "health" ]]; then
+            if [[ ! -r "$dev" || ! -w "$dev" ]]; then
+                safe=false
+                reasons+=("insufficient raw device permissions (need read+write on $dev; try sudo)")
             fi
         fi
 
