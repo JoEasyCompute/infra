@@ -31,6 +31,7 @@ RESULTS=()
 FAILED_TESTS=()
 WARNED_TESTS=()
 CURRENT_DEVICE=""
+FIO_ENGINE="libaio"
 
 # Per-device safety verdicts (populated by check_device_safety)
 declare -A DEV_SAFE       # true | false
@@ -278,6 +279,22 @@ check_prereqs() {
     $HAS_NVME   || warn "nvme-cli unavailable — NVMe-specific health checks disabled"
     $HAS_IOPING || info "ioping unavailable — latency checks will use fio only"
     $HAS_LSPCI  || info "lspci unavailable — PCIe topology info will be skipped"
+
+    # Select best fio ioengine available on this host
+    local fio_engines
+    fio_engines=$(fio --enghelp 2>/dev/null || true)
+    if echo "$fio_engines" | grep -qw "io_uring"; then
+        FIO_ENGINE="io_uring"
+    elif echo "$fio_engines" | grep -qw "libaio"; then
+        FIO_ENGINE="libaio"
+    elif echo "$fio_engines" | grep -qw "psync"; then
+        FIO_ENGINE="psync"
+        warn "fio 'io_uring/libaio' not available — falling back to psync engine"
+    else
+        FIO_ENGINE="sync"
+        warn "fio async ioengines unavailable — falling back to sync engine"
+    fi
+    log "fio ioengine selected: $FIO_ENGINE"
 
     mkdir -p "$LOG_DIR"
     REPORT_DIR="$LOG_DIR/reports"
@@ -869,6 +886,7 @@ FIO_BW_WRITE=0
 FIO_IOPS_READ=0
 FIO_IOPS_WRITE=0
 FIO_LAT_P99_US=0
+FIO_LAST_ERROR=""
 
 run_fio_safe() {
     # Identical signature to run_fio but respects TIMEOUT_SECS
@@ -887,7 +905,9 @@ run_fio_safe() {
         FIO_LAT_P99_US=0
         return 1
     elif [[ "$rc" -ne 0 ]]; then
-        warn "$dev — fio job '$label' exited with code $rc; recording zeroed metrics"
+        local detail=""
+        [[ -n "${FIO_LAST_ERROR:-}" ]] && detail=": ${FIO_LAST_ERROR}"
+        warn "$dev — fio job '$label' exited with code $rc${detail}; recording zeroed metrics"
         FIO_BW_READ=0; FIO_BW_WRITE=0
         FIO_IOPS_READ=0; FIO_IOPS_WRITE=0
         FIO_LAT_P99_US=0
@@ -1006,12 +1026,14 @@ run_fio() {
     local devname
     devname=$(basename "$dev")
     local outfile="$LOG_DIR/fio_${devname}_${label}.json"
+    local errfile="$LOG_DIR/fio_${devname}_${label}.stderr.log"
+    FIO_LAST_ERROR=""
 
     local -a fio_cmd=(
         fio
         --filename="$dev"
         --direct=1
-        --ioengine=libaio
+        --ioengine="$FIO_ENGINE"
         --group_reporting
         --output-format=json
         --output="$outfile"
@@ -1021,12 +1043,15 @@ run_fio() {
 
     local fio_rc=0
     if [[ -n "${FIO_TIMEOUT:-}" ]] && command -v timeout &>/dev/null; then
-        timeout "$FIO_TIMEOUT" "${fio_cmd[@]}" > /dev/null 2>&1 || fio_rc=$?
+        timeout "$FIO_TIMEOUT" "${fio_cmd[@]}" > /dev/null 2>"$errfile" || fio_rc=$?
     else
-        "${fio_cmd[@]}" > /dev/null 2>&1 || fio_rc=$?
+        "${fio_cmd[@]}" > /dev/null 2>"$errfile" || fio_rc=$?
     fi
 
     if [[ "$fio_rc" -ne 0 ]]; then
+        if [[ -s "$errfile" ]]; then
+            FIO_LAST_ERROR=$(tail -n 1 "$errfile" | tr -d '\r')
+        fi
         FIO_BW_READ=0; FIO_BW_WRITE=0
         FIO_IOPS_READ=0; FIO_IOPS_WRITE=0
         FIO_LAT_P99_US=0
@@ -1489,6 +1514,7 @@ artifact_patterns = [
     f"smart_{devname}.txt",
     f"nvme_{devname}.txt",
     f"fio_{devname}_*.json",
+    f"fio_{devname}_*.stderr.log",
 ]
 artifacts = []
 for pattern in artifact_patterns:
