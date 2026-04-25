@@ -42,6 +42,7 @@ Current platform status:
 │   ├── docker-install.sh       # Docker CE + NVIDIA toolkit + runtime storage
 │   ├── amd-base-install.sh     # AMDGPU + ROCm base installer
 │   ├── gpu-power-limit.sh      # Persistent NVIDIA power-limit service installer
+│   ├── manage-gpu.sh           # Bind selected NVIDIA GPU slots to vfio-pci at boot
 │   ├── install-p2p-driver.sh   # Experimental Tinygrad P2P driver flow
 │   └── backup/                 # Legacy / archived helper scripts
 ├── test/
@@ -108,6 +109,18 @@ If you want more control, run the stages directly:
 3. [install/docker-install.sh](/Users/josephcheung/Desktop/dev/infra/install/docker-install.sh)
 4. reboot if required
 5. [test/fulltest.sh](/Users/josephcheung/Desktop/dev/infra/test/fulltest.sh)
+
+### NVIDIA: Disable Selected GPUs At Boot
+
+Use [install/manage-gpu.sh](/Users/josephcheung/Desktop/dev/infra/install/manage-gpu.sh) to select NVIDIA PCI slots that should bind to `vfio-pci` in initramfs instead of the NVIDIA driver.
+
+```bash
+sudo install/manage-gpu.sh              # interactive toggle menu
+sudo install/manage-gpu.sh --disable 25:00
+sudo install/manage-gpu.sh --enable 25:00
+```
+
+Each selected slot is applied as a `.0` and `.1` pair, and the script runs `update-initramfs -u`. Reboot for changes to take effect. See [docs/manage-gpu.md](/Users/josephcheung/Desktop/dev/infra/docs/manage-gpu.md).
 
 ### AMD: Orchestrated Provisioning
 
