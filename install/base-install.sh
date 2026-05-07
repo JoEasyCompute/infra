@@ -297,15 +297,34 @@ install_base_packages() {
         ipmitool jq pciutils iproute2 util-linux dmidecode lshw \
         coreutils chrony nvme-cli bpytop mokutil \
         python3 python3-pip python3-venv \
-        smartmontools \
+        smartmontools stress-ng fio lm-sensors \
         lvm2 mdadm lsof ioping \
         || error "Base package install failed"
-    # Note: fio is intentionally NOT installed here — it is a test-only tool
-    # managed by disktest.sh's own prerequisite check.
 
     sudo systemctl enable --now chrony \
         || warn "Failed to enable chrony"
     success "Base packages installed"
+}
+
+# ═══════════════════════════════════════════════════════════════
+# STEP 5.5 — Python tooling
+# ═══════════════════════════════════════════════════════════════
+install_python_tooling() {
+    section "Python Tooling"
+
+    if command -v uv &>/dev/null; then
+        success "uv already installed: $(uv --version)"
+        return
+    fi
+
+    info "Installing uv to /usr/local/bin via Astral installer..."
+    curl -LsSf https://astral.sh/uv/install.sh \
+        | sudo env UV_INSTALL_DIR="/usr/local/bin" UV_NO_MODIFY_PATH=1 sh \
+        || error "uv install failed"
+
+    command -v uv &>/dev/null \
+        || error "uv install completed but uv is not on PATH"
+    success "uv installed: $(uv --version)"
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -711,7 +730,17 @@ uninstall_node() {
     done
     success "GCC alternatives cleared"
 
-    # ── 13. Optional: remove repos ────────────────────────────
+    # ── 13. Remove uv standalone binary ───────────────────────
+    section "Removing uv"
+    if command -v uv &>/dev/null || [[ -x /usr/local/bin/uv ]]; then
+        sudo rm -f /usr/local/bin/uv
+        hash -r 2>/dev/null || true
+        success "uv removed from /usr/local/bin"
+    else
+        info "uv not present — already clean"
+    fi
+
+    # ── 14. Optional: remove repos ────────────────────────────
     section "Repo Cleanup (Optional)"
     local infra_dir="${HOME}/infra"
     local gpuburn_dir="${HOME}/gpu-burn"
@@ -732,13 +761,13 @@ uninstall_node() {
         info "Non-interactive mode — keeping repos (remove manually if needed)"
     fi
 
-    # ── 14. apt autoremove + update ───────────────────────────
+    # ── 15. apt autoremove + update ───────────────────────────
     section "Final apt Cleanup"
     sudo apt-get autoremove -y  || warn "autoremove had warnings (non-fatal)"
     sudo apt-get update -q      || warn "apt-get update had warnings (non-fatal)"
     success "apt cleanup complete"
 
-    # ── 15. Final verification ────────────────────────────────
+    # ── 16. Final verification ────────────────────────────────
     section "Uninstall Verification"
     local remaining
     remaining=$(dpkg -l 2>/dev/null \
@@ -764,6 +793,10 @@ uninstall_node() {
     [[ -f /etc/profile.d/cuda.sh ]] \
         && warn "/etc/profile.d/cuda.sh still exists" \
         || success "PATH check: cuda.sh removed"
+
+    [[ -x /usr/local/bin/uv ]] \
+        && warn "/usr/local/bin/uv still exists" \
+        || success "uv check: removed"
 
     find /etc/modprobe.d/ -name "nvidia*.conf" -o -name "blacklist-nouveau.conf" 2>/dev/null \
         | grep -q . \
@@ -811,6 +844,7 @@ main() {
         confirm_install
 
         install_base_packages
+        install_python_tooling
         configure_gcc_alternatives
         install_cuda_keyring
         install_nvidia_stack

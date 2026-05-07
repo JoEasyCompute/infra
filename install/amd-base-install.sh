@@ -338,14 +338,34 @@ install_base_packages() {
         coreutils chrony nvme-cli bpytop mokutil \
         python3 python3-pip python3-venv \
         python3-setuptools python3-wheel \
-        smartmontools \
+        smartmontools stress-ng fio lm-sensors \
         lvm2 mdadm lsof ioping \
         || error "Base package install failed"
-    # Note: fio is intentionally NOT installed here -- managed by disktest.sh.
 
     sudo systemctl enable --now chrony \
         || warn "Failed to enable chrony"
     success "Base packages installed"
+}
+
+# ================================================================
+# STEP 5.5 -- Python tooling
+# ================================================================
+install_python_tooling() {
+    section "Python Tooling"
+
+    if command -v uv &>/dev/null; then
+        success "uv already installed: $(uv --version)"
+        return
+    fi
+
+    info "Installing uv to /usr/local/bin via Astral installer..."
+    curl -LsSf https://astral.sh/uv/install.sh \
+        | sudo env UV_INSTALL_DIR="/usr/local/bin" UV_NO_MODIFY_PATH=1 sh \
+        || error "uv install failed"
+
+    command -v uv &>/dev/null \
+        || error "uv install completed but uv is not on PATH"
+    success "uv installed: $(uv --version)"
 }
 
 # ================================================================
@@ -859,7 +879,17 @@ uninstall_node() {
     done
     success "GCC alternatives cleared"
 
-    # -- 8. Optional: remove repos --------------------------------
+    # -- 8. Remove uv standalone binary ---------------------------
+    section "Removing uv"
+    if command -v uv &>/dev/null || [[ -x /usr/local/bin/uv ]]; then
+        sudo rm -f /usr/local/bin/uv
+        hash -r 2>/dev/null || true
+        success "uv removed from /usr/local/bin"
+    else
+        info "uv not present -- already clean"
+    fi
+
+    # -- 9. Optional: remove repos --------------------------------
     section "Repo Cleanup (Optional)"
     local infra_dir="${HOME}/infra"
 
@@ -877,13 +907,13 @@ uninstall_node() {
         info "Non-interactive mode -- keeping repos (remove manually if needed)"
     fi
 
-    # -- 9. apt autoremove + update -------------------------------
+    # -- 10. apt autoremove + update ------------------------------
     section "Final apt Cleanup"
     apt_get autoremove -y  || warn "autoremove had warnings (non-fatal)"
     apt_get update -q      || warn "apt-get update had warnings (non-fatal)"
     success "apt cleanup complete"
 
-    # -- 10. Final verification -----------------------------------
+    # -- 11. Final verification -----------------------------------
     section "Uninstall Verification"
     local remaining
     remaining=$(dpkg -l 2>/dev/null \
@@ -909,6 +939,10 @@ uninstall_node() {
     [[ -f /etc/profile.d/rocm.sh ]] \
         && warn "/etc/profile.d/rocm.sh still exists" \
         || success "PATH check: rocm.sh removed"
+
+    [[ -x /usr/local/bin/uv ]] \
+        && warn "/usr/local/bin/uv still exists" \
+        || success "uv check: removed"
 
     [[ -d /opt/rocm ]] \
         && warn "/opt/rocm still present" \
@@ -953,6 +987,7 @@ main() {
         confirm_install
 
         install_base_packages
+        install_python_tooling
         configure_gcc_alternatives
         install_rocm_repos
         install_amd_stack
