@@ -15,6 +15,7 @@ Supports: RTX 4090 / RTX 5090, A4000, A100, H100 on Ubuntu 22.04 / 24.04.
 | CUDA toolkit | `nvcc` must be on PATH or in `/usr/local/cuda/bin` |
 | `git`, `make`, `gcc` | Build tools |
 | `python3`, `python3-pip` | For PyTorch and inline test scripts |
+| `stress-ng`, `lm-sensors` | For the node-stress CPU/RAM load and sensor snapshots |
 | `bc` | For duration formatting in burn test output |
 
 ### Auto-installed on first run
@@ -57,7 +58,7 @@ sudo chown -R "$USER":"$(id -gn)" ./test/build
 ## Usage
 
 ```
-./test/fulltest.sh [test...] [--gpu <index[,index...]>] [--burn-duration <seconds>] [--clean] [--list] [--help]
+./test/fulltest.sh [test...] [--gpu <index[,index...]>] [--burn-duration <seconds>] [--node-stress-minutes <m>] [--clean] [--list] [--help]
 ```
 
 ### Run all tests on all GPUs
@@ -77,6 +78,7 @@ sudo chown -R "$USER":"$(id -gn)" ./test/build
 ./test/fulltest.sh nccl pytorch                    # communication + framework only
 ./test/fulltest.sh memtest                         # VRAM integrity only
 ./test/fulltest.sh stress                          # stress test only (default 5 min)
+./test/fulltest.sh node-stress                     # CPU + RAM + GPU stress (default 5 min)
 ```
 
 ### Combine: specific tests on specific GPUs
@@ -84,6 +86,7 @@ sudo chown -R "$USER":"$(id -gn)" ./test/build
 ./test/fulltest.sh --gpu 3 memtest stress
 ./test/fulltest.sh --gpu 2,4,5 memtest stress
 ./test/fulltest.sh --gpu 0,1 preflight ecc pcie
+./test/fulltest.sh node-stress --node-stress-minutes 15
 ```
 
 ---
@@ -94,6 +97,7 @@ sudo chown -R "$USER":"$(id -gn)" ./test/build
 |---|---|---|
 | `--gpu <index[,index...]>` | all GPUs | Target one or more GPUs by index — single (`3`) or comma-separated (`2,4,5`). Indices are 0-based as shown by `nvidia-smi`. |
 | `--burn-duration <seconds>` | `300` (5 min) | Duration of the sustained stress test. |
+| `--node-stress-minutes <m>` | `5` | Duration of the node-wide CPU + RAM + GPU stress test. |
 | `--clean` | — | Delete `./build/` and exit. Forces full rebuild on next run. Can be combined with tests to clean then immediately run. |
 | `--list` | — | Print available test names and exit. |
 | `--help` / `-h` | — | Show usage and exit. |
@@ -122,6 +126,9 @@ If `--clean` or a rebuild path fails because `./build/` is not writable, the scr
 
 # 1-hour stress test on all GPUs
 ./test/fulltest.sh stress --burn-duration 3600
+
+# CPU + RAM + GPU stress for 15 minutes
+./test/fulltest.sh node-stress --node-stress-minutes 15
 
 # Quick hardware health check only
 ./test/fulltest.sh preflight ecc pcie clocks
@@ -402,6 +409,25 @@ At the end a per-GPU peak summary is printed:
 
 > A thermal failure means the compute test passed but cooling needs investigation. The GPU appears as `FAIL` in the summary to ensure it gets attention rather than being buried in scrollback.
 
+### `node-stress` — Node-Wide Stress
+
+Runs the existing GPU stress backend at the same time as `stress-ng` CPU and RAM pressure so you can approximate maximum whole-node power and thermal load.
+
+**Workloads:**
+
+| Component | Method | Notes |
+|---|---|---|
+| CPU | `stress-ng --cpu 0` | All available CPU cores |
+| RAM | `stress-ng --vm 2 --vm-bytes ... --vm-keep` | Sustained memory allocation + touching |
+| GPU | Same backend used by `stress` | `gpu-fryer` → `gpu-burn` → PyTorch fallback |
+
+`stress-ng` picks a memory target dynamically from total system RAM so the default profile is heavy without immediately turning into an OOM test. The node-stress mode also prints `sensors` snapshots when `lm-sensors` is available.
+
+**Fails if:**
+- The GPU backend exits non-zero
+- `stress-ng` exits non-zero
+- Any GPU exceeds the thermal thresholds tracked by the GPU burn monitor
+
 ---
 
 ## Output
@@ -508,6 +534,7 @@ Defined near the top of the script — edit directly to change defaults:
 | Constant | Default | Description |
 |---|---|---|
 | `BURN_DURATION` | `300` | Default stress duration in seconds (overridden by `--burn-duration`) |
+| `NODE_STRESS_MINUTES` | `5` | Default node-wide stress duration in minutes (overridden by `--node-stress-minutes`) |
 | `TEMP_WARN` | `87` | Temperature threshold in °C for burn test thermal flag |
 | `FAN_WARN` | `100` | Fan speed threshold in % for burn test thermal flag |
 

@@ -48,6 +48,7 @@ Current platform status:
 ├── test/
 │   ├── fulltest.sh             # NVIDIA multi-GPU acceptance test
 │   ├── disktest.sh             # Disk validation and fio-based health/perf suite
+│   ├── cpu-ram-stress.sh       # CPU + RAM isolation stress using stress-ng
 │   ├── ramtest.sh              # System RAM burn-in using stressapptest
 │   └── network-test.sh         # Network connectivity and throughput test
 ├── gpucheck/                   # Inventory / hardware inspection scripts
@@ -249,6 +250,7 @@ sudo /opt/provision-amd/provision-amd.sh --status
 | `test/gpu-fulltest-v2.sh` | Experimental prepare-then-run variant of the NVIDIA GPU validation flow | [docs/gpu-fulltest-v2.md](/Users/josephcheung/Desktop/dev/infra/docs/gpu-fulltest-v2.md) |
 | `install/amd-base-install.sh` | AMDGPU + ROCm base install | [docs/amd-base-install.md](/Users/josephcheung/Desktop/dev/infra/docs/amd-base-install.md) |
 | `test/disktest.sh` | Disk health, throughput, and stress validation with guided interactive mode and per-disk reports | [docs/disktest.md](/Users/josephcheung/Desktop/dev/infra/docs/disktest.md) |
+| `test/cpu-ram-stress.sh` | CPU + RAM isolation stress using stress-ng | [docs/cpu-ram-stress.md](/Users/josephcheung/Desktop/dev/infra/docs/cpu-ram-stress.md) |
 | `test/ramtest.sh` | System RAM burn-in and ECC-aware memory validation | [docs/ramtest.md](/Users/josephcheung/Desktop/dev/infra/docs/ramtest.md) |
 | `test/network-test.sh` | Network connectivity, latency, MTU, and bandwidth validation | [docs/network-test.md](/Users/josephcheung/Desktop/dev/infra/docs/network-test.md) |
 | `test/network-batch.sh` | SSH-based orchestration helper for chain, pair, rotate, grouped, and plan-export network validation | [docs/network-batch.md](/Users/josephcheung/Desktop/dev/infra/docs/network-batch.md) |
