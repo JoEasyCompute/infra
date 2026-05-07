@@ -2,9 +2,9 @@
 # =============================================================================
 # fulltest.sh — Multi-GPU test suite
 # Supports: RTX 4090/5090, A4000, A100, H100 on Ubuntu 22.04/24.04
-# Usage:  ./fulltest.sh [test...] [--burn-duration <s>] [--clean] [--list] [--help]
+# Usage:  ./fulltest.sh [test...] [--burn-duration <s>] [--node-stress-minutes <m>] [--clean] [--list] [--help]
 #   Tests: preflight, ecc, pcie, clocks, nccl, cuda-samples, nvbandwidth,
-#          dcgm, pytorch, memtest, stress
+#          dcgm, pytorch, memtest, stress, node-stress
 #   If no tests specified, all are run in the order above.
 # =============================================================================
 
@@ -20,6 +20,7 @@ readonly LOG_FILE="$SCRIPT_DIR/fulltest_$(date +%Y%m%d_%H%M%S).log"
 
 CLEAN_BUILD=false
 BURN_DURATION=300   # seconds; override with --burn-duration <seconds>
+NODE_STRESS_MINUTES=5   # minutes; override with --node-stress-minutes <minutes>
 FIX_USER=$(id -un 2>/dev/null || true)
 [ -n "$FIX_USER" ] || FIX_USER=$(id -u 2>/dev/null || echo unknown)
 FIX_GROUP=$(id -gn 2>/dev/null || true)
@@ -1259,12 +1260,17 @@ build_gpu_burn() {
 }
 
 run_pytorch_stress() {
+    run_pytorch_stress_for_duration "$BURN_DURATION"
+}
+
+run_pytorch_stress_for_duration() {
+    local duration_s="$1"
     local script="$BUILD_DIR/_gpu_stress.py"
     ensure_build_dir_writable "writing stress helper" || return 1
     cat > "$script" << PYEOF
 import torch, time, sys
 
-DURATION = ${BURN_DURATION}
+DURATION = ${duration_s}
 SIZE = 8192
 gpus = list(range(torch.cuda.device_count()))
 if not gpus:
@@ -1293,6 +1299,82 @@ PYEOF
     python3 "$script" 2>&1 | tee -a "$LOG_FILE" || rc=$?
     rm -f "$script"
     return $rc
+}
+
+start_gpu_stress_backend() {
+    local label="$1"
+    local duration_s="$2"
+
+    if build_gpu_fryer && [ -f "$BUILD_DIR/gpu-fryer/gpu-fryer" ]; then
+        log "  Using gpu-fryer (BF16, $((duration_s / 60)) min)"
+        RESULTS_STRESS_LABEL="$label / gpu-fryer"
+        "$BUILD_DIR/gpu-fryer/gpu-fryer" --use-bf16 "$duration_s" \
+            2>&1 | tee -a "$LOG_FILE" &
+        GPU_STRESS_PID=$!
+        return 0
+    fi
+
+    if build_gpu_burn && [ -f "$BUILD_DIR/gpu-burn/gpu-burn" ]; then
+        log "  Using gpu-burn (FP64, $((duration_s / 60)) min)"
+        RESULTS_STRESS_LABEL="$label / gpu-burn"
+        "$BUILD_DIR/gpu-burn/gpu-burn" -d -tc "$duration_s" \
+            2>&1 | tee -a "$LOG_FILE" &
+        GPU_STRESS_PID=$!
+        return 0
+    fi
+
+    log "  gpu-fryer and gpu-burn unavailable — using PyTorch cuBLAS fallback."
+    RESULTS_STRESS_LABEL="$label / PyTorch fallback"
+    run_pytorch_stress_for_duration "$duration_s" 2>&1 | tee -a "$LOG_FILE" &
+    GPU_STRESS_PID=$!
+    return 0
+}
+
+calculate_stress_ng_vm_bytes() {
+    local mem_total_kb vm_target_kb vm_per_worker_kb
+    mem_total_kb=$(awk '/MemTotal:/ {print $2}' /proc/meminfo)
+    vm_target_kb=$(( mem_total_kb * 70 / 100 ))
+    vm_per_worker_kb=$(( vm_target_kb / 2 ))
+
+    # Keep the memory pressure substantial but avoid a tiny default on small nodes.
+    if [ "$vm_per_worker_kb" -lt 262144 ]; then
+        vm_per_worker_kb=262144
+    fi
+
+    printf '%sK' "$vm_per_worker_kb"
+}
+
+start_cpu_ram_stress() {
+    local duration_min="$1"
+    local vm_bytes
+    vm_bytes=$(calculate_stress_ng_vm_bytes)
+
+    command -v stress-ng >/dev/null 2>&1 \
+        || { log "  ERROR: stress-ng not found on PATH"; return 1; }
+
+    log "  stress-ng profile: cpu=all cores, vm=2 workers, vm-bytes=${vm_bytes} each, timeout=${duration_min}m"
+    stress-ng \
+        --cpu 0 \
+        --cpu-method all \
+        --vm 2 \
+        --vm-bytes "$vm_bytes" \
+        --vm-method all \
+        --vm-keep \
+        --timeout "${duration_min}m" \
+        --metrics-brief \
+        2>&1 | tee -a "$LOG_FILE" &
+    CPU_RAM_STRESS_PID=$!
+    return 0
+}
+
+log_sensor_snapshot() {
+    local title="$1"
+    command -v sensors >/dev/null 2>&1 || return 0
+
+    log ""
+    log "  ${title}"
+    sensors 2>&1 | tee -a "$LOG_FILE"
+    log ""
 }
 
 # Thresholds for thermal flagging during burn
@@ -1424,27 +1506,8 @@ test_stress() {
 
     # Launch the burn tool in the background, monitor thermals alongside it,
     # then wait for it to finish and collect both the compute RC and thermal RC.
-
-    if build_gpu_fryer && [ -f "$BUILD_DIR/gpu-fryer/gpu-fryer" ]; then
-        log "  Using gpu-fryer (BF16, ${duration_min} min)"
-        RESULTS_STRESS_LABEL="$label / gpu-fryer"
-        "$BUILD_DIR/gpu-fryer/gpu-fryer" --use-bf16 "$BURN_DURATION" \
-            2>&1 | tee -a "$LOG_FILE" &
-        local burn_pid=$!
-
-    elif build_gpu_burn && [ -f "$BUILD_DIR/gpu-burn/gpu-burn" ]; then
-        log "  Using gpu-burn (FP64, ${duration_min} min)"
-        RESULTS_STRESS_LABEL="$label / gpu-burn"
-        "$BUILD_DIR/gpu-burn/gpu-burn" -d -tc "$BURN_DURATION" \
-            2>&1 | tee -a "$LOG_FILE" &
-        local burn_pid=$!
-
-    else
-        log "  gpu-fryer and gpu-burn unavailable — using PyTorch cuBLAS fallback."
-        RESULTS_STRESS_LABEL="$label / PyTorch fallback"
-        run_pytorch_stress 2>&1 | tee -a "$LOG_FILE" &
-        local burn_pid=$!
-    fi
+    start_gpu_stress_backend "$label" "$BURN_DURATION" || return 1
+    local burn_pid="$GPU_STRESS_PID"
 
     # Run thermal monitor alongside the burn; it exits when burn_pid dies
     run_burn_monitor "$burn_pid"
@@ -1475,6 +1538,61 @@ test_stress() {
         log "  Compute: PASS  |  Thermals: WARNING (see summary above)"
         return 1   # flag as failure so it shows in summary and gets attention
     fi
+    return 0
+}
+
+test_node_stress() {
+    local label="Node Stress (CPU + RAM + GPU)"
+    local duration_min burn_rc=0 cpu_ram_rc=0
+    local duration_s
+    duration_min="$NODE_STRESS_MINUTES"
+    duration_s=$(( duration_min * 60 ))
+    BURN_THERMAL_RC=0
+
+    log "  Running full-node stress for ${duration_min} minute(s)"
+    log_sensor_snapshot "Initial sensors snapshot (if available):"
+
+    start_cpu_ram_stress "$duration_min" || return 1
+    local cpu_ram_pid="$CPU_RAM_STRESS_PID"
+
+    start_gpu_stress_backend "$label" "$duration_s" || {
+        kill "$cpu_ram_pid" 2>/dev/null || true
+        wait "$cpu_ram_pid" 2>/dev/null || true
+        return 1
+    }
+    local burn_pid="$GPU_STRESS_PID"
+
+    # Monitor the GPU burn while CPU/RAM stress runs in parallel.
+    run_burn_monitor "$burn_pid"
+
+    # Collect exit codes from both concurrent workloads.
+    wait "$burn_pid" 2>/dev/null || burn_rc=$?
+    wait "$cpu_ram_pid" 2>/dev/null || cpu_ram_rc=$?
+
+    log_sensor_snapshot "Final sensors snapshot (if available):"
+
+    if [ "$burn_rc" -ne 0 ]; then
+        if grep -q "GPU is not performing as expected" "$LOG_FILE" 2>/dev/null && \
+           ! grep -q "Throttling HW: true\|Thermal SW: true\|Thermal HW: true" "$LOG_FILE" 2>/dev/null && \
+           [ "$BURN_THERMAL_RC" -eq 0 ]; then
+            log "  WARN: GPU stress backend reported a health warning (exit $burn_rc)."
+            log "  No throttling or thermal violations detected — treating as warning only."
+        else
+            log "  ERROR: GPU stress backend exited with code $burn_rc"
+            return 1
+        fi
+    fi
+
+    if [ "$cpu_ram_rc" -ne 0 ]; then
+        log "  ERROR: stress-ng exited with code $cpu_ram_rc"
+        return 1
+    fi
+
+    if [ "$BURN_THERMAL_RC" -ne 0 ]; then
+        log "  Compute: PASS  |  Thermals: WARNING (see summary above)"
+        return 1
+    fi
+
     return 0
 }
 
@@ -1530,7 +1648,7 @@ print_summary() {
 
 usage() {
     cat << EOF
-Usage: $(basename "$0") [test...] [--burn-duration <s>] [--clean] [--list] [--help]
+Usage: $(basename "$0") [test...] [--burn-duration <s>] [--node-stress-minutes <m>] [--clean] [--list] [--help]
 
 Available tests (run in this order if none specified):
   preflight     Idle thermal baseline, persistence mode, driver state
@@ -1544,10 +1662,12 @@ Available tests (run in this order if none specified):
   pytorch       PyTorch multi-GPU DDP benchmark
   memtest       cuda_memtest VRAM integrity (10 passes per GPU)
   stress        Sustained compute stress: gpu-fryer / gpu-burn / PyTorch
+  node-stress   Node-wide stress: stress-ng CPU + RAM plus GPU burn
 
 Options:
   --gpu <index[,index...]>   Target specific GPU(s) by index — single (3) or comma-separated (2,4,5)
   --burn-duration <seconds>  Duration for stress test (default: 300 = 5 min)
+  --node-stress-minutes <m>  Duration for node-wide stress test (default: 5)
   --clean                    Delete all build artifacts and exit
   --list                     List available test names and exit
   --help, -h                 Show this help
@@ -1558,6 +1678,8 @@ Examples:
   ./fulltest.sh --gpu 2,4,5                  # run all tests on GPUs 2, 4, and 5
   ./fulltest.sh --gpu 2,4,5 memtest stress   # memtest + stress on GPUs 2, 4, 5
   ./fulltest.sh --gpu 3 memtest stress       # memtest + stress on GPU 3 only
+  ./fulltest.sh node-stress                  # CPU + RAM + GPU stress, default 5 min
+  ./fulltest.sh node-stress --node-stress-minutes 15
   ./fulltest.sh preflight ecc pcie clocks    # hardware health checks only
   ./fulltest.sh nccl pytorch                 # communication + framework only
   ./fulltest.sh stress --burn-duration 3600  # 1 hour stress test
@@ -1566,7 +1688,7 @@ Examples:
 EOF
 }
 
-ALL_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch memtest stress)
+ALL_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch memtest stress node-stress)
 SELECTED_TESTS=()
 
 # Two-pass parse: first pass handles --help/--list which exit immediately,
@@ -1607,7 +1729,16 @@ while [ "$i" -lt "${#args[@]}" ]; do
             fi
             BURN_DURATION="$val"
             ;;
-        preflight|ecc|pcie|clocks|nccl|cuda-samples|nvbandwidth|dcgm|pytorch|memtest|stress)
+        --node-stress-minutes)
+            i=$((i + 1))
+            val="${args[$i]:-}"
+            if [[ ! "$val" =~ ^[0-9]+$ ]] || [ "$val" -lt 1 ]; then
+                echo "ERROR: --node-stress-minutes requires a positive integer (minutes)" >&2
+                exit 1
+            fi
+            NODE_STRESS_MINUTES="$val"
+            ;;
+        preflight|ecc|pcie|clocks|nccl|cuda-samples|nvbandwidth|dcgm|pytorch|memtest|stress|node-stress)
             SELECTED_TESTS+=("$arg") ;;
         *)
             echo "Unknown argument: $arg" >&2; usage >&2; exit 1 ;;
@@ -1655,6 +1786,9 @@ for test in "${SELECTED_TESTS[@]}"; do
             local stress_min
             stress_min=$(echo "scale=1; $BURN_DURATION / 60" | bc)
             run_test "$RESULTS_STRESS_LABEL (${stress_min} min)"                       test_stress
+            ;;
+        node-stress)
+            run_test "Node Stress (CPU + RAM + GPU) (${NODE_STRESS_MINUTES} min)"      test_node_stress
             ;;
     esac
 done
