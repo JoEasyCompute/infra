@@ -18,7 +18,7 @@ A production-grade disk validation tool for GPU nodes, bare-metal servers, and s
 | `ioping` *(optional)* | `ioping` | Supplemental latency data |
 | `lspci` *(optional)* | `pciutils` | PCIe controller topology |
 
-**Dependencies are auto-detected and auto-installed** on first run if you have a supported package manager (`apt-get`, `dnf`, `yum`, `zypper`, `pacman`). Required tools will abort the run if they can't be installed; optional tools degrade gracefully.
+**Dependencies are auto-detected and auto-installed** on first run if you have a supported package manager (`apt-get`, `dnf`, `yum`, `zypper`, `pacman`). On provisioned nodes, `base-install.sh` already preinstalls the common disk-validation packages, including `fio`. Required tools will abort the run if they can't be installed; optional tools degrade gracefully.
 
 Manual install (Ubuntu/Debian):
 ```bash

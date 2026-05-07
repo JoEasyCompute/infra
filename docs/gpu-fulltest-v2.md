@@ -24,7 +24,7 @@ This means build-heavy failures should happen earlier, before long test executio
 
 ## Current Scope
 
-`gpu-fulltest-v2.sh` covers the same test names as `fulltest.sh`:
+`gpu-fulltest-v2.sh` covers the same core test names as `fulltest.sh`, plus an experimental node-wide stress mode:
 
 - `preflight`
 - `ecc`
@@ -37,6 +37,7 @@ This means build-heavy failures should happen earlier, before long test executio
 - `pytorch`
 - `memtest`
 - `stress`
+- `node-stress`
 
 The main architectural difference is that selected build/runtime dependencies are prepared up front.
 
@@ -52,6 +53,7 @@ The script currently has explicit prepare steps for selected tests such as:
 - PyTorch runtime
 - `cuda_memtest`
 - stress backends (`gpu-fryer`, `gpu-burn`, or PyTorch fallback)
+- node-stress, which combines `stress-ng` CPU + RAM load with the GPU burn backend
 
 Preparation is only done for tests the operator selected.
 
@@ -60,7 +62,7 @@ Preparation is only done for tests the operator selected.
 ## Usage
 
 ```bash
-./test/gpu-fulltest-v2.sh [test...] [--gpu <index[,index...]>] [--burn-duration <seconds>] [--clean] [--list] [--help]
+./test/gpu-fulltest-v2.sh [test...] [--gpu <index[,index...]>] [--burn-duration <seconds>] [--node-stress-minutes <m>] [--clean] [--list] [--help]
 ```
 
 Examples:
@@ -69,6 +71,8 @@ Examples:
 ./test/gpu-fulltest-v2.sh
 ./test/gpu-fulltest-v2.sh --gpu 3
 ./test/gpu-fulltest-v2.sh --gpu 2,4,5 memtest stress
+./test/gpu-fulltest-v2.sh node-stress
+./test/gpu-fulltest-v2.sh node-stress --node-stress-minutes 15
 ./test/gpu-fulltest-v2.sh nccl pytorch
 ./test/gpu-fulltest-v2.sh --clean
 ```

@@ -128,6 +128,7 @@ must be done manually afterwards.
 | `gcc-11`, `g++-11`, `gcc-12`, `g++-12` | GCC versions required for NVIDIA driver compilation |
 | `linux-headers-$(uname -r)`, `linux-headers-generic` | Kernel headers — required for DKMS to build `nvidia.ko` |
 | `python3`, `python3-pip`, `python3-venv` | Python runtime |
+| `uv` | Python package/project manager installed to `/usr/local/bin` |
 | `git` | Source control |
 | `chrony` | NTP time synchronisation (enabled as a service) |
 | `nvme-cli` | NVMe drive management and health checks |
@@ -139,6 +140,13 @@ must be done manually afterwards.
 | `lsof`, `ioping` | Open file detection and disk latency checking (also used by `disktest.sh`) |
 | `bpytop` | Resource monitor |
 | `mokutil` | Secure Boot state inspection |
+| `stress-ng` | System stress testing and burn-in workloads |
+| `fio` | Disk I/O benchmarking and validation |
+| `lm-sensors` | Hardware sensor and temperature monitoring |
+
+`uv` is installed by `base-install.sh` via Astral's standalone installer and
+placed in `/usr/local/bin` so it is available on the system PATH without
+modifying shell profiles.
 
 ### NVIDIA / CUDA stack
 | Package | Purpose |
@@ -365,8 +373,8 @@ DCGM at that point:
 
 ## Integration with disktest.sh
 
-`base-install.sh` pre-installs all packages needed by `disktest.sh` except
-`fio`, which `disktest.sh` auto-installs on first run:
+`base-install.sh` pre-installs the disk-validation dependencies used by
+`disktest.sh`:
 
 | Package | Installed by |
 |---|---|
@@ -377,7 +385,7 @@ DCGM at that point:
 | `pciutils` | `base-install.sh` |
 | `util-linux` | `base-install.sh` |
 | `python3` | `base-install.sh` |
-| `fio` | `disktest.sh` (auto-installs) |
+| `fio` | `base-install.sh` |
 
 This means `disktest.sh` can be run immediately after a reboot following
 `base-install.sh` without any additional dependency setup.
