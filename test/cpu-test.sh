@@ -1,15 +1,14 @@
 #!/bin/bash
 # =============================================
 # Generic Single-Logical-CPU Stress Test Script
-# Auto-detects total logical CPUs on any system
-# With resume support if the server freezes
+# Auto-detects CPUs + uses native --timeout
 # =============================================
 
 set -euo pipefail
 
 # ================== CONFIGURATION ==================
-STRESS_TIME=60          # Seconds per logical CPU (change as needed)
-CPU_METHOD="matrixprod" # Good options: matrixprod, fft, all, sse, avx, etc.
+STRESS_TIME=60          # Seconds per logical CPU
+CPU_METHOD="matrixprod" # matrixprod, fft, all, etc.
 LOG_FILE="stress_test_log.txt"
 PROGRESS_FILE="stress_progress.txt"
 # ===================================================
@@ -28,18 +27,17 @@ echo "Time per CPU: ${STRESS_TIME}s | Method: $CPU_METHOD"
 echo "Log: $LOG_FILE | Progress: $PROGRESS_FILE"
 echo "=================================================="
 
-# Check stress-ng
 if ! command -v stress-ng &> /dev/null; then
     echo "Error: stress-ng is not installed!" >&2
-    echo "Install with: sudo apt install stress-ng  (or dnf/yum equivalent)" >&2
+    echo "Install it first (apt/dnf/yum)." >&2
     exit 1
 fi
 
-# Resume from last progress if exists
+# Resume support
 if [ -f "$PROGRESS_FILE" ]; then
     LAST_CPU=$(cat "$PROGRESS_FILE" | tr -d '[:space:]')
     if [[ "$LAST_CPU" =~ ^[0-9]+$ ]] && [ "$LAST_CPU" -lt "$TOTAL_CPUS" ]; then
-        echo "Resuming from logical CPU $LAST_CPU (previous run was interrupted)"
+        echo "Resuming from logical CPU $LAST_CPU"
         START_CPU=$LAST_CPU
     else
         START_CPU=0
@@ -48,36 +46,32 @@ else
     START_CPU=0
 fi
 
-echo "Starting test from logical CPU $START_CPU" | tee -a "$LOG_FILE"
+echo "Starting from logical CPU $START_CPU" | tee -a "$LOG_FILE"
 
 for (( cpu=START_CPU; cpu<TOTAL_CPUS; cpu++ )); do
     TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[$TIMESTAMP] Starting logical CPU $cpu / $TOTAL_CPUS" | tee -a "$LOG_FILE"
 
-    # Save progress BEFORE starting the test (important for crash recovery)
+    # Save progress BEFORE test
     echo "$cpu" > "$PROGRESS_FILE"
 
-    # Run the stress test with timeout
-    if timeout "${STRESS_TIME}s" stress-ng \
+    # Native stress-ng timeout (recommended)
+    if stress-ng \
         --taskset "$cpu" \
         --cpu 1 \
         --cpu-method "$CPU_METHOD" \
         --cpu-load 100 \
+        --timeout "${STRESS_TIME}s" \
         --metrics-brief 2>&1 | tee -a "$LOG_FILE"; then
 
         echo "[$TIMESTAMP] Logical CPU $cpu completed successfully" | tee -a "$LOG_FILE"
     else
-        echo "[$TIMESTAMP] Logical CPU $cpu FAILED or timed out" | tee -a "$LOG_FILE"
-        # Optional: uncomment to pause on failure
-        # read -p "Press Enter to continue to next CPU..."
+        echo "[$TIMESTAMP] Logical CPU $cpu FAILED (exit code $?)" | tee -a "$LOG_FILE"
     fi
 
-    sleep 3   # Small cooldown between tests
+    sleep 3   # cooldown
 done
 
-# Cleanup when finished
 rm -f "$PROGRESS_FILE"
-
 echo "=================================================="
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Test completed! All $TOTAL_CPUS logical CPUs processed." | tee -a "$LOG_FILE"
-echo "Full log: $LOG_FILE"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Test completed! All $TOTAL_CPUS logical CPUs done." | tee -a "$LOG_FILE"
