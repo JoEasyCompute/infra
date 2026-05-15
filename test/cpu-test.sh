@@ -1,77 +1,116 @@
 #!/bin/bash
 # =============================================
-# Generic Single-Logical-CPU Stress Test Script
-# Auto-detects CPUs + uses native --timeout
+# Smart Single-Logical-CPU Stress Tester
+# With socket support + optional temperature logging
 # =============================================
 
 set -euo pipefail
 
-# ================== CONFIGURATION ==================
-STRESS_TIME=60          # Seconds per logical CPU
-CPU_METHOD="matrixprod" # matrixprod, fft, all, etc.
+# Default values
+STRESS_TIME=60
+CPU_METHOD="matrixprod"
 LOG_FILE="stress_test_log.txt"
 PROGRESS_FILE="stress_progress.txt"
-# ===================================================
+MODE="sequential"        # sequential, socket0, socket1
+ENABLE_TEMP=false
 
-echo "=== Generic Single-Logical-CPU Stress Test ==="
+# ================== Help ==================
+usage() {
+    cat <<EOF
+Usage: $0 [OPTIONS]
 
-# Auto-detect number of logical CPUs
-if command -v nproc &> /dev/null; then
-    TOTAL_CPUS=$(nproc --all)
-else
-    TOTAL_CPUS=$(grep -c '^processor' /proc/cpuinfo)
-fi
+Options:
+  --mode <mode>      Test mode: sequential, socket0, socket1 (default: sequential)
+  --time <seconds>   Stress duration per logical CPU (default: 60)
+  --method <name>    CPU stress method (matrixprod, fft, all, etc.) (default: matrixprod)
+  --temp             Enable temperature logging (--tz + sensors)
+  -h, --help         Show this help
 
-echo "Detected $TOTAL_CPUS logical CPUs"
-echo "Time per CPU: ${STRESS_TIME}s | Method: $CPU_METHOD"
-echo "Log: $LOG_FILE | Progress: $PROGRESS_FILE"
-echo "=================================================="
+Examples:
+  ./stress_single_cpu.sh --mode socket0 --time 45 --temp
+  ./stress_single_cpu.sh --mode socket1 --method fft
+  ./stress_single_cpu.sh --mode sequential
+EOF
+    exit 1
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --mode)    MODE="$2"; shift 2 ;;
+        --time)    STRESS_TIME="$2"; shift 2 ;;
+        --method)  CPU_METHOD="$2"; shift 2 ;;
+        --temp)    ENABLE_TEMP=true; shift ;;
+        -h|--help) usage ;;
+        *)         echo "Unknown option: $1"; usage ;;
+    esac
+done
+
+echo "=== Smart Single-CPU Stress Tester ==="
+
+# Auto-detection
+TOTAL_CPUS=$(nproc --all)
+SOCKETS=$(lscpu | grep -i "^Socket(s):" | awk '{print $2}' || echo 1)
+
+echo "Detected: $TOTAL_CPUS logical CPUs | $SOCKETS socket(s)"
+echo "Mode: $MODE | Time: ${STRESS_TIME}s | Method: $CPU_METHOD | Temp logging: $ENABLE_TEMP"
+echo "==================================================" | tee -a "$LOG_FILE"
 
 if ! command -v stress-ng &> /dev/null; then
     echo "Error: stress-ng is not installed!" >&2
-    echo "Install it first (apt/dnf/yum)." >&2
     exit 1
 fi
+
+# Determine CPU range
+if [ "$MODE" = "socket0" ]; then
+    START_CPU=0
+    END_CPU=$((TOTAL_CPUS / SOCKETS - 1))
+elif [ "$MODE" = "socket1" ]; then
+    START_CPU=$((TOTAL_CPUS / SOCKETS))
+    END_CPU=$((TOTAL_CPUS - 1))
+else
+    START_CPU=0
+    END_CPU=$((TOTAL_CPUS - 1))
+fi
+
+echo "Testing logical CPUs $START_CPU to $END_CPU" | tee -a "$LOG_FILE"
 
 # Resume support
 if [ -f "$PROGRESS_FILE" ]; then
     LAST_CPU=$(cat "$PROGRESS_FILE" | tr -d '[:space:]')
-    if [[ "$LAST_CPU" =~ ^[0-9]+$ ]] && [ "$LAST_CPU" -lt "$TOTAL_CPUS" ]; then
-        echo "Resuming from logical CPU $LAST_CPU"
+    if [[ "$LAST_CPU" =~ ^[0-9]+$ ]] && [ "$LAST_CPU" -ge "$START_CPU" ] && [ "$LAST_CPU" -le "$END_CPU" ]; then
+        echo "Resuming from logical CPU $LAST_CPU" | tee -a "$LOG_FILE"
         START_CPU=$LAST_CPU
-    else
-        START_CPU=0
     fi
-else
-    START_CPU=0
 fi
 
-echo "Starting from logical CPU $START_CPU" | tee -a "$LOG_FILE"
-
-for (( cpu=START_CPU; cpu<TOTAL_CPUS; cpu++ )); do
+for (( cpu=START_CPU; cpu<=END_CPU; cpu++ )); do
     TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$TIMESTAMP] Starting logical CPU $cpu / $TOTAL_CPUS" | tee -a "$LOG_FILE"
+    echo "[$TIMESTAMP] Starting logical CPU $cpu" | tee -a "$LOG_FILE"
 
     # Save progress BEFORE test
     echo "$cpu" > "$PROGRESS_FILE"
 
-    # Native stress-ng timeout (recommended)
-    if stress-ng \
-        --taskset "$cpu" \
-        --cpu 1 \
-        --cpu-method "$CPU_METHOD" \
-        --cpu-load 100 \
-        --timeout "${STRESS_TIME}s" \
-        --metrics-brief 2>&1 | tee -a "$LOG_FILE"; then
+    # Build stress-ng command
+    CMD="stress-ng --taskset $cpu --cpu 1 --cpu-method $CPU_METHOD --cpu-load 100 --timeout ${STRESS_TIME}s --metrics-brief"
 
-        echo "[$TIMESTAMP] Logical CPU $cpu completed successfully" | tee -a "$LOG_FILE"
-    else
-        echo "[$TIMESTAMP] Logical CPU $cpu FAILED (exit code $?)" | tee -a "$LOG_FILE"
+    if [ "$ENABLE_TEMP" = true ]; then
+        CMD="$CMD --tz"
+        # Optional: Show current sensors reading
+        echo "[$TIMESTAMP] Current temperatures:" | tee -a "$LOG_FILE"
+        sensors 2>/dev/null | tee -a "$LOG_FILE" || true
     fi
 
-    sleep 3   # cooldown
+    # Run the test
+    if $CMD 2>&1 | tee -a "$LOG_FILE"; then
+        echo "[$TIMESTAMP] Logical CPU $cpu → OK" | tee -a "$LOG_FILE"
+    else
+        echo "[$TIMESTAMP] Logical CPU $cpu → FAILED!" | tee -a "$LOG_FILE"
+    fi
+
+    sleep 3
 done
 
 rm -f "$PROGRESS_FILE"
-echo "=================================================="
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Test completed! All $TOTAL_CPUS logical CPUs done." | tee -a "$LOG_FILE"
+echo "[$TIMESTAMP] Test completed for range $START_CPU-$END_CPU" | tee -a "$LOG_FILE"
+echo "Full log: $LOG_FILE"
