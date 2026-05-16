@@ -18,3 +18,6 @@
 [2026-05-16T11:15:06Z] Updated base-install.sh shell alias provisioning: repo .aliases is copied to ~/.aliases, bash/zsh source it via managed rc blocks, fish sources generated ~/.aliases.fish, and uninstall removes the managed alias files.
 [2026-05-16T11:20:09Z] Added docs/cpu-test.md for test/cpu-test.sh: single-logical-CPU stress via stress-ng with socket0/socket1 modes, per-CPU timing, optional temperature logging, and local log/progress files.
 [2026-05-16T11:31:50Z] cpu-test.sh now uses a per-run log directory under /tmp by default, with optional --run-dir override for reusing the same log/progress state; docs/cpu-test.md was updated accordingly.
+[2026-05-16T14:58:29Z] base-install.sh now provisions the target user SSH authorized key and a passwordless sudoers drop-in when absent, alongside repo alias wiring and the existing base package/tooling setup.
+[2026-05-16T14:58:55Z] base-install.sh now adds the repo SSH authorized key for the target user, creates a passwordless sudoers drop-in when absent, and removes both managed access artifacts during uninstall.
+[2026-05-16T15:03:05Z] cpu-test.sh now writes stress_summary.txt in the per-run directory, updates it after each CPU, and flushes the run artifacts so a hang or power loss leaves a usable checkpoint.

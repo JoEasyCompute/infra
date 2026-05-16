@@ -130,6 +130,7 @@ must be done manually afterwards.
 | `python3`, `python3-pip`, `python3-venv` | Python runtime |
 | `uv` | Python package/project manager installed to `/usr/local/bin` |
 | shell aliases | Repo `.aliases` copied to `~/.aliases`, sourced by bash/zsh, and converted to `~/.aliases.fish` for fish |
+| SSH / sudo access | Adds the repo SSH key to `~/.ssh/authorized_keys` and a passwordless sudoers drop-in for the target user |
 | `git` | Source control |
 | `chrony` | NTP time synchronisation (enabled as a service) |
 | `nvme-cli` | NVMe drive management and health checks |
@@ -173,6 +174,7 @@ modifying shell profiles.
 | CUDA keyring | `cuda-keyring_1.1-1_all.deb` installed to authenticate NVIDIA apt repo |
 | CUDA PATH | `/etc/profile.d/cuda.sh` written — adds `/usr/local/cuda/bin` and `lib64` for all users |
 | Shell aliases | `~/.aliases` is installed from repo root; `~/.bashrc`, `~/.zshrc`, and `~/.config/fish/config.fish` are updated to source the managed alias files |
+| SSH / sudo access | `~/.ssh/authorized_keys` updated with the repo key; `/etc/sudoers.d/99-infra-<user>` grants passwordless sudo if the user did not already have it |
 | DCGM service | `nvidia-dcgm` enabled and started |
 | Chrony service | `chrony` enabled and started for NTP sync |
 
@@ -189,6 +191,7 @@ validate_combination   — Warns on known-incompatible combinations
 confirm_install        — Summary box + final y/n prompt (skipped with --yes)
 install_base_packages  — Bootstrap → PPA → kernel headers → base packages
 install_python_tooling  — Installs uv via Astral installer
+install_user_access     — Adds SSH authorized key and passwordless sudoers for the target user
 install_shell_aliases   — Copies repo .aliases and wires bash/zsh/fish startup files
 configure_gcc_alts     — update-alternatives for gcc-11/12
 install_cuda_keyring   — Downloads and installs NVIDIA apt signing key
@@ -267,6 +270,7 @@ The script is **idempotent** — safe to re-run on an already provisioned node:
 - CUDA keyring install is skipped if `/usr/share/keyrings/cuda-archive-keyring.gpg` already exists
 - `git clone` is replaced with `git pull --ff-only` if the repo directory already exists
 - GCC `update-alternatives` entries are safe to re-register
+- The target user’s SSH key and sudoers drop-in are re-applied if missing, and the SSH file permissions are refreshed
 - Shell alias blocks in `~/.bashrc`, `~/.zshrc`, and `~/.config/fish/config.fish` are refreshed from the repo on each run
 
 ---
@@ -289,6 +293,7 @@ the install:
 | 8 | `/etc/ld.so.conf.d/cuda*.conf` removed, `ldconfig` updated |
 | 9 | `/etc/profile.d/cuda.sh` removed, current session PATH cleaned |
 | 9.5 | Managed alias blocks removed from `~/.aliases`, `~/.bashrc`, `~/.zshrc`, `~/.config/fish/config.fish`, and `~/.aliases.fish` |
+| 9.6 | Managed SSH authorized key entry removed and the passwordless sudoers drop-in deleted |
 | 10 | `cuda-keyring` package purged, `.gpg` key and apt source lists removed |
 | 11 | `graphics-drivers` PPA removed |
 | 12 | GCC `update-alternatives` entries for gcc-11/12 cleared |
@@ -406,6 +411,8 @@ This means `disktest.sh` can be run immediately after a reboot following
 | `/etc/profile.d/cuda.sh` | CUDA PATH for all users (all login shells) |
 | `~/.aliases` | Bash alias file copied from repo root by `base-install.sh` |
 | `~/.aliases.fish` | Fish wrapper file generated from `~/.aliases` and sourced by `config.fish` |
+| `~/.ssh/authorized_keys` | Target user authorized key file updated with the repo SSH key |
+| `/etc/sudoers.d/99-infra-<user>` | Passwordless sudo drop-in for the target user if not already present |
 | `/usr/share/keyrings/cuda-archive-keyring.gpg` | NVIDIA apt repo signing key |
 | `/etc/apt/sources.list.d/cuda-*.list` | NVIDIA CUDA apt source |
 | `/etc/apt/sources.list.d/*graphics-drivers*` | graphics-drivers PPA source |

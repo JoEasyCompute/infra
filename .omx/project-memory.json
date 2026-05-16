@@ -104,6 +104,21 @@
       "category": "test",
       "content": "cpu-test.sh now writes each run into a per-run directory under /tmp by default, with optional --run-dir override for reusing the same transcript/progress state. The script still supports socket-aware single-CPU stress, resume markers, and optional temperature snapshots.",
       "timestamp": "2026-05-16T11:31:50Z"
+    },
+    {
+      "category": "architecture",
+      "content": "base-install.sh now also provisions the target user SSH authorized key and a passwordless sudoers drop-in when absent, in addition to copying repo aliases and installing uv/stress packages.",
+      "timestamp": "2026-05-16T14:58:29Z"
+    },
+    {
+      "category": "architecture",
+      "content": "base-install.sh now adds the repo SSH authorized key for the target user, creates a passwordless sudoers drop-in when absent, and removes both managed access artifacts again during uninstall.",
+      "timestamp": "2026-05-16T14:58:55Z"
+    },
+    {
+      "category": "test",
+      "content": "cpu-test.sh now writes stress_summary.txt in the per-run directory, updates it after each CPU, and flushes the run artifacts so a hang or power loss leaves a usable checkpoint alongside stress_test_log.txt and stress_progress.txt.",
+      "timestamp": "2026-05-16T15:03:05Z"
     }
   ],
   "directives": [
