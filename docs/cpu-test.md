@@ -24,6 +24,8 @@ The script:
 - writes logs and progress into a per-run directory under `/tmp`
 - can be pointed at an explicit run directory with `--run-dir` if you want to
   inspect or resume the same run later
+- writes a durable run summary file after each CPU and flushes run state so a
+  sudden hang or power loss still leaves a useful checkpoint
 
 The script requires `stress-ng` to be installed already. It does not auto-install
 dependencies.
@@ -82,9 +84,13 @@ Each run gets its own directory, by default under `/tmp`, containing:
 
 - `stress_test_log.txt` — console transcript
 - `stress_progress.txt` — last CPU index processed
+- `stress_summary.txt` — current CPU, pass/fail counts, and run metadata
 
 If you want to reuse the same directory for a later pass, supply
 `--run-dir /path/to/existing-run-dir`.
+
+The script updates `stress_summary.txt` after each CPU and syncs the run
+artifacts to reduce loss if the host crashes or loses power mid-test.
 
 ---
 

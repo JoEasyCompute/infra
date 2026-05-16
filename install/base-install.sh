@@ -328,13 +328,67 @@ install_python_tooling() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 5.6 — Shell aliases
+# STEP 5.6 — User access
+# ═══════════════════════════════════════════════════════════════
+install_user_access() {
+    section "User Access"
+
+    local target_user target_home target_group
+    target_user="${SUDO_USER:-${USER:-}}"
+    [[ -n "${target_user}" && "${target_user}" != "root" ]] || target_user="${USER:-root}"
+    target_home="$(getent passwd "${target_user}" 2>/dev/null | awk -F: '{print $6}' || true)"
+    [[ -n "${target_home}" ]] || target_home="${HOME:-/root}"
+    target_group="$(id -gn "${target_user}" 2>/dev/null || echo "${target_user}")"
+
+    if [[ "${target_user}" == "root" ]]; then
+        info "Target user is root — skipping SSH authorized key and sudoers changes"
+        return
+    fi
+
+    local ssh_dir authorized_keys access_key auth_tmp
+    ssh_dir="${target_home}/.ssh"
+    authorized_keys="${ssh_dir}/authorized_keys"
+    access_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG3WsgbyzKCqXrdZJyWiRA/SHPC1nGAfs6bvnj7K/PZ9 ezc@local'
+
+    sudo install -d -m 0700 -o "${target_user}" -g "${target_group}" "${ssh_dir}"
+    auth_tmp="$(mktemp)"
+    if [[ -f "${authorized_keys}" ]]; then
+        cat "${authorized_keys}" > "${auth_tmp}"
+    fi
+    if ! grep -Fxq "${access_key}" "${auth_tmp}"; then
+        printf '%s\n' "${access_key}" >> "${auth_tmp}"
+        success "Added SSH authorized key for ${target_user}"
+    else
+        success "SSH authorized key already present in ${authorized_keys}"
+    fi
+    sudo install -m 0600 -o "${target_user}" -g "${target_group}" "${auth_tmp}" "${authorized_keys}"
+    rm -f "${auth_tmp}"
+
+    local sudoers_file sudoers_line
+    sudoers_file="/etc/sudoers.d/99-infra-${target_user}"
+    sudoers_line="${target_user} ALL=(ALL) NOPASSWD:ALL"
+
+    if sudo -l -U "${target_user}" 2>/dev/null | grep -Eq 'NOPASSWD:[[:space:]]*ALL'; then
+        success "${target_user} already has passwordless sudo"
+    else
+        printf '%s\n' "${sudoers_line}" | sudo tee "${sudoers_file}" >/dev/null
+        sudo chown root:root "${sudoers_file}"
+        sudo chmod 0440 "${sudoers_file}"
+        sudo visudo -cf "${sudoers_file}" >/dev/null \
+            || error "sudoers validation failed for ${sudoers_file}"
+        success "Added passwordless sudoers drop-in for ${target_user}"
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════
+# STEP 5.7 — Shell aliases
 # ═══════════════════════════════════════════════════════════════
 install_shell_aliases() {
     section "Shell Aliases"
 
-    local repo_root target_user target_home target_group
+    local repo_root alias_source target_user target_home target_group
     repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    alias_source="${repo_root}/.aliases"
     [[ -f "${alias_source}" ]] || error "Repo alias file not found: ${alias_source}"
 
     target_user="${SUDO_USER:-${USER:-}}"
@@ -846,6 +900,36 @@ uninstall_node() {
     sudo rm -f "${fish_aliases}"
     success "Removed managed alias blocks and fish wrapper file"
 
+    # ── 9.6. Remove SSH authorized key and sudoers drop-in ─────
+    section "Removing User Access"
+    local access_key ssh_dir authorized_keys sudoers_file
+    access_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG3WsgbyzKCqXrdZJyWiRA/SHPC1nGAfs6bvnj7K/PZ9 ezc@local'
+    ssh_dir="${target_home}/.ssh"
+    authorized_keys="${ssh_dir}/authorized_keys"
+    sudoers_file="/etc/sudoers.d/99-infra-${target_user}"
+
+    if [[ -f "${authorized_keys}" ]]; then
+        local auth_tmp
+        auth_tmp="$(mktemp)"
+        awk -v key="${access_key}" '$0 != key { print }' "${authorized_keys}" > "${auth_tmp}"
+        if [[ -s "${auth_tmp}" ]]; then
+            sudo install -m 0600 -o "${target_user}" -g "${target_group}" "${auth_tmp}" "${authorized_keys}"
+        else
+            sudo rm -f "${authorized_keys}"
+        fi
+        rm -f "${auth_tmp}"
+        success "Removed managed SSH authorized key entry"
+    else
+        info "SSH authorized_keys not present — already clean"
+    fi
+
+    if [[ -f "${sudoers_file}" ]]; then
+        sudo rm -f "${sudoers_file}"
+        success "Removed passwordless sudoers drop-in"
+    else
+        info "Passwordless sudoers drop-in not present — already clean"
+    fi
+
     # ── 10. Remove CUDA apt keyring and sources ───────────────
     section "Removing CUDA Repo & Keyring"
     if dpkg -l cuda-keyring 2>/dev/null | grep -q '^ii'; then
@@ -992,6 +1076,7 @@ main() {
 
         install_base_packages
         install_python_tooling
+        install_user_access
         install_shell_aliases
         configure_gcc_alternatives
         install_cuda_keyring

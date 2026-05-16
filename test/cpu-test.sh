@@ -13,9 +13,12 @@ BASE_LOG_DIR="/tmp"
 RUN_DIR=""
 LOG_FILE=""
 PROGRESS_FILE=""
+SUMMARY_FILE=""
 MODE="sequential"        # sequential, socket0, socket1
 ENABLE_TEMP=false
 CPU_LIST=()
+PASS_COUNT=0
+FAIL_COUNT=0
 
 # ================== Help ==================
 usage() {
@@ -75,6 +78,67 @@ else
 fi
 LOG_FILE="${RUN_DIR}/stress_test_log.txt"
 PROGRESS_FILE="${RUN_DIR}/stress_progress.txt"
+SUMMARY_FILE="${RUN_DIR}/stress_summary.txt"
+
+write_summary() {
+    local current_cpu="$1"
+    local current_status="$2"
+    local cpu_list_csv
+    cpu_list_csv="$(IFS=,; echo "${CPU_LIST[*]}")"
+
+    python3 - "$SUMMARY_FILE" "$RUN_DIR" "$MODE" "$CPU_METHOD" "$STRESS_TIME" \
+        "$TOTAL_CPUS" "$SOCKETS" "$PASS_COUNT" "$FAIL_COUNT" "$current_cpu" \
+        "$current_status" "$cpu_list_csv" <<'PY'
+import os
+import sys
+
+(
+    summary_file,
+    run_dir,
+    mode,
+    cpu_method,
+    stress_time,
+    total_cpus,
+    sockets,
+    pass_count,
+    fail_count,
+    current_cpu,
+    current_status,
+    cpu_list_csv,
+) = sys.argv[1:]
+
+content = f"""cpu-test.sh run summary
+Run dir: {run_dir}
+Mode: {mode}
+Method: {cpu_method}
+Per-CPU runtime: {stress_time}s
+Detected logical CPUs: {total_cpus}
+Detected sockets: {sockets}
+Target CPUs: {cpu_list_csv}
+Pass count: {pass_count}
+Fail count: {fail_count}
+Current CPU: {current_cpu}
+Current status: {current_status}
+"""
+
+tmp_file = f"{summary_file}.tmp"
+with open(tmp_file, "w", encoding="utf-8") as handle:
+    handle.write(content)
+    handle.flush()
+    os.fsync(handle.fileno())
+
+os.replace(tmp_file, summary_file)
+dir_fd = os.open(os.path.dirname(summary_file) or ".", os.O_RDONLY)
+try:
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
+PY
+}
+
+flush_run_state() {
+    sync "$LOG_FILE" "$PROGRESS_FILE" "$SUMMARY_FILE" 2>/dev/null || sync || true
+}
 
 # Auto-detection
 TOTAL_CPUS=$(nproc --all)
@@ -94,6 +158,8 @@ echo "Detected: $TOTAL_CPUS logical CPUs | $SOCKETS socket(s)"
 echo "Mode: $MODE | Time: ${STRESS_TIME}s | Method: $CPU_METHOD | Temp logging: $ENABLE_TEMP"
 echo "Run dir: $RUN_DIR"
 echo "==================================================" | tee -a "$LOG_FILE"
+write_summary "not-started" "pending"
+flush_run_state
 
 if ! command -v stress-ng &> /dev/null; then
     echo "Error: stress-ng is not installed!" >&2
@@ -127,6 +193,8 @@ if [[ "${#CPU_LIST[@]}" -eq 0 ]]; then
 fi
 
 echo "Testing logical CPUs: ${CPU_LIST[*]}" | tee -a "$LOG_FILE"
+write_summary "not-started" "pending"
+flush_run_state
 
 # Resume support
 RESUME_CPU=""
@@ -180,13 +248,21 @@ for (( idx=START_INDEX; idx<${#CPU_LIST[@]}; idx++ )); do
     # Run the test
     if "${stress_cmd[@]}" 2>&1 | tee -a "$LOG_FILE"; then
         echo "[$TIMESTAMP] Logical CPU $cpu → OK" | tee -a "$LOG_FILE"
+        ((PASS_COUNT++))
+        write_summary "$cpu" "pass"
     else
         echo "[$TIMESTAMP] Logical CPU $cpu → FAILED!" | tee -a "$LOG_FILE"
+        ((FAIL_COUNT++))
+        write_summary "$cpu" "fail"
     fi
+    flush_run_state
 
     sleep 3
 done
 
 rm -f "$PROGRESS_FILE"
+write_summary "complete" "done"
+flush_run_state
 echo "[$TIMESTAMP] Test completed for CPUs: ${CPU_LIST[*]}" | tee -a "$LOG_FILE"
+echo "Summary: ${SUMMARY_FILE}" | tee -a "$LOG_FILE"
 echo "Full log: $LOG_FILE"
