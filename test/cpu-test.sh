@@ -9,10 +9,13 @@ set -euo pipefail
 # Default values
 STRESS_TIME=60
 CPU_METHOD="matrixprod"
-LOG_FILE="stress_test_log.txt"
-PROGRESS_FILE="stress_progress.txt"
+BASE_LOG_DIR="/tmp"
+RUN_DIR=""
+LOG_FILE=""
+PROGRESS_FILE=""
 MODE="sequential"        # sequential, socket0, socket1
 ENABLE_TEMP=false
+CPU_LIST=()
 
 # ================== Help ==================
 usage() {
@@ -23,23 +26,25 @@ Options:
   --mode <mode>      Test mode: sequential, socket0, socket1 (default: sequential)
   --time <seconds>   Stress duration per logical CPU (default: 60)
   --method <name>    CPU stress method (matrixprod, fft, all, etc.) (default: matrixprod)
+  --run-dir <path>   Log/progress directory for this run (default: auto-created under /tmp)
   --temp             Enable temperature logging (--tz + sensors)
   -h, --help         Show this help
 
 Examples:
-  ./stress_single_cpu.sh --mode socket0 --time 45 --temp
-  ./stress_single_cpu.sh --mode socket1 --method fft
-  ./stress_single_cpu.sh --mode sequential
+  ./test/cpu-test.sh --mode socket0 --time 45 --temp
+  ./test/cpu-test.sh --mode socket1 --method fft
+  ./test/cpu-test.sh --mode sequential
 EOF
-    exit 1
+    exit 0
 }
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --mode)    MODE="$2"; shift 2 ;;
-        --time)    STRESS_TIME="$2"; shift 2 ;;
-        --method)  CPU_METHOD="$2"; shift 2 ;;
+        --mode)    MODE="${2:-}"; shift 2 ;;
+        --time)    STRESS_TIME="${2:-}"; shift 2 ;;
+        --method)  CPU_METHOD="${2:-}"; shift 2 ;;
+        --run-dir) RUN_DIR="${2:-}"; shift 2 ;;
         --temp)    ENABLE_TEMP=true; shift ;;
         -h|--help) usage ;;
         *)         echo "Unknown option: $1"; usage ;;
@@ -48,12 +53,46 @@ done
 
 echo "=== Smart Single-CPU Stress Tester ==="
 
+case "$MODE" in
+    sequential|socket0|socket1) ;;
+    *) echo "Error: invalid --mode '$MODE' (expected sequential, socket0, or socket1)" >&2; exit 1 ;;
+esac
+
+if ! [[ "$STRESS_TIME" =~ ^[0-9]+$ ]] || [[ "$STRESS_TIME" -le 0 ]]; then
+    echo "Error: --time must be a positive integer number of seconds" >&2
+    exit 1
+fi
+
+if [[ -z "$CPU_METHOD" ]]; then
+    echo "Error: --method must not be empty" >&2
+    exit 1
+fi
+
+if [[ -n "$RUN_DIR" ]]; then
+    mkdir -p "$RUN_DIR"
+else
+    RUN_DIR="$(mktemp -d -p "$BASE_LOG_DIR" cpu-test.XXXXXXXX)"
+fi
+LOG_FILE="${RUN_DIR}/stress_test_log.txt"
+PROGRESS_FILE="${RUN_DIR}/stress_progress.txt"
+
 # Auto-detection
 TOTAL_CPUS=$(nproc --all)
-SOCKETS=$(lscpu | grep -i "^Socket(s):" | awk '{print $2}' || echo 1)
+mapfile -t CPU_SOCKET_LINES < <(lscpu -p=CPU,SOCKET | grep -v '^#' || true)
+if [[ "${#CPU_SOCKET_LINES[@]}" -eq 0 ]]; then
+    echo "Error: unable to read CPU/socket topology from lscpu" >&2
+    exit 1
+fi
+mapfile -t SOCKET_IDS < <(
+    printf '%s\n' "${CPU_SOCKET_LINES[@]}" \
+        | awk -F, '{print $2}' \
+        | sort -n -u
+)
+SOCKETS="${#SOCKET_IDS[@]}"
 
 echo "Detected: $TOTAL_CPUS logical CPUs | $SOCKETS socket(s)"
 echo "Mode: $MODE | Time: ${STRESS_TIME}s | Method: $CPU_METHOD | Temp logging: $ENABLE_TEMP"
+echo "Run dir: $RUN_DIR"
 echo "==================================================" | tee -a "$LOG_FILE"
 
 if ! command -v stress-ng &> /dev/null; then
@@ -61,30 +100,56 @@ if ! command -v stress-ng &> /dev/null; then
     exit 1
 fi
 
-# Determine CPU range
-if [ "$MODE" = "socket0" ]; then
-    START_CPU=0
-    END_CPU=$((TOTAL_CPUS / SOCKETS - 1))
-elif [ "$MODE" = "socket1" ]; then
-    START_CPU=$((TOTAL_CPUS / SOCKETS))
-    END_CPU=$((TOTAL_CPUS - 1))
-else
-    START_CPU=0
-    END_CPU=$((TOTAL_CPUS - 1))
+if [[ "$MODE" == "socket1" && "$SOCKETS" -lt 2 ]]; then
+    echo "Error: --mode socket1 requested, but only ${SOCKETS} socket(s) were detected" >&2
+    exit 1
 fi
 
-echo "Testing logical CPUs $START_CPU to $END_CPU" | tee -a "$LOG_FILE"
+for line in "${CPU_SOCKET_LINES[@]}"; do
+    IFS=, read -r cpu socket <<< "$line"
+    [[ "$cpu" =~ ^[0-9]+$ ]] || continue
+    case "$MODE" in
+        sequential)
+            CPU_LIST+=("$cpu")
+            ;;
+        socket0)
+            [[ "$socket" == "0" ]] && CPU_LIST+=("$cpu")
+            ;;
+        socket1)
+            [[ "$socket" == "1" ]] && CPU_LIST+=("$cpu")
+            ;;
+    esac
+done
+
+if [[ "${#CPU_LIST[@]}" -eq 0 ]]; then
+    echo "Error: no logical CPUs matched mode '$MODE'" >&2
+    exit 1
+fi
+
+echo "Testing logical CPUs: ${CPU_LIST[*]}" | tee -a "$LOG_FILE"
 
 # Resume support
+RESUME_CPU=""
 if [ -f "$PROGRESS_FILE" ]; then
     LAST_CPU=$(cat "$PROGRESS_FILE" | tr -d '[:space:]')
-    if [[ "$LAST_CPU" =~ ^[0-9]+$ ]] && [ "$LAST_CPU" -ge "$START_CPU" ] && [ "$LAST_CPU" -le "$END_CPU" ]; then
+    if [[ "$LAST_CPU" =~ ^[0-9]+$ ]]; then
         echo "Resuming from logical CPU $LAST_CPU" | tee -a "$LOG_FILE"
-        START_CPU=$LAST_CPU
+        RESUME_CPU="$LAST_CPU"
     fi
 fi
 
-for (( cpu=START_CPU; cpu<=END_CPU; cpu++ )); do
+START_INDEX=0
+if [[ -n "$RESUME_CPU" ]]; then
+    for idx in "${!CPU_LIST[@]}"; do
+        if [[ "${CPU_LIST[$idx]}" == "$RESUME_CPU" ]]; then
+            START_INDEX="$idx"
+            break
+        fi
+    done
+fi
+
+for (( idx=START_INDEX; idx<${#CPU_LIST[@]}; idx++ )); do
+    cpu="${CPU_LIST[$idx]}"
     TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[$TIMESTAMP] Starting logical CPU $cpu" | tee -a "$LOG_FILE"
 
@@ -92,17 +157,28 @@ for (( cpu=START_CPU; cpu<=END_CPU; cpu++ )); do
     echo "$cpu" > "$PROGRESS_FILE"
 
     # Build stress-ng command
-    CMD="stress-ng --taskset $cpu --cpu 1 --cpu-method $CPU_METHOD --cpu-load 100 --timeout ${STRESS_TIME}s --metrics-brief"
+    stress_cmd=(
+        stress-ng
+        --taskset "$cpu"
+        --cpu 1
+        --cpu-method "$CPU_METHOD"
+        --cpu-load 100
+        --timeout "${STRESS_TIME}s"
+        --metrics-brief
+    )
 
     if [ "$ENABLE_TEMP" = true ]; then
-        CMD="$CMD --tz"
-        # Optional: Show current sensors reading
-        echo "[$TIMESTAMP] Current temperatures:" | tee -a "$LOG_FILE"
-        sensors 2>/dev/null | tee -a "$LOG_FILE" || true
+        stress_cmd+=(--tz)
+        if command -v sensors &> /dev/null; then
+            echo "[$TIMESTAMP] Current temperatures:" | tee -a "$LOG_FILE"
+            sensors 2>/dev/null | tee -a "$LOG_FILE" || true
+        else
+            echo "[$TIMESTAMP] Temperature logging requested, but 'sensors' is not installed" | tee -a "$LOG_FILE"
+        fi
     fi
 
     # Run the test
-    if $CMD 2>&1 | tee -a "$LOG_FILE"; then
+    if "${stress_cmd[@]}" 2>&1 | tee -a "$LOG_FILE"; then
         echo "[$TIMESTAMP] Logical CPU $cpu → OK" | tee -a "$LOG_FILE"
     else
         echo "[$TIMESTAMP] Logical CPU $cpu → FAILED!" | tee -a "$LOG_FILE"
@@ -112,5 +188,5 @@ for (( cpu=START_CPU; cpu<=END_CPU; cpu++ )); do
 done
 
 rm -f "$PROGRESS_FILE"
-echo "[$TIMESTAMP] Test completed for range $START_CPU-$END_CPU" | tee -a "$LOG_FILE"
+echo "[$TIMESTAMP] Test completed for CPUs: ${CPU_LIST[*]}" | tee -a "$LOG_FILE"
 echo "Full log: $LOG_FILE"
