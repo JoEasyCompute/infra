@@ -21,3 +21,5 @@
 [2026-05-16T14:58:29Z] base-install.sh now provisions the target user SSH authorized key and a passwordless sudoers drop-in when absent, alongside repo alias wiring and the existing base package/tooling setup.
 [2026-05-16T14:58:55Z] base-install.sh now adds the repo SSH authorized key for the target user, creates a passwordless sudoers drop-in when absent, and removes both managed access artifacts during uninstall.
 [2026-05-16T15:03:05Z] cpu-test.sh now writes stress_summary.txt in the per-run directory, updates it after each CPU, and flushes the run artifacts so a hang or power loss leaves a usable checkpoint.
+[2026-05-19T07:24:50Z] cpu-test.sh now stresses one CPU/socket at a time using all local logical threads, stores reboot-survivable checkpoints under /var/tmp by default, supports --status for post-reboot inspection, and supports --reset-state to clear residue before retesting.
+[2026-05-19T07:27:38Z] cpu-test.sh now supports both socket-level and per-thread targeting via --granularity socket|thread. Socket remains the default; thread restores the old one-logical-CPU-at-a-time mode with the same checkpoint and reset workflow.

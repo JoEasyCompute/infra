@@ -119,6 +119,16 @@
       "category": "test",
       "content": "cpu-test.sh now writes stress_summary.txt in the per-run directory, updates it after each CPU, and flushes the run artifacts so a hang or power loss leaves a usable checkpoint alongside stress_test_log.txt and stress_progress.txt.",
       "timestamp": "2026-05-16T15:03:05Z"
+    },
+    {
+      "category": "test",
+      "content": "cpu-test.sh now operates at the CPU socket/package level instead of one logical thread at a time: each socket target runs stress-ng across all logical CPUs on that socket, defaults its run directory to /var/tmp for reboot-survivable checkpoints, supports --status to inspect saved state, and supports --reset-state to clear residue before retesting.",
+      "timestamp": "2026-05-19T07:24:50Z"
+    },
+    {
+      "category": "test",
+      "content": "cpu-test.sh now supports both socket-level and per-thread targeting via --granularity socket|thread. Socket remains the default for package-level fault isolation, while thread restores the one-logical-CPU-at-a-time mode with the same run-dir, --status, and --reset-state crash/retest workflow.",
+      "timestamp": "2026-05-19T07:27:38Z"
     }
   ],
   "directives": [
