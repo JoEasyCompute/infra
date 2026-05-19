@@ -129,6 +129,11 @@
       "category": "test",
       "content": "cpu-test.sh now supports both socket-level and per-thread targeting via --granularity socket|thread. Socket remains the default for package-level fault isolation, while thread restores the one-logical-CPU-at-a-time mode with the same run-dir, --status, and --reset-state crash/retest workflow.",
       "timestamp": "2026-05-19T07:27:38Z"
+    },
+    {
+      "category": "test",
+      "content": "cpu-test.sh now defaults its state directory to /var/tmp/cpu-test, supports --status without requiring --run-dir, supports --reset-status to clear summary/progress and exit without testing, and no longer stops after the first successful target because the pass/fail counters were changed to avoid set -e arithmetic-status exits.",
+      "timestamp": "2026-05-19T07:42:27Z"
     }
   ],
   "directives": [

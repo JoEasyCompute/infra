@@ -36,11 +36,14 @@ The script:
 - supports `--granularity thread` to retain the old individual logical CPU mode
 - optionally logs temperatures with `sensors` and `--tz`
 - writes run state into a per-run directory under `/var/tmp` by default
+- uses `/var/tmp/cpu-test` as the default run/status directory unless `--run-dir` is provided
 - keeps a durable summary and progress marker so a crash/reboot still leaves a
   useful checkpoint
 - supports `--status` so you can inspect the saved state after reboot
 - supports `--reset-state` so you can clear prior resume/status files before
   re-testing in the same run directory
+- supports `--reset-status` so you can clear saved status files and exit without
+  starting a new test
 
 The script requires `stress-ng` to be installed already. It does not auto-install
 dependencies.
@@ -61,9 +64,10 @@ dependencies.
 | `--granularity <g>` | `socket` | `socket` for package-level testing, `thread` for one logical CPU at a time |
 | `--time <seconds>` | `60` | Stress duration per CPU/socket test |
 | `--method <name>` | `matrixprod` | `stress-ng` CPU method, such as `matrixprod` or `fft` |
-| `--run-dir <path>` | auto-created under `/var/tmp` | Directory for logs and state files |
+| `--run-dir <path>` | `/var/tmp/cpu-test` | Directory for logs and state files |
 | `--status` | off | Show the saved summary/progress from `--run-dir` and exit |
 | `--reset-state` | off | Clear previous progress/summary state in `--run-dir` before re-testing |
+| `--reset-status` | off | Clear saved progress/summary state in `--run-dir` and exit |
 | `--temp` | off | Enable temperature logging with `sensors` and `--tz` |
 | `-h, --help` | — | Show help and exit |
 
@@ -122,7 +126,13 @@ sudo ./test/cpu-test.sh \
 
 ## Logs and Run State
 
-Each run gets its own directory, by default under `/var/tmp`, containing:
+The script stores state in a run directory, by default:
+
+```bash
+/var/tmp/cpu-test
+```
+
+That directory contains:
 
 - `stress_test_log.txt` — console transcript
 - `stress_progress.txt` — current socket target label for resume (`socket0`, `socket1`, etc.)
@@ -154,6 +164,12 @@ You can also inspect the saved state directly through the script:
 sudo ./test/cpu-test.sh --run-dir /var/tmp/cpu-test-socket0 --status
 ```
 
+Without flags, status is read from the default directory:
+
+```bash
+sudo ./test/cpu-test.sh --status
+```
+
 ---
 
 ## Clearing Residue State for Re-Testing
@@ -166,6 +182,13 @@ sudo ./test/cpu-test.sh --run-dir /var/tmp/cpu-test-socket0 --reset-state --mode
 ```
 
 `--reset-state` clears the old state files before the new run begins.
+
+If you only want to clear saved status and exit without starting a new test:
+
+```bash
+sudo ./test/cpu-test.sh --reset-status
+sudo ./test/cpu-test.sh --run-dir /var/tmp/cpu-test-socket0 --reset-status
+```
 
 ---
 

@@ -9,7 +9,7 @@ set -euo pipefail
 
 STRESS_TIME=60
 CPU_METHOD="matrixprod"
-BASE_LOG_DIR="/var/tmp"
+DEFAULT_RUN_DIR="/var/tmp/cpu-test"
 GRANULARITY="socket"
 RUN_DIR=""
 LOG_FILE=""
@@ -18,6 +18,7 @@ SUMMARY_FILE=""
 MODE="sequential"        # sequential, socket0, socket1
 ENABLE_TEMP=false
 RESET_STATE=false
+RESET_STATUS_ONLY=false
 STATUS_ONLY=false
 TOTAL_CPUS=0
 SOCKETS=0
@@ -35,8 +36,9 @@ Options:
   --granularity <g>  Target type: socket or thread (default: socket)
   --time <seconds>   Stress duration per target test (default: 60)
   --method <name>    CPU stress method (matrixprod, fft, all, etc.) (default: matrixprod)
-  --run-dir <path>   Log/progress directory for this run (default: auto-created under /var/tmp)
+  --run-dir <path>   Log/progress directory for this run (default: /var/tmp/cpu-test)
   --reset-state      Clear prior progress/summary state in --run-dir before testing
+  --reset-status     Clear prior progress/summary state in the target run dir and exit
   --status           Show the saved summary/progress from --run-dir and exit
   --temp             Enable temperature logging (--tz + sensors)
   -h, --help         Show this help
@@ -46,7 +48,8 @@ Examples:
   ./test/cpu-test.sh --mode socket0 --time 300 --temp
   ./test/cpu-test.sh --mode sequential --granularity thread
   ./test/cpu-test.sh --mode socket1 --run-dir /var/tmp/cpu-test-socket1 --reset-state
-  ./test/cpu-test.sh --run-dir /var/tmp/cpu-test-socket1 --status
+  ./test/cpu-test.sh --status
+  ./test/cpu-test.sh --reset-status
 EOF
     exit 0
 }
@@ -233,6 +236,7 @@ while [[ $# -gt 0 ]]; do
         --method) CPU_METHOD="${2:-}"; shift 2 ;;
         --run-dir) RUN_DIR="${2:-}"; shift 2 ;;
         --reset-state) RESET_STATE=true; shift ;;
+        --reset-status) RESET_STATUS_ONLY=true; shift ;;
         --status) STATUS_ONLY=true; shift ;;
         --temp) ENABLE_TEMP=true; shift ;;
         -h|--help) usage ;;
@@ -265,20 +269,27 @@ if [[ "$RESET_STATE" == true && -z "$RUN_DIR" ]]; then
     exit 1
 fi
 
-if [[ "$STATUS_ONLY" == true && -z "$RUN_DIR" ]]; then
-    echo "Error: --status requires --run-dir" >&2
+if [[ "$RESET_STATE" == true && "$RESET_STATUS_ONLY" == true ]]; then
+    echo "Error: use either --reset-state or --reset-status, not both" >&2
     exit 1
 fi
 
 if [[ -n "$RUN_DIR" ]]; then
     mkdir -p "$RUN_DIR"
 else
-    RUN_DIR="$(mktemp -d -p "$BASE_LOG_DIR" cpu-test.XXXXXXXX)"
+    RUN_DIR="$DEFAULT_RUN_DIR"
+    mkdir -p "$RUN_DIR"
 fi
 
 LOG_FILE="${RUN_DIR}/stress_test_log.txt"
 PROGRESS_FILE="${RUN_DIR}/stress_progress.txt"
 SUMMARY_FILE="${RUN_DIR}/stress_summary.txt"
+
+if [[ "$RESET_STATUS_ONLY" == true ]]; then
+    rm -f "$PROGRESS_FILE" "$SUMMARY_FILE"
+    echo "Cleared status files in $RUN_DIR"
+    exit 0
+fi
 
 if [[ "$STATUS_ONLY" == true ]]; then
     if [[ -f "$SUMMARY_FILE" ]]; then
@@ -370,11 +381,11 @@ for (( idx=START_INDEX; idx<${#TARGET_LABELS[@]}; idx++ )); do
 
     if "${stress_cmd[@]}" 2>&1 | tee -a "$LOG_FILE"; then
         append_log "[$TIMESTAMP] ${target_label} → OK"
-        ((PASS_COUNT++))
+        PASS_COUNT=$((PASS_COUNT + 1))
         write_summary "$target_label" "pass" "$cpuset"
     else
         append_log "[$TIMESTAMP] ${target_label} → FAILED!"
-        ((FAIL_COUNT++))
+        FAIL_COUNT=$((FAIL_COUNT + 1))
         write_summary "$target_label" "fail" "$cpuset"
     fi
     flush_run_state
