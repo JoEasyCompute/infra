@@ -1,0 +1,10 @@
+[Unit]
+Description=Replicate EFI System Partition to standby drives
+ConditionPathIsMountPoint=/boot/efi
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sync-esp.sh
+Nice=10
+IOSchedulingClass=idle
