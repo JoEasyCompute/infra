@@ -144,6 +144,11 @@
       "category": "architecture",
       "content": "Added install/install-raid.sh as an opt-in RAID / ESP redundancy installer. By default it stages the RAID helper scripts only; --activate is required to install and enable the apt hook and systemd timer/service, and non-RAID hosts remain unaffected unless the lane is explicitly activated. Documented the lane in docs/project-decisions.md, README.md, and install/raid/INSTALL.md.",
       "timestamp": "2026-05-20T17:49:43Z"
+    },
+    {
+      "category": "test",
+      "content": "cpu-test.sh default runtime is 300 seconds per target, docs/cpu-test.md now matches that default, and the help/status paths were re-verified. No active saved run state currently exists under /var/tmp/cpu-test.",
+      "timestamp": "2026-05-20T18:03:40Z"
     }
   ],
   "directives": [

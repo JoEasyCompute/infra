@@ -27,3 +27,5 @@
 [2026-05-19T07:51:23Z] cpu-test.sh default runtime is now 300 seconds per target instead of 60, with the existing socket/thread targeting and status/reset workflow unchanged.
 
 [2026-05-20T17:49:43Z] Added optional RAID / ESP redundancy lane: install/install-raid.sh stages helper scripts by default, requires --activate for apt hook + systemd units, and keeps non-RAID hosts unaffected. Updated README, docs/project-decisions.md, install/raid/INSTALL.md, and refreshed project memory.
+
+[2026-05-20T18:03:40Z] cpu-test.sh default runtime was increased to 300 seconds per target, and docs/cpu-test.md was updated to match. Verified with bash -n, --help, and --status; no active run state currently exists in /var/tmp/cpu-test.

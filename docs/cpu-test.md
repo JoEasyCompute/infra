@@ -62,7 +62,7 @@ dependencies.
 |---|---|---|
 | `--mode <mode>` | `sequential` | `sequential`, `socket0`, or `socket1` |
 | `--granularity <g>` | `socket` | `socket` for package-level testing, `thread` for one logical CPU at a time |
-| `--time <seconds>` | `60` | Stress duration per CPU/socket test |
+| `--time <seconds>` | `300` | Stress duration per CPU/socket test |
 | `--method <name>` | `matrixprod` | `stress-ng` CPU method, such as `matrixprod` or `fft` |
 | `--run-dir <path>` | `/var/tmp/cpu-test` | Directory for logs and state files |
 | `--status` | off | Show the saved summary/progress from `--run-dir` and exit |
