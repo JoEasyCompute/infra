@@ -54,6 +54,15 @@ Current behavior in `fulltest.sh`:
 - warns early if build trees or cloned repos are root-owned or otherwise unwritable
 - gives ownership-fix guidance before later rebuild / clean steps fail more opaquely
 
+### 4. RAID / ESP redundancy is an opt-in install lane
+
+Current behavior:
+
+- `install/install-raid.sh` stages the RAID helper scripts by default
+- `--activate` is required before the apt hook and systemd timer/service are installed
+- non-RAID hosts are unaffected unless an operator explicitly activates the lane
+- activation is intended for UEFI hosts with multiple ESPs; the installer blocks the common non-RAID case by default
+
 ---
 
 ## Operator Notes
@@ -107,4 +116,5 @@ This script has mocked verification evidence for the prepare-then-run flow, but 
 
 - Use `test/fulltest.sh` for current real validation work.
 - Use `test/gpu-fulltest-v2.sh` only for experimental flow evaluation.
+- Use `install/install-raid.sh` only when the host actually has a multi-disk ESP / RAID boot layout, and leave it in stage-only mode on ordinary hosts.
 - Keep changes to validation scripts small and evidence-driven unless working in the experimental lane.

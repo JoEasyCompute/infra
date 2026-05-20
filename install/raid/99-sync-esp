@@ -1,0 +1,12 @@
+// /etc/apt/apt.conf.d/99-sync-esp
+//
+// Replicate the EFI System Partition to all standby ESPs after any
+// apt operation. The sync script is idempotent and fast on unchanged
+// data (rsync), so running it after every apt invoke is cheap and
+// guarantees we never miss a grub-* or shim-signed upgrade.
+//
+// The `|| true` ensures a sync failure never blocks an apt run.
+
+DPkg::Post-Invoke {
+    "if [ -x /usr/local/sbin/sync-esp.sh ]; then /usr/local/sbin/sync-esp.sh >/dev/null 2>&1 || true; fi";
+};

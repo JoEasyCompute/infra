@@ -134,6 +134,16 @@
       "category": "test",
       "content": "cpu-test.sh now defaults its state directory to /var/tmp/cpu-test, supports --status without requiring --run-dir, supports --reset-status to clear summary/progress and exit without testing, and no longer stops after the first successful target because the pass/fail counters were changed to avoid set -e arithmetic-status exits.",
       "timestamp": "2026-05-19T07:42:27Z"
+    },
+    {
+      "category": "test",
+      "content": "cpu-test.sh now defaults to 300 seconds per target instead of 60 seconds, while retaining socket-level default targeting, optional per-thread granularity, stable /var/tmp/cpu-test status storage, and reset/status workflows.",
+      "timestamp": "2026-05-19T07:51:23Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Added install/install-raid.sh as an opt-in RAID / ESP redundancy installer. By default it stages the RAID helper scripts only; --activate is required to install and enable the apt hook and systemd timer/service, and non-RAID hosts remain unaffected unless the lane is explicitly activated. Documented the lane in docs/project-decisions.md, README.md, and install/raid/INSTALL.md.",
+      "timestamp": "2026-05-20T17:49:43Z"
     }
   ],
   "directives": [

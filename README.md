@@ -43,6 +43,7 @@ Current platform status:
 │   ├── amd-base-install.sh     # AMDGPU + ROCm base installer
 │   ├── gpu-power-limit.sh      # Persistent NVIDIA power-limit service installer
 │   ├── manage-gpu.sh           # Bind selected NVIDIA GPU slots to vfio-pci at boot
+│   ├── install-raid.sh         # Optional RAID / ESP redundancy installer
 │   ├── install-p2p-driver.sh   # Experimental Tinygrad P2P driver flow
 │   └── backup/                 # Legacy / archived helper scripts
 ├── test/
@@ -431,6 +432,8 @@ The `docs/` files are intended to answer:
 - deep implementation details
 - platform-specific notes
 - troubleshooting at the individual script level
+
+For repo-level decision history and current stable/experimental lanes, see [docs/project-decisions.md](/Users/josephcheung/Desktop/dev/infra/docs/project-decisions.md).
 
 ## Legacy Material
 

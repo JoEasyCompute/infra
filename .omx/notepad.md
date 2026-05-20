@@ -24,3 +24,6 @@
 [2026-05-19T07:24:50Z] cpu-test.sh now stresses one CPU/socket at a time using all local logical threads, stores reboot-survivable checkpoints under /var/tmp by default, supports --status for post-reboot inspection, and supports --reset-state to clear residue before retesting.
 [2026-05-19T07:27:38Z] cpu-test.sh now supports both socket-level and per-thread targeting via --granularity socket|thread. Socket remains the default; thread restores the old one-logical-CPU-at-a-time mode with the same checkpoint and reset workflow.
 [2026-05-19T07:42:27Z] cpu-test.sh now defaults to /var/tmp/cpu-test for state, supports --status and --reset-status without requiring --run-dir, and no longer exits after the first successful target because the pass/fail counter updates were made set -e safe.
+[2026-05-19T07:51:23Z] cpu-test.sh default runtime is now 300 seconds per target instead of 60, with the existing socket/thread targeting and status/reset workflow unchanged.
+
+[2026-05-20T17:49:43Z] Added optional RAID / ESP redundancy lane: install/install-raid.sh stages helper scripts by default, requires --activate for apt hook + systemd units, and keeps non-RAID hosts unaffected. Updated README, docs/project-decisions.md, install/raid/INSTALL.md, and refreshed project memory.
