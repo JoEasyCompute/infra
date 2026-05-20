@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-STRESS_TIME=60
+STRESS_TIME=300
 CPU_METHOD="matrixprod"
 DEFAULT_RUN_DIR="/var/tmp/cpu-test"
 GRANULARITY="socket"
@@ -34,7 +34,7 @@ Usage: $0 [OPTIONS]
 Options:
   --mode <mode>      Test mode: sequential, socket0, socket1 (default: sequential)
   --granularity <g>  Target type: socket or thread (default: socket)
-  --time <seconds>   Stress duration per target test (default: 60)
+  --time <seconds>   Stress duration per target test (default: 300)
   --method <name>    CPU stress method (matrixprod, fft, all, etc.) (default: matrixprod)
   --run-dir <path>   Log/progress directory for this run (default: /var/tmp/cpu-test)
   --reset-state      Clear prior progress/summary state in --run-dir before testing
