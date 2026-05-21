@@ -26,6 +26,12 @@ This file is intended to help operators and future contributors understand the c
   - Used as the safe lane for structural refactors to GPU validation flow.
   - Should be validated on real GPU hosts before replacing `test/fulltest.sh`.
 
+- Ubuntu 26.04 support
+  - `install/base-install.sh` now accepts Ubuntu 26.04 via the `ubuntu2604` CUDA repo codename.
+  - `install/amd-base-install.sh` accepts Ubuntu 26.04 as a preview lane using AMD's 31.30 driver repo and `amdrocm7.13`.
+  - Treat the AMD 26.04 path as experimental until it has been validated on real hardware.
+  - `install/amd-stack-pin.sh` is the operator-facing helper for inspecting or restoring the AMD ROCm apt pin.
+
 ---
 
 ## Current Decisions
@@ -62,6 +68,18 @@ Current behavior:
 - `--activate` is required before the apt hook and systemd timer/service are installed
 - non-RAID hosts are unaffected unless an operator explicitly activates the lane
 - activation is intended for UEFI hosts with multiple ESPs; the installer blocks the common non-RAID case by default
+
+### 5. NVIDIA stack freezing is explicit, not automatic
+
+Current behavior:
+
+- `base-install.sh` warns if held NVIDIA/CUDA packages already exist
+- the validated stack can be frozen with `install/nvidia-stack-hold.sh --hold`
+- `base-install.sh --unfreeze-gpu-stack` temporarily removes holds, performs the install/update, validates, and then re-freezes the result
+- the default install path does not silently remove holds
+- `install/provision.sh` passes `--freeze-gpu-stack` and `--unfreeze-gpu-stack` through to the NVIDIA stage-1 install
+- AMD orchestration accepts the same flags for CLI symmetry, but the AMD stack is governed by repo pinning rather than apt-mark holds
+- `install/amd-stack-pin.sh --status` shows the active ROCm pin and `--reset` restores the expected pin file
 
 ---
 

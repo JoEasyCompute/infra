@@ -71,6 +71,8 @@ NON_INTERACTIVE=false
 WITH_COMPOSE=false
 FORCE_VG=""
 FORCE_DISK=""
+FREEZE_GPU_STACK=false
+UNFREEZE_GPU_STACK=false
 RESET_STATE=false
 RESUME=false        # set internally by the systemd resume service
 
@@ -85,6 +87,8 @@ Options:
   --with-compose        Install Docker Compose (passed to docker-install.sh)
   --vg <vgname>         Pass VG selection to docker-install.sh
   --disk /dev/sdX       Pass disk selection to docker-install.sh
+  --freeze-gpu-stack    Hold the validated NVIDIA/CUDA stack after stage1
+  --unfreeze-gpu-stack  Temporarily unhold NVIDIA/CUDA packages before stage1, then re-hold after validation
   --reset-state         Wipe provision state and restart from stage1
   --resume              Internal: called by provision-resume.service on boot
   --status              Show current provisioning state and exit
@@ -94,6 +98,8 @@ Examples:
   sudo $0                           # interactive full provision
   sudo $0 --non-interactive         # automated (cloud-init / Ansible)
   sudo $0 --non-interactive --with-compose --vg ubuntu-vg
+  sudo $0 --freeze-gpu-stack        # freeze validated NVIDIA packages after stage1
+  sudo $0 --unfreeze-gpu-stack      # temporarily unfreeze, update, then re-freeze
   sudo $0 --status                  # check progress
   sudo $0 --reset-state             # start over
 EOF
@@ -108,6 +114,8 @@ while [[ $# -gt 0 ]]; do
         --with-compose)    WITH_COMPOSE=true ;;
         --vg)              FORCE_VG="$2"; shift ;;
         --disk)            FORCE_DISK="$2"; shift ;;
+        --freeze-gpu-stack) FREEZE_GPU_STACK=true ;;
+        --unfreeze-gpu-stack) UNFREEZE_GPU_STACK=true ;;
         --reset-state)     RESET_STATE=true ;;
         --resume)          RESUME=true ;;
         --status)          SHOW_STATUS=true ;;
@@ -116,6 +124,11 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+if [[ "$FREEZE_GPU_STACK" == true ]] && [[ "$UNFREEZE_GPU_STACK" == true ]]; then
+    echo -e "${RED}[ERROR]${RESET} --freeze-gpu-stack and --unfreeze-gpu-stack are mutually exclusive" >&2
+    exit 1
+fi
 
 confirm() {
     local prompt="${1:-Continue?}"
@@ -313,6 +326,8 @@ DOCKER_ARGS="--called-by-provision"
 
 BASE_ARGS=""
 [[ "$NON_INTERACTIVE" == true ]] && BASE_ARGS+=" --yes"
+[[ "$FREEZE_GPU_STACK" == true ]] && BASE_ARGS+=" --freeze-gpu-stack"
+[[ "$UNFREEZE_GPU_STACK" == true ]] && BASE_ARGS+=" --unfreeze-gpu-stack"
 
 FULLTEST_ARGS=""
 

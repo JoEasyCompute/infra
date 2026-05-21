@@ -3,7 +3,7 @@
 # ═══════════════════════════════════════════════════════════════
 # base-install-amd.sh — AMD GPU Node Base Installation Script
 # Target:   Any supported AMD GPU (ROCm-compatible)
-# Supports: Ubuntu 22.04 / 24.04 (x86_64)
+# Supports: Ubuntu 22.04 / 24.04 / 26.04 (x86_64)
 # Installs: AMDGPU DKMS driver, ROCm stack, rocm-bandwidth-test
 # Version:  2.0 (2026-03-15)
 # ═══════════════════════════════════════════════════════════════
@@ -12,6 +12,7 @@
 #   * ROCm 7.2 is the current production release.
 #   * Ubuntu 22.04 requires kernel 5.15+ (stock LTS kernel is fine).
 #   * Ubuntu 24.04 requires kernel 6.8+ (stock noble HWE kernel is fine).
+#   * Ubuntu 26.04 is a preview lane that uses AMD's 31.30 preview repos.
 #   * AMD GPUs require the user to be in the 'render' and 'video' groups.
 #   * No DCGM equivalent exists for AMD; rocm-smi and rocminfo are used instead.
 #   * P2P / xGMI support varies by GPU family. Consumer/pro RDNA cards use
@@ -55,23 +56,31 @@ apt_get() {
 ROCM_VERSION=""
 NON_INTERACTIVE=false
 UNINSTALL=false
+FREEZE_GPU_STACK=false
+UNFREEZE_GPU_STACK=false
 
 usage() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-  --rocm    <7.2|7.1>        ROCm version to install (default: interactive -> 7.2)
-  --yes                      Non-interactive mode, use defaults (ROCm 7.2)
+  --rocm    <7.13|7.2|7.1>   ROCm version to install (26.04 uses 7.13 preview)
+  --yes                      Non-interactive mode, use defaults (7.13 on 26.04; 7.2 otherwise)
+  --freeze-gpu-stack         Accepted for orchestration symmetry; AMD uses repo pinning instead of apt holds
+  --unfreeze-gpu-stack       Accepted for orchestration symmetry; AMD uses repo pinning instead of apt holds
   --uninstall                Full clean removal -- restores system to post-OS-install state
   -h, --help                 Show this help
 
 Examples:
   $(basename "$0")                   # Interactive install
+  $(basename "$0") --rocm 7.13       # 26.04 preview lane
+  $(basename "$0") --freeze-gpu-stack # Accepted, but AMD stack control is repo-pin based
   $(basename "$0") --rocm 7.2        # Explicit ROCm version
   $(basename "$0") --yes             # Non-interactive with defaults
   $(basename "$0") --uninstall       # Interactive uninstall
   $(basename "$0") --uninstall --yes # Non-interactive uninstall
+  sudo bash install/amd-stack-pin.sh --status   # Inspect the active ROCm pin
+  sudo bash install/amd-stack-pin.sh --reset    # Restore the expected pin file
 
 Post-install validation:
   rocm-smi                   # GPU status (analogous to nvidia-smi)
@@ -85,11 +94,17 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --rocm)      ROCM_VERSION="$2"; shift 2 ;;
         --yes)       NON_INTERACTIVE=true; shift ;;
+        --freeze-gpu-stack) FREEZE_GPU_STACK=true; shift ;;
+        --unfreeze-gpu-stack) UNFREEZE_GPU_STACK=true; shift ;;
         --uninstall) UNINSTALL=true; shift ;;
         -h|--help)   usage ;;
         *) error "Unknown option: $1. Use --help for usage." ;;
     esac
 done
+
+if [[ "${FREEZE_GPU_STACK}" == true ]] && [[ "${UNFREEZE_GPU_STACK}" == true ]]; then
+    error "--freeze-gpu-stack and --unfreeze-gpu-stack are mutually exclusive"
+fi
 
 # ================================================================
 # STEP 1 -- Detect Ubuntu Version
@@ -102,7 +117,8 @@ detect_ubuntu() {
     case "${VERSION_ID}" in
         "22.04") UBUNTU_CODENAME="jammy" ;;
         "24.04") UBUNTU_CODENAME="noble" ;;
-        *) error "Unsupported Ubuntu version: ${VERSION_ID}. Supported: 22.04, 24.04" ;;
+        "26.04") UBUNTU_CODENAME="resolute" ;;
+        *) error "Unsupported Ubuntu version: ${VERSION_ID}. Supported: 22.04, 24.04, 26.04" ;;
     esac
     UBUNTU_VERSION_ID="${VERSION_ID}"
     success "Detected Ubuntu ${VERSION_ID} -> codename: ${UBUNTU_CODENAME}"
@@ -172,9 +188,9 @@ preflight_checks() {
     fi
 
     # Existing AMDGPU / ROCm packages
-    if dpkg -l 2>/dev/null | grep -qP '^ii\s+(amdgpu|rocm|hip-)'; then
+    if dpkg -l 2>/dev/null | grep -qP '^ii\s+(amdgpu|amdrocm|amdgpu-install|rocm|hip-)'; then
         warn "Existing AMDGPU/ROCm packages found -- may conflict:"
-        dpkg -l 2>/dev/null | grep -P '^ii\s+(amdgpu|rocm|hip-)' | awk '{printf "    %s %s\n", $2, $3}' || true
+        dpkg -l 2>/dev/null | grep -P '^ii\s+(amdgpu|amdrocm|amdgpu-install|rocm|hip-)' | awk '{printf "    %s %s\n", $2, $3}' || true
         if [[ "${NON_INTERACTIVE}" == false ]]; then
             read -rp "  Continue anyway? [y/N]: " purge_confirm
             [[ "${purge_confirm,,}" == "y" ]] || error "Aborted."
@@ -189,6 +205,7 @@ preflight_checks() {
     #                 Kernels 6.11+ are NOT yet supported and will fail to build.
     #   Ubuntu 24.04: supported kernel is 6.8.x (GA).
     #                 Kernels 6.11+ are NOT yet supported and will fail to build.
+    #   Ubuntu 26.04: preview lane; follow AMD 31.30 release guidance.
     # Source: https://rocm.docs.amd.com/projects/install-on-linux/en/latest/reference/system-requirements.html
     local kver; kver=$(uname -r)
     local kmaj kmin
@@ -235,6 +252,9 @@ preflight_checks() {
             warn "Kernel ${kver} is older than the 24.04 GA kernel (6.8) -- unexpected"
             (( warnings++ )) || true
         fi
+    elif [[ "${UBUNTU_VERSION_ID}" == "26.04" ]]; then
+        warn "Ubuntu 26.04 is an experimental ROCm 7.13 preview lane; follow AMD 31.30 preview kernel guidance if DKMS fails."
+        (( warnings++ )) || true
     fi
 
     # Kernel headers -- required for amdgpu-dkms
@@ -263,9 +283,36 @@ preflight_checks() {
 # STEP 3 -- ROCm Version Selection
 # ================================================================
 select_rocm_version() {
+    if [[ "${UBUNTU_VERSION_ID}" == "26.04" ]]; then
+        if [[ -n "${ROCM_VERSION}" ]]; then
+            case "${ROCM_VERSION}" in
+                "7.13") success "ROCm version (--rocm arg): ${ROCM_VERSION} (preview)"; return ;;
+                *) error "Invalid --rocm for Ubuntu 26.04: ${ROCM_VERSION}. Valid: 7.13" ;;
+            esac
+        fi
+        if [[ "${NON_INTERACTIVE}" == true ]]; then
+            ROCM_VERSION="7.13"
+            success "ROCm version (default preview): ${ROCM_VERSION}"
+            return
+        fi
+        echo ""
+        echo -e "${BOLD}Select ROCm Version (Ubuntu 26.04 preview lane):${NC}"
+        echo "  1) 7.13 -- preview release [default]"
+        echo ""
+        read -rp "Enter choice [1, default=1]: " rocm_choice
+        case "${rocm_choice}" in
+            "") ROCM_VERSION="7.13" ;;
+            1) ROCM_VERSION="7.13" ;;
+            *) ROCM_VERSION="7.13" ;;
+        esac
+        success "ROCm version: ${ROCM_VERSION} (preview)"
+        return
+    fi
+
     if [[ -n "${ROCM_VERSION}" ]]; then
         case "${ROCM_VERSION}" in
             "7.2"|"7.1") success "ROCm version (--rocm arg): ${ROCM_VERSION}"; return ;;
+            "7.13") error "ROCm 7.13 is only supported on Ubuntu 26.04 in the preview lane" ;;
             *) error "Invalid --rocm: ${ROCM_VERSION}. Valid: 7.1, 7.2" ;;
         esac
     fi
@@ -293,10 +340,18 @@ confirm_install() {
     echo -e "${BOLD}=======================================${NC}"
     echo -e "  Ubuntu:         ${UBUNTU_VERSION_ID} (${UBUNTU_CODENAME})"
     echo -e "  AMDGPU driver:  amdgpu-dkms (ROCm ${ROCM_VERSION} repo)"
-    echo -e "  ROCm version:   ${ROCM_VERSION}"
+    if [[ "${UBUNTU_VERSION_ID}" == "26.04" ]]; then
+        echo -e "  ROCm version:   ${ROCM_VERSION} (preview)"
+    else
+        echo -e "  ROCm version:   ${ROCM_VERSION}"
+    fi
     echo -e "  GPU target:     Any ROCm-compatible AMD GPU"
     echo -e "  PyTorch arch:   auto-detected post-reboot (Step 9.5)"
     echo -e "  Log file:       ${LOG_FILE}"
+    if [[ "${FREEZE_GPU_STACK}" == true || "${UNFREEZE_GPU_STACK}" == true ]]; then
+        echo -e "  GPU stack:     AMD uses repo pinning; freeze/unfreeze flags are informational here"
+        echo -e "  Pin helper:    install/amd-stack-pin.sh --status | --reset"
+    fi
     echo -e "${BOLD}=======================================${NC}"
     echo ""
     if [[ "${NON_INTERACTIVE}" == false ]]; then
@@ -305,6 +360,12 @@ confirm_install() {
         info "Starting installation..."
     else
         info "Non-interactive mode -- starting installation..."
+    fi
+
+    if [[ "${FREEZE_GPU_STACK}" == true || "${UNFREEZE_GPU_STACK}" == true ]]; then
+        warn "AMD nodes already use repo pinning (`/etc/apt/preferences.d/rocm-pin-600`) to control package selection."
+        warn "The freeze/unfreeze flags are accepted for orchestration symmetry, but no apt-mark hold/unhold action is performed on AMD."
+        warn "Use install/amd-stack-pin.sh --status to inspect the current pin or --reset to restore it."
     fi
 }
 
@@ -399,12 +460,16 @@ install_rocm_repos() {
 
     # The amdgpu driver repo uses a build number (e.g. 30.30), NOT the ROCm
     # version string. The ROCm apt repo DOES use the ROCm version string.
-    # Mapping: ROCm 7.2 -> amdgpu 30.30 | ROCm 7.1 -> amdgpu 30.20.1
+    # Mapping:
+    #   ROCm 7.2  -> amdgpu 30.30
+    #   ROCm 7.1  -> amdgpu 30.20.1
+    #   ROCm 7.13 -> amdgpu 31.30 (preview lane / Ubuntu 26.04)
     # Source: https://repo.radeon.com/amdgpu/ (directory listing)
     local AMDGPU_BUILD_VERSION
     case "${ROCM_VERSION}" in
         "7.2") AMDGPU_BUILD_VERSION="30.30" ;;
         "7.1") AMDGPU_BUILD_VERSION="30.20.1" ;;
+        "7.13") AMDGPU_BUILD_VERSION="31.30" ;;
         *)     error "No known amdgpu build version for ROCm ${ROCM_VERSION}" ;;
     esac
     info "ROCm ${ROCM_VERSION} -> AMDGPU driver build: ${AMDGPU_BUILD_VERSION}"
@@ -412,29 +477,53 @@ install_rocm_repos() {
     # GPG keyring directory (recommended location per AMD docs)
     sudo mkdir -p --mode=0755 /etc/apt/keyrings
 
+    local DRIVER_KEYRING="/etc/apt/keyrings/rocm.gpg"
+    local ROCM_KEYRING="/etc/apt/keyrings/rocm.gpg"
+    local ROCM_REPO_URL=""
+    local ROCM_KEY_URL="https://repo.radeon.com/rocm/rocm.gpg.key"
+    local ROCM_DRIVER_REPO_URL=""
+
+    if [[ "${UBUNTU_VERSION_ID}" == "26.04" ]]; then
+        DRIVER_KEYRING="/etc/apt/keyrings/amdrocm.gpg"
+        ROCM_KEYRING="/etc/apt/keyrings/amdrocm.gpg"
+        ROCM_KEY_URL="https://repo.amd.com/rocm/packages/gpg/rocm.gpg"
+        ROCM_REPO_URL="deb [arch=amd64 signed-by=${ROCM_KEYRING}] https://repo.amd.com/rocm/packages-multi-arch/ubuntu2604 stable main"
+        ROCM_DRIVER_REPO_URL="deb [arch=amd64 signed-by=${DRIVER_KEYRING}] https://repo.radeon.com/amdgpu/${AMDGPU_BUILD_VERSION}/ubuntu ${UBUNTU_CODENAME} main"
+    else
+        ROCM_REPO_URL=""
+        ROCM_DRIVER_REPO_URL="deb [arch=amd64 signed-by=${DRIVER_KEYRING}] https://repo.radeon.com/amdgpu/${AMDGPU_BUILD_VERSION}/ubuntu ${UBUNTU_CODENAME} main"
+    fi
+
     info "Downloading AMD ROCm GPG key..."
-    wget -q -O - https://repo.radeon.com/rocm/rocm.gpg.key \
+    wget -q -O - "${ROCM_KEY_URL}" \
         | gpg --dearmor \
-        | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null \
+        | sudo tee "${ROCM_KEYRING}" > /dev/null \
         || error "Failed to install AMD ROCm GPG key"
-    success "GPG key installed -> /etc/apt/keyrings/rocm.gpg"
+    success "GPG key installed -> ${ROCM_KEYRING}"
 
     # AMDGPU driver repo (provides amdgpu-dkms)
     # NOTE: this URL uses the build number (e.g. 30.30), NOT the ROCm version.
     info "Adding AMDGPU driver repository (build ${AMDGPU_BUILD_VERSION})..."
-    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/amdgpu/${AMDGPU_BUILD_VERSION}/ubuntu ${UBUNTU_CODENAME} main" \
+    echo "${ROCM_DRIVER_REPO_URL}" \
         | sudo tee /etc/apt/sources.list.d/amdgpu.list > /dev/null
 
     # ROCm software repo
-    # NOTE: this URL DOES use the ROCm version string.
-    info "Adding ROCm software repository (${ROCM_VERSION})..."
-    printf "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/%s %s main\ndeb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/graphics/%s/ubuntu %s main\n" \
-        "${ROCM_VERSION}" "${UBUNTU_CODENAME}" "${ROCM_VERSION}" "${UBUNTU_CODENAME}" \
-        | sudo tee /etc/apt/sources.list.d/rocm.list > /dev/null
-
-    # Pin AMD repos to priority 600 so they win over Ubuntu defaults for AMD packages
-    printf "Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n" \
-        | sudo tee /etc/apt/preferences.d/rocm-pin-600 > /dev/null
+    # NOTE: the 26.04 preview lane uses repo.amd.com; 22.04 / 24.04 retain the
+    # existing repo.radeon.com package layout for the current production stack.
+    if [[ "${UBUNTU_VERSION_ID}" == "26.04" ]]; then
+        info "Adding ROCm software repository (${ROCM_VERSION} preview)..."
+        echo "${ROCM_REPO_URL}" \
+            | sudo tee /etc/apt/sources.list.d/rocm.list > /dev/null
+        printf "Package: *\nPin: release o=repo.amd.com\nPin-Priority: 600\n" \
+            | sudo tee /etc/apt/preferences.d/rocm-pin-600 > /dev/null
+    else
+        info "Adding ROCm software repository (${ROCM_VERSION})..."
+        printf "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/%s %s main\ndeb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/graphics/%s/ubuntu %s main\n" \
+            "${ROCM_VERSION}" "${UBUNTU_CODENAME}" "${ROCM_VERSION}" "${UBUNTU_CODENAME}" \
+            | sudo tee /etc/apt/sources.list.d/rocm.list > /dev/null
+        printf "Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n" \
+            | sudo tee /etc/apt/preferences.d/rocm-pin-600 > /dev/null
+    fi
 
     apt_get update -q || error "apt-get update after ROCm repo setup failed"
     success "AMD ROCm repositories configured (ROCm ${ROCM_VERSION} / amdgpu ${AMDGPU_BUILD_VERSION}, ${UBUNTU_CODENAME})"
@@ -451,11 +540,16 @@ install_amd_stack() {
         || error "amdgpu-dkms install failed -- check kernel headers and DKMS"
     success "amdgpu-dkms installed"
 
+    local rocm_pkg="rocm"
+    if [[ "${UBUNTU_VERSION_ID}" == "26.04" ]]; then
+        rocm_pkg="amdrocm7.13"
+    fi
+
     info "Installing ROCm ${ROCM_VERSION} stack..."
-    # 'rocm' meta-package pulls in: HIP runtime, OpenCL, rocm-smi, rocminfo,
+    # 'rocm' / 'amdrocm7.13' pulls in: HIP runtime, OpenCL, rocm-smi, rocminfo,
     # ROCm libraries (rocBLAS, rocFFT, MIOpen, etc.), and profiling tools.
     apt_get install -V -y \
-        rocm \
+        "${rocm_pkg}" \
         || error "ROCm stack install failed -- check apt output above"
     success "ROCm stack installed"
 
@@ -606,7 +700,7 @@ MLEOF
     echo "        --index-url https://download.pytorch.org/whl/rocm${ROCM_VERSION}"
     echo ""
     echo "    # 2b. AMD Docker image (recommended for production):"
-    echo "    docker pull rocm/pytorch:rocm${ROCM_VERSION}_ubuntu22.04_py3.10_pytorch_release_2.8.0"
+    echo "    docker pull rocm/pytorch:rocm${ROCM_VERSION}_ubuntu${UBUNTU_VERSION_ID}_py3.10_pytorch_release_2.8.0"
     echo ""
     echo "    # 3. Verify (ROCm surfaces AMD GPUs through torch.cuda intentionally):"
     echo '    python3 -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"'
@@ -766,11 +860,11 @@ uninstall_node() {
     echo ""
     echo -e "${BOLD}The following will be removed to restore a clean OS state:${NC}"
     echo "  * amdgpu-dkms kernel driver and all built .ko files"
-    echo "  * ROCm stack (rocm meta-package and all dependencies)"
+    echo "  * ROCm stack (rocm / amdrocm meta-package and all dependencies)"
     echo "  * DKMS kernel module entries for amdgpu"
     echo "  * /etc/apt/sources.list.d/amdgpu.list, rocm.list"
     echo "  * /etc/apt/preferences.d/rocm-pin-600"
-    echo "  * /etc/apt/keyrings/rocm.gpg"
+    echo "  * /etc/apt/keyrings/rocm.gpg, /etc/apt/keyrings/amdrocm.gpg"
     echo "  * /etc/profile.d/rocm.sh PATH + ML env vars (PYTORCH_ROCM_ARCH etc.)"
     echo "  * /opt/rocm directory"
     echo "  * GCC update-alternatives entries"
@@ -792,7 +886,7 @@ uninstall_node() {
 
     local pkgs_to_remove
     pkgs_to_remove=$(dpkg -l 2>/dev/null \
-        | grep -P '^ii\s+(amdgpu|rocm|hip-|hsa-|miopen|rocblas|rocfft|roc|comgr|hipsparse|hipblas|rocthrust|rocsparse|rocsolver|rocrand|rocprim|hipcub|hipfft|hiprtc|hipblaslt|smartmontools|ioping)' \
+        | grep -P '^ii\s+(amdgpu|amdgpu-install|amdrocm|rocm|hip-|hsa-|miopen|rocblas|rocfft|roc|comgr|hipsparse|hipblas|rocthrust|rocsparse|rocsolver|rocrand|rocprim|hipcub|hipfft|hiprtc|hipblaslt|smartmontools|ioping)' \
         | awk '{print $2}' | tr '\n' ' ')
 
     if [[ -n "${pkgs_to_remove}" ]]; then
@@ -865,7 +959,8 @@ uninstall_node() {
     sudo rm -f /etc/apt/sources.list.d/amdgpu.list \
                /etc/apt/sources.list.d/rocm.list
     sudo rm -f /etc/apt/preferences.d/rocm-pin-600
-    sudo rm -f /etc/apt/keyrings/rocm.gpg
+    sudo rm -f /etc/apt/keyrings/rocm.gpg \
+               /etc/apt/keyrings/amdrocm.gpg
     apt_get update -q || warn "apt-get update had warnings (non-fatal)"
     success "AMD ROCm apt sources and keyring removed"
 

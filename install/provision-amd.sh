@@ -53,6 +53,8 @@ NON_INTERACTIVE=false
 WITH_COMPOSE=false
 FORCE_VG=""
 FORCE_DISK=""
+FREEZE_GPU_STACK=false
+UNFREEZE_GPU_STACK=false
 RESET_STATE=false
 RESUME=false
 SHOW_STATUS=false
@@ -68,6 +70,8 @@ Options:
   --with-compose        Install Docker Compose (passed to docker-install.sh)
   --vg <vgname>         Pass VG selection to docker-install.sh
   --disk /dev/sdX       Pass disk selection to docker-install.sh
+  --freeze-gpu-stack    Pass through to amd-base-install.sh (repo-pin symmetry; informational)
+  --unfreeze-gpu-stack  Pass through to amd-base-install.sh (repo-pin symmetry; informational)
   --reset-state         Wipe provision state and restart from stage1
   --resume              Internal: called by ${RESUME_SERVICE}.service on boot
   --status              Show current provisioning state and exit
@@ -77,6 +81,7 @@ Examples:
   sudo $0
   sudo $0 --non-interactive --with-compose
   sudo $0 --non-interactive --vg ubuntu-vg
+  sudo $0 --freeze-gpu-stack
   sudo $0 --status
 EOF
     exit 0
@@ -88,6 +93,8 @@ while [[ $# -gt 0 ]]; do
         --with-compose)    WITH_COMPOSE=true ;;
         --vg)              FORCE_VG="$2"; shift ;;
         --disk)            FORCE_DISK="$2"; shift ;;
+        --freeze-gpu-stack) FREEZE_GPU_STACK=true ;;
+        --unfreeze-gpu-stack) UNFREEZE_GPU_STACK=true ;;
         --reset-state)     RESET_STATE=true ;;
         --resume)          RESUME=true ;;
         --status)          SHOW_STATUS=true ;;
@@ -96,6 +103,11 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+if [[ "$FREEZE_GPU_STACK" == true ]] && [[ "$UNFREEZE_GPU_STACK" == true ]]; then
+    echo -e "${RED}[ERROR]${RESET} --freeze-gpu-stack and --unfreeze-gpu-stack are mutually exclusive" >&2
+    exit 1
+fi
 
 confirm() {
     local prompt="${1:-Continue?}"
@@ -194,6 +206,7 @@ if [[ "$SHOW_STATUS" == true ]]; then
     echo
     info "Log:      ${LOG_FILE}"
     info "JSON log: ${JSONL_FILE}"
+    info "Pin helper: sudo ${PROVISION_DIR}/amd-stack-pin.sh --status"
     exit 0
 fi
 
@@ -258,6 +271,8 @@ DOCKER_ARGS="--called-by-provision --skip-nvidia-toolkit --skip-nouveau-blacklis
 
 BASE_ARGS=""
 [[ "$NON_INTERACTIVE" == true ]] && BASE_ARGS+=" --yes"
+[[ "$FREEZE_GPU_STACK" == true ]] && BASE_ARGS+=" --freeze-gpu-stack"
+[[ "$UNFREEZE_GPU_STACK" == true ]] && BASE_ARGS+=" --unfreeze-gpu-stack"
 
 run_stage() {
     local stage="$1" desc="$2" script="$3" args="$4"
