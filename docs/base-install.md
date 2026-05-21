@@ -5,7 +5,7 @@ Installs the full NVIDIA/CUDA stack on a fresh Ubuntu node, with a matching
 uninstall path that restores the system to a clean OS state for reprovisioning.
 
 **Version:** 1.9  
-**Supports:** Ubuntu 22.04 / 24.04 (x86_64)
+**Supports:** Ubuntu 22.04 / 24.04 / 26.04 (x86_64)
 
 ---
 
@@ -13,7 +13,7 @@ uninstall path that restores the system to a clean OS state for reprovisioning.
 
 | Requirement | Detail |
 |---|---|
-| OS | Ubuntu 22.04 (Jammy) or 24.04 (Noble), x86_64 only |
+| OS | Ubuntu 22.04 (Jammy), 24.04 (Noble), or 26.04 (Resolute), x86_64 only |
 | Disk space | 15 GB free on `/usr` |
 | Access | User with passwordless `sudo` |
 | Network | Reachable: `developer.download.nvidia.com`, `github.com` |
@@ -28,7 +28,7 @@ uninstall path that restores the system to a clean OS state for reprovisioning.
 git clone https://github.com/joeasycompute/infra.git ~/infra
 cd ~/infra/install
 
-chmod +x base-install.sh
+chmod +x base-install.sh nvidia-stack-hold.sh
 
 # Interactive install — recommended for first-time use
 ./base-install.sh
@@ -51,6 +51,8 @@ Options:
   --driver  <575|580|590>    NVIDIA driver version (default: interactive prompt)
   --cuda    <12-9|13>        CUDA toolkit version  (default: interactive prompt)
   --yes                      Non-interactive mode, skip all prompts, use defaults
+  --freeze-gpu-stack         Hold the validated NVIDIA/CUDA packages after install
+  --unfreeze-gpu-stack       Temporarily unhold NVIDIA/CUDA packages before install, then re-hold after validation
   --uninstall                Full clean removal — restores system to post-OS-install state
   -h, --help                 Show help
 ```
@@ -83,6 +85,21 @@ before touching the system.
 ```
 Useful for Ansible playbooks, Terraform provisioners, or scripted deployments
 across a fleet of nodes.
+
+Ubuntu 26.04 is supported too; the script automatically maps it to the `ubuntu2604` NVIDIA repo codename.
+
+### Freeze or update the NVIDIA stack
+
+After a successful validation run, you can freeze the validated GPU stack:
+
+```bash
+sudo ./nvidia-stack-hold.sh --hold
+sudo ./nvidia-stack-hold.sh --status
+```
+
+To temporarily update a held node, rerun `base-install.sh` with `--unfreeze-gpu-stack`. That removes the hold first, installs the requested driver/CUDA versions, validates the node, and then re-holds the resulting stack.
+
+If the script detects a held NVIDIA/CUDA stack on startup, it will warn and point you to `nvidia-stack-hold.sh --unhold` for the maintenance window path.
 
 ### Uninstall (interactive)
 ```bash

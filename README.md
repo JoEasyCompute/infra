@@ -1,6 +1,6 @@
 # GPU Node Provisioning Suite
 
-Script-driven tooling for provisioning, validating, and operating GPU compute nodes on Ubuntu 22.04 and 24.04.
+Script-driven tooling for provisioning, validating, and operating GPU compute nodes on Ubuntu 22.04, 24.04, and 26.04.
 
 This repo is aimed at bare-metal and hosted GPU nodes where the main job is:
 
@@ -30,6 +30,7 @@ Current platform status:
 
 - NVIDIA: orchestrated + manual
 - AMD: orchestrated + manual
+- Ubuntu 26.04 is currently supported as a preview/experimental lane for the AMD stack.
 
 ## Repo Layout
 
@@ -41,8 +42,10 @@ Current platform status:
 │   ├── base-install.sh         # NVIDIA driver + CUDA + supporting packages
 │   ├── docker-install.sh       # Docker CE + NVIDIA toolkit + runtime storage
 │   ├── amd-base-install.sh     # AMDGPU + ROCm base installer
+│   ├── amd-stack-pin.sh        # Inspect / reset the AMD ROCm apt pin
 │   ├── gpu-power-limit.sh      # Persistent NVIDIA power-limit service installer
 │   ├── manage-gpu.sh           # Bind selected NVIDIA GPU slots to vfio-pci at boot
+│   ├── nvidia-stack-hold.sh    # Freeze / unfreeze validated NVIDIA/CUDA packages
 │   ├── install-raid.sh         # Optional RAID / ESP redundancy installer
 │   ├── install-p2p-driver.sh   # Experimental Tinygrad P2P driver flow
 │   └── backup/                 # Legacy / archived helper scripts
@@ -187,7 +190,7 @@ This installs the AMDGPU DKMS driver, ROCm stack, and post-install environment s
 
 ```bash
 sudo mkdir -p /opt/provision
-sudo cp install/base-install.sh install/docker-install.sh install/provision.sh test/fulltest.sh /opt/provision/
+sudo cp install/base-install.sh install/docker-install.sh install/provision.sh install/nvidia-stack-hold.sh test/fulltest.sh /opt/provision/
 sudo chmod +x /opt/provision/*.sh
 
 sudo /opt/provision/provision.sh --non-interactive --with-compose
@@ -195,12 +198,15 @@ sudo /opt/provision/provision.sh --status
 ```
 
 Use this when you want the provisioning flow to resume automatically across reboots.
+On Ubuntu 26.04, `base-install.sh` automatically uses the `ubuntu2604` CUDA repo codename.
+If you later want to freeze the validated NVIDIA stack, run `install/nvidia-stack-hold.sh --hold` after validation.
+The orchestrator also passes through `--freeze-gpu-stack` and `--unfreeze-gpu-stack` to stage 1 if you want to freeze or refresh the NVIDIA stack during provisioning.
 
 ### NVIDIA Orchestrated: Interactive
 
 ```bash
 sudo mkdir -p /opt/provision
-sudo cp install/base-install.sh install/docker-install.sh install/provision.sh test/fulltest.sh /opt/provision/
+sudo cp install/base-install.sh install/docker-install.sh install/provision.sh install/nvidia-stack-hold.sh test/fulltest.sh /opt/provision/
 sudo chmod +x /opt/provision/*.sh
 
 sudo /opt/provision/provision.sh --with-compose
@@ -211,7 +217,7 @@ Interactive mode allows prompts in the underlying scripts where applicable.
 ### NVIDIA Manual
 
 ```bash
-chmod +x install/base-install.sh install/docker-install.sh test/fulltest.sh
+chmod +x install/base-install.sh install/docker-install.sh install/nvidia-stack-hold.sh test/fulltest.sh
 
 sudo ./install/base-install.sh
 sudo reboot
@@ -225,20 +231,28 @@ sudo reboot
 ### AMD Manual
 
 ```bash
-chmod +x install/amd-base-install.sh
+chmod +x install/amd-base-install.sh install/amd-stack-pin.sh
 sudo ./install/amd-base-install.sh
+
+# Inspect or reset the AMD ROCm apt pin
+sudo ./install/amd-stack-pin.sh --status
+sudo ./install/amd-stack-pin.sh --reset
 ```
 
 ### AMD Orchestrated
 
 ```bash
 sudo mkdir -p /opt/provision-amd
-sudo cp install/amd-base-install.sh install/docker-install.sh install/provision-amd.sh /opt/provision-amd/
+sudo cp install/amd-base-install.sh install/amd-stack-pin.sh install/docker-install.sh install/provision-amd.sh /opt/provision-amd/
 sudo chmod +x /opt/provision-amd/*.sh
 
 sudo /opt/provision-amd/provision-amd.sh --non-interactive --with-compose
 sudo /opt/provision-amd/provision-amd.sh --status
 ```
+
+On Ubuntu 26.04, `amd-base-install.sh` automatically switches to the AMD 31.30 preview lane and `amdrocm7.13`.
+The AMD provisioner also accepts `--freeze-gpu-stack` / `--unfreeze-gpu-stack` for CLI symmetry, but AMD package control still uses repo pinning rather than apt holds.
+Use `amd-stack-pin.sh --status` to inspect the active pin and `amd-stack-pin.sh --reset` if you need to restore the expected ROCm priority file.
 
 ## Major Scripts
 
@@ -247,10 +261,12 @@ sudo /opt/provision-amd/provision-amd.sh --status
 | `install/provision.sh` | Orchestrates NVIDIA provisioning across reboots | Covered here |
 | `install/provision-amd.sh` | Orchestrates AMD provisioning across reboots | Covered here |
 | `install/base-install.sh` | NVIDIA driver, CUDA, cuDNN, DCGM, and base tooling | [docs/base-install.md](/Users/josephcheung/Desktop/dev/infra/docs/base-install.md) |
+| `install/nvidia-stack-hold.sh` | Freeze or unfreeze the validated NVIDIA/CUDA stack | Covered here |
 | `install/docker-install.sh` | Docker CE, NVIDIA Container Toolkit, and runtime storage layout | [docs/docker-install.md](/Users/josephcheung/Desktop/dev/infra/docs/docker-install.md) |
 | `test/fulltest.sh` | NVIDIA GPU acceptance and health validation | [docs/fulltest.md](/Users/josephcheung/Desktop/dev/infra/docs/fulltest.md) |
 | `test/gpu-fulltest-v2.sh` | Experimental prepare-then-run variant of the NVIDIA GPU validation flow | [docs/gpu-fulltest-v2.md](/Users/josephcheung/Desktop/dev/infra/docs/gpu-fulltest-v2.md) |
 | `install/amd-base-install.sh` | AMDGPU + ROCm base install | [docs/amd-base-install.md](/Users/josephcheung/Desktop/dev/infra/docs/amd-base-install.md) |
+| `install/amd-stack-pin.sh` | Inspect or reset the AMD ROCm apt pin | Covered here |
 | `test/disktest.sh` | Disk health, throughput, and stress validation with guided interactive mode and per-disk reports | [docs/disktest.md](/Users/josephcheung/Desktop/dev/infra/docs/disktest.md) |
 | `test/cpu-test.sh` | CPU socket or per-thread stress tester with crash-state checkpoints, default `/var/tmp/cpu-test` state, `--status`, `--reset-status`, and optional temperature logging | [docs/cpu-test.md](/Users/josephcheung/Desktop/dev/infra/docs/cpu-test.md) |
 | `test/cpu-ram-stress.sh` | CPU + RAM isolation stress using stress-ng | [docs/cpu-ram-stress.md](/Users/josephcheung/Desktop/dev/infra/docs/cpu-ram-stress.md) |

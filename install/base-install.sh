@@ -2,7 +2,7 @@
 
 # ═══════════════════════════════════════════════════════════════
 # base-install.sh — GPU Node Base Installation Script
-# Supports: Ubuntu 22.04 / 24.04 (x86_64)
+# Supports: Ubuntu 22.04 / 24.04 / 26.04 (x86_64)
 # Installs: NVIDIA drivers, CUDA toolkit, cuDNN, DCGM, gpu-burn
 # Version:  1.9 (2026-02-27)
 # ═══════════════════════════════════════════════════════════════
@@ -38,6 +38,12 @@ DRIVER_VERSION=""
 CUDA_VERSION=""
 NON_INTERACTIVE=false
 UNINSTALL=false
+FREEZE_GPU_STACK=false
+UNFREEZE_GPU_STACK=false
+GPU_STACK_HOLD_DETECTED=false
+GPU_STACK_HOLD_AFTER_INSTALL=false
+GPU_STACK_HELD_PACKAGES=()
+GPU_STACK_INSTALLED_PACKAGES=()
 
 usage() {
     cat <<EOF
@@ -47,12 +53,16 @@ Options:
   --driver  <575|580|590>    NVIDIA driver version (default: interactive)
   --cuda    <12-9|13>        CUDA toolkit version  (default: interactive)
   --yes                      Non-interactive mode, use defaults (580 + 12-9)
+  --freeze-gpu-stack         Hold the validated NVIDIA/CUDA stack after install
+  --unfreeze-gpu-stack       Temporarily unhold NVIDIA/CUDA packages before install, then re-hold after validation
   --uninstall                Full clean removal — restores system to post-OS-install state
   -h, --help                 Show this help
 
 Examples:
   $(basename "$0")                           # Interactive install
   $(basename "$0") --driver 580 --cuda 12-9  # Explicit versions
+  $(basename "$0") --freeze-gpu-stack        # Freeze the validated stack after install
+  $(basename "$0") --unfreeze-gpu-stack      # Unhold, upgrade, then re-freeze
   $(basename "$0") --yes                     # Non-interactive with defaults
   $(basename "$0") --uninstall               # Interactive uninstall
   $(basename "$0") --uninstall --yes         # Non-interactive uninstall
@@ -65,6 +75,8 @@ while [[ $# -gt 0 ]]; do
         --driver)    DRIVER_VERSION="$2"; shift 2 ;;
         --cuda)      CUDA_VERSION="$2";   shift 2 ;;
         --yes)       NON_INTERACTIVE=true; shift ;;
+        --freeze-gpu-stack) FREEZE_GPU_STACK=true; shift ;;
+        --unfreeze-gpu-stack) UNFREEZE_GPU_STACK=true; shift ;;
         --uninstall) UNINSTALL=true; shift ;;
         -h|--help)   usage ;;
         *) error "Unknown option: $1. Use --help for usage." ;;
@@ -82,7 +94,8 @@ detect_ubuntu() {
     case "${VERSION_ID}" in
         "22.04") UBUNTU_CODENAME="ubuntu2204" ;;
         "24.04") UBUNTU_CODENAME="ubuntu2404" ;;
-        *) error "Unsupported Ubuntu version: ${VERSION_ID}. Supported: 22.04, 24.04" ;;
+        "26.04") UBUNTU_CODENAME="ubuntu2604" ;;
+        *) error "Unsupported Ubuntu version: ${VERSION_ID}. Supported: 22.04, 24.04, 26.04" ;;
     esac
     UBUNTU_VERSION_ID="${VERSION_ID}"
     success "Detected Ubuntu ${VERSION_ID} → repo: ${UBUNTU_CODENAME}"
@@ -176,6 +189,95 @@ preflight_checks() {
 }
 
 # ═══════════════════════════════════════════════════════════════
+# STEP 2.5 — NVIDIA/CUDA hold management
+# ═══════════════════════════════════════════════════════════════
+GPU_STACK_HOLD_REGEX='^(cuda-|cudnn9-cuda-|datacenter-gpu-manager|libcuda|libcudnn|libnvidia|nvidia-)'
+GPU_STACK_HOLD_EXCLUDE_REGEX='^(cuda-keyring|nvidia-container-toolkit|nvidia-container-runtime|libnvidia-container)'
+
+_gpu_stack_packages_from_dpkg() {
+    dpkg -l 2>/dev/null \
+        | awk '$1 == "ii" { print $2 }' \
+        | grep -E "${GPU_STACK_HOLD_REGEX}" \
+        | grep -Ev "${GPU_STACK_HOLD_EXCLUDE_REGEX}" \
+        | sort -u \
+        || true
+}
+
+_gpu_stack_packages_from_holds() {
+    apt-mark showhold 2>/dev/null \
+        | grep -E "${GPU_STACK_HOLD_REGEX}" \
+        | grep -Ev "${GPU_STACK_HOLD_EXCLUDE_REGEX}" \
+        | sort -u \
+        || true
+}
+
+capture_gpu_stack_hold_state() {
+    mapfile -t GPU_STACK_INSTALLED_PACKAGES < <(_gpu_stack_packages_from_dpkg)
+    mapfile -t GPU_STACK_HELD_PACKAGES < <(_gpu_stack_packages_from_holds)
+    if (( ${#GPU_STACK_HELD_PACKAGES[@]} > 0 )); then
+        GPU_STACK_HOLD_DETECTED=true
+    else
+        GPU_STACK_HOLD_DETECTED=false
+    fi
+}
+
+print_gpu_stack_packages() {
+    local title="$1"
+    shift
+    local -a packages=("$@")
+
+    echo "${title}"
+    if (( ${#packages[@]} > 0 )); then
+        printf '    %s\n' "${packages[@]}"
+    else
+        echo "    (none)"
+    fi
+}
+
+warn_about_gpu_stack_holds() {
+    capture_gpu_stack_hold_state
+    if [[ "${GPU_STACK_HOLD_DETECTED}" == true ]]; then
+        section "GPU Stack Hold Detected"
+        warn "Held NVIDIA/CUDA packages were found on this node."
+        print_gpu_stack_packages "Held packages:" "${GPU_STACK_HELD_PACKAGES[@]}"
+        if [[ "${UNFREEZE_GPU_STACK}" == true ]]; then
+            info "The installer will temporarily unhold these packages before installation."
+        else
+            warn "They will stay frozen unless you rerun with --unfreeze-gpu-stack."
+            warn "To unhold manually: run nvidia-stack-hold.sh --unhold from the repo's install/ directory (or from /opt/provision if copied there)"
+        fi
+    fi
+}
+
+unhold_gpu_stack_packages() {
+    capture_gpu_stack_hold_state
+    if (( ${#GPU_STACK_HELD_PACKAGES[@]} == 0 )); then
+        info "No held NVIDIA/CUDA packages found — nothing to unhold"
+        return 0
+    fi
+
+    section "Unholding NVIDIA/CUDA Packages"
+    print_gpu_stack_packages "Removing holds from:" "${GPU_STACK_HELD_PACKAGES[@]}"
+    sudo apt-mark unhold "${GPU_STACK_HELD_PACKAGES[@]}" \
+        || error "Failed to unhold NVIDIA/CUDA packages"
+    success "NVIDIA/CUDA holds removed"
+}
+
+hold_gpu_stack_packages() {
+    capture_gpu_stack_hold_state
+    if (( ${#GPU_STACK_INSTALLED_PACKAGES[@]} == 0 )); then
+        warn "No installed NVIDIA/CUDA packages found to hold"
+        return 0
+    fi
+
+    section "Freezing NVIDIA/CUDA Packages"
+    print_gpu_stack_packages "Applying holds to:" "${GPU_STACK_INSTALLED_PACKAGES[@]}"
+    sudo apt-mark hold "${GPU_STACK_INSTALLED_PACKAGES[@]}" \
+        || error "Failed to hold NVIDIA/CUDA packages"
+    success "NVIDIA/CUDA packages held"
+}
+
+# ═══════════════════════════════════════════════════════════════
 # STEP 3 — Version Selection
 # ═══════════════════════════════════════════════════════════════
 select_driver_version() {
@@ -251,6 +353,9 @@ confirm_install() {
     echo -e "  CUDA Toolkit:  ${CUDA_TOOLKIT_VERSION}"
     echo -e "  cuDNN:         cudnn9-cuda-${CUDA_MAJOR}"
     echo -e "  Log file:      ${LOG_FILE}"
+    if [[ "${FREEZE_GPU_STACK}" == true || "${UNFREEZE_GPU_STACK}" == true ]]; then
+        echo -e "  GPU stack:     will be held after validation"
+    fi
     echo -e "${BOLD}════════════════════════════════════════${NC}"
     echo ""
     if [[ "${NON_INTERACTIVE}" == false ]]; then
@@ -675,6 +780,16 @@ offer_reboot() {
     echo -e "${BOLD}════════════════════════════════════════${NC}"
     echo ""
 
+    if [[ "${GPU_STACK_HOLD_DETECTED}" == true || "${GPU_STACK_HOLD_AFTER_INSTALL}" == true ]]; then
+        section "NVIDIA/CUDA Freeze Reminder"
+        warn "A frozen NVIDIA/CUDA stack is present on this node."
+        if [[ "${UNFREEZE_GPU_STACK}" == true ]]; then
+            success "Temporary bypass path completed — the validated stack was re-frozen after validation."
+        fi
+        warn "To update later: run nvidia-stack-hold.sh --unhold from the repo's install/ directory (or from /opt/provision if copied there)"
+        warn "To temporarily update through this installer: rerun with --unfreeze-gpu-stack"
+    fi
+
     if ! (command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null); then
         if [[ "${NON_INTERACTIVE}" == true ]]; then
             info "Non-interactive — reboot manually to activate NVIDIA kernel modules."
@@ -720,6 +835,13 @@ uninstall_node() {
         [[ "${confirm_uninstall,,}" == "y" ]] || error "Uninstall aborted by user."
     else
         info "Non-interactive mode — proceeding with uninstall"
+    fi
+
+    # Clear any package holds first so the purge path is not blocked by a
+    # frozen GPU stack from a previous validation run.
+    if apt-mark showhold 2>/dev/null | grep -Eq "${GPU_STACK_HOLD_REGEX}"; then
+        section "Removing NVIDIA/CUDA Holds"
+        unhold_gpu_stack_packages
     fi
 
     # ── 1. Stop and disable services ─────────────────────────
@@ -1067,12 +1189,20 @@ main() {
         uninstall_node
     else
         preflight_checks
+        warn_about_gpu_stack_holds
 
         section "Version Selection"
         select_driver_version
         select_cuda_version
         validate_combination
         confirm_install
+
+        if [[ "${UNFREEZE_GPU_STACK}" == true ]]; then
+            unhold_gpu_stack_packages
+            GPU_STACK_HOLD_AFTER_INSTALL=true
+        elif [[ "${FREEZE_GPU_STACK}" == true ]]; then
+            GPU_STACK_HOLD_AFTER_INSTALL=true
+        fi
 
         install_base_packages
         install_python_tooling
@@ -1085,6 +1215,9 @@ main() {
         install_dcgm
         setup_repos
         validate_install
+        if [[ "${GPU_STACK_HOLD_AFTER_INSTALL}" == true ]]; then
+            hold_gpu_stack_packages
+        fi
         offer_reboot
     fi
 }

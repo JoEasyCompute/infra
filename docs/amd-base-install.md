@@ -2,7 +2,7 @@
 
 **Version:** 2.0 (2026-03-15)  
 **Supported GPUs:** Any ROCm-compatible AMD GPU  
-**Supported OS:** Ubuntu 22.04 LTS, Ubuntu 24.04 LTS (x86_64)
+**Supported OS:** Ubuntu 22.04 LTS, Ubuntu 24.04 LTS, Ubuntu 26.04 LTS preview lane (x86_64)
 
 ---
 
@@ -22,6 +22,8 @@ The script is GPU-agnostic — it works for any ROCm-supported AMD GPU including
 | Instinct MI250X | gfx90a (CDNA2) |
 
 This script is the AMD counterpart to `base-install.sh` (NVIDIA/CUDA). The design patterns are identical — same logging, preflight checks, interactive/non-interactive modes, structured sections, and full uninstall capability.
+
+Ubuntu 26.04 is treated as an experimental ROCm 7.13 preview lane. The script uses AMD's 31.30 preview driver repository plus the `amdrocm7.13` package family for that OS, while 22.04 and 24.04 stay on the current production ROCm flow.
 
 ### What it installs
 
@@ -44,7 +46,7 @@ PyTorch is intentionally not pip-installed by this script. The correct ROCm whee
 
 ## Requirements
 
-- Ubuntu 22.04.5 or 24.04.3 (x86_64)
+- Ubuntu 22.04.5 or 24.04.3 (x86_64); Ubuntu 26.04 preview builds supported on the experimental lane
 - Supported kernel — see [Kernel Requirements](#kernel-requirements)
 - 15 GB+ free on `/usr` (ROCm stack is ~8–10 GB)
 - Network access to `repo.radeon.com` and `github.com`
@@ -61,6 +63,7 @@ This is the most common source of `amdgpu-dkms` build failures. AMD's DKMS drive
 |--------|-------------------|-------------------------------|
 | 22.04 | 5.15.x (GA) ✅  6.8.x (HWE) ✅ | 6.11+ ❌ |
 | 24.04 | 6.8.x (GA) ✅ | 6.11+ HWE ❌ |
+| 26.04 | Preview lane: follow AMD 31.30 guidance | Preview kernels outside the documented lane |
 
 The script checks your running kernel in preflight and warns with the exact fix command if you are outside the supported range.
 
@@ -79,6 +82,8 @@ sudo apt install linux-image-6.8.0-generic linux-headers-6.8.0-generic
 sudo reboot
 # select 6.8 in GRUB, then re-run the script
 ```
+
+**Ubuntu 26.04:** follow the current AMD 31.30 preview driver guidance if DKMS reports a mismatch. The installer intentionally warns rather than hard-fails on this preview lane so operators can validate on real hardware.
 
 ---
 
@@ -99,6 +104,10 @@ sudo bash install/amd-base-install.sh --uninstall
 
 # Full uninstall (non-interactive)
 sudo bash install/amd-base-install.sh --uninstall --yes
+
+# Inspect or reset the ROCm apt pin
+sudo bash install/amd-stack-pin.sh --status
+sudo bash install/amd-stack-pin.sh --reset
 ```
 
 ### ROCm version selection
@@ -107,6 +116,7 @@ sudo bash install/amd-base-install.sh --uninstall --yes
 |--------|------|---------------------|-------|
 | `--rocm 7.2` | 7.2 | 30.30 | Default, current production |
 | `--rocm 7.1` | 7.1 | 30.20.1 | Previous stable |
+| `--rocm 7.13` | 7.13 | 31.30 | Ubuntu 26.04 preview lane |
 
 **Important — two separate versioning schemes:** The `amdgpu` driver repo uses a build number (e.g. `30.30`) that does not match the ROCm version string. The script maps these automatically. When a new ROCm release comes out, check `https://repo.radeon.com/amdgpu/` for the correct build number and update the mapping table in `install_rocm_repos()`.
 
@@ -115,7 +125,7 @@ sudo bash install/amd-base-install.sh --uninstall --yes
 ## Install Steps
 
 ### Step 1 — Detect OS
-Reads `/etc/os-release`, confirms Ubuntu, maps version to apt codename (`jammy` / `noble`). Errors on unsupported versions.
+Reads `/etc/os-release`, confirms Ubuntu, maps version to apt codename (`jammy` / `noble` / `resolute`). Errors on unsupported versions.
 
 ### Step 2 — Pre-flight Checks
 Runs before any changes are made. Checks in order: sudo access, x86_64 architecture, 15 GB+ free on `/usr`, HTTPS connectivity to `repo.radeon.com` (hard fail) and `github.com` (soft warn), Secure Boot state, existing conflicting AMDGPU/ROCm packages, **kernel version** (see above), kernel headers availability in apt cache, AMD GPU presence in `lspci`.
@@ -123,7 +133,9 @@ Runs before any changes are made. Checks in order: sudo access, x86_64 architect
 The GPU not appearing in `lspci` is a warning, not a hard failure — the driver will install fine without the card physically present and will bind to it after reboot.
 
 ### Step 3 — ROCm Version Selection
-Interactive menu or `--rocm` argument. Defaults to 7.2 in non-interactive mode.
+Interactive menu or `--rocm` argument. Defaults to 7.2 in non-interactive mode on 22.04/24.04 and 7.13 preview on 26.04.
+
+If you are running Ubuntu 26.04, the installer auto-selects the preview lane even when you do not pass `--rocm`.
 
 ### Step 4 — Confirm
 Prints the full install summary: Ubuntu version, AMDGPU driver build number, ROCm version, GPU arch detection note, and log file path. Prompts for confirmation unless `--yes`.
@@ -137,6 +149,8 @@ Registers gcc-11 and gcc-12 with `update-alternatives`. Active compiler defaults
 ### Step 7 — AMD ROCm Repository & Signing Key
 
 **Stale repo cleanup:** Before writing any repo files, removes any existing `amdgpu.list`, `rocm.list`, and `rocm-pin-600` left by a previous run (failed or otherwise), then flushes the apt cache. This means the script is always safe to re-run after a failure.
+
+For Ubuntu 26.04, the installer uses AMD's 31.30 preview driver repository and the `repo.amd.com` ROCm package layout with the `amdrocm7.13` package family.
 
 **Repo setup:**
 
@@ -156,6 +170,13 @@ Registers gcc-11 and gcc-12 with `update-alternatives`. Active compiler defaults
 ```
 
 GPG key stored at `/etc/apt/keyrings/rocm.gpg`.
+
+If you need to inspect or restore that pin outside the installer, use `install/amd-stack-pin.sh`:
+
+```bash
+sudo bash install/amd-stack-pin.sh --status
+sudo bash install/amd-stack-pin.sh --reset
+```
 
 ### Step 8 — AMDGPU Driver + ROCm Stack
 Installs `amdgpu-dkms` (kernel module, DKMS-managed), then the `rocm` meta-package (full userspace stack). Adds the current user to the `render` and `video` groups — required for GPU device access on all AMD GPUs. Group membership takes effect on next login.
@@ -257,11 +278,14 @@ pip install torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/rocm7.2
 
 # Option B: AMD official Docker image (recommended for production)
-docker pull rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.8.0
+UBUNTU_TAG=ubuntu24.04   # use ubuntu26.04 on the preview lane
+docker pull "rocm/pytorch:rocm7.2_${UBUNTU_TAG}_py3.10_pytorch_release_2.8.0"
 
 # Verify — ROCm intentionally surfaces AMD GPUs through torch.cuda
 python3 -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
+
+For Ubuntu 26.04, substitute `rocm7.13` in the pip index URL and `ubuntu26.04` in the container tag shown above.
 
 ### Other ROCm-native tools
 
