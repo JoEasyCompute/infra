@@ -292,7 +292,7 @@ Builds and runs two samples from [cuda-samples](https://github.com/NVIDIA/cuda-s
 
 **Fails if:** Either binary builds and then exits non-zero at runtime.
 
-**Reported as `NOT BEING RUN` instead of failures if:** The sample source layout changed, the build output is unavailable after attempting to build, or the sample binary cannot be found after prepare/build.
+**Reported as `NOT BEING RUN` instead of failures if:** The sample source layout changed, the build output is unavailable after attempting to build, or the sample binary cannot be found after prepare/build. The lookup now checks both the current `cpp/` tree and the legacy `Samples/` tree.
 
 **Notes:** `sm_110` is automatically patched out of CMakeLists before building — it was removed in CUDA 12.9 but is hardcoded in the cuda-samples repo.
 

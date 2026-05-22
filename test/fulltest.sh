@@ -257,9 +257,11 @@ find_binary() {
 
 find_cuda_sample_source() {
     local sample_name="$1"
-    local candidate
+    local root candidate
 
     for candidate in \
+        "$BUILD_DIR/cuda-samples/cpp/1_Utilities/${sample_name}" \
+        "$BUILD_DIR/cuda-samples/cpp/0_Introduction/${sample_name}" \
         "$BUILD_DIR/cuda-samples/Samples/1_Utilities/${sample_name}" \
         "$BUILD_DIR/cuda-samples/Samples/0_Introduction/${sample_name}"
     do
@@ -269,8 +271,16 @@ find_cuda_sample_source() {
         fi
     done
 
-    find "$BUILD_DIR/cuda-samples/Samples" -maxdepth 5 -type d -name "$sample_name" \
-        2>/dev/null | head -1
+    for root in "$BUILD_DIR/cuda-samples/cpp" "$BUILD_DIR/cuda-samples/Samples"; do
+        [ -d "$root" ] || continue
+        candidate=$(find "$root" -maxdepth 6 -type d -name "$sample_name" 2>/dev/null | head -1)
+        if [ -n "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
 }
 
 # decode_throttle <hex_bitmask>
@@ -930,7 +940,7 @@ test_cuda_samples() {
             fi
         fi
     else
-        record_not_run "CUDA Samples / deviceQuery" "source directory unavailable"
+        record_not_run "CUDA Samples / deviceQuery" "source directory unavailable under cpp/ or Samples/"
         device_query_not_run=true
     fi
 
@@ -947,7 +957,7 @@ test_cuda_samples() {
             fi
         fi
     else
-        record_not_run "CUDA Samples / p2pBandwidthLatencyTest" "source directory unavailable"
+        record_not_run "CUDA Samples / p2pBandwidthLatencyTest" "source directory unavailable under cpp/ or Samples/"
         p2p_not_run=true
     fi
 
