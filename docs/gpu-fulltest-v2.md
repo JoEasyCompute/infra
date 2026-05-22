@@ -87,6 +87,7 @@ Examples:
 - The PyTorch benchmark now keeps its generated DDP repro script on failure and prints a condensed failure summary plus a suggested debug rerun command.
 - The PyTorch prepare/run path now logs the active `python3` runtime and warns when Python 3.12+ is in use because `torch.distributed` / `torchrun` segfaults have been seen there.
 - Sustained stress and node-stress now treat thermal/performance-only outcomes as summary remarks, and unavailable backends are listed under `NOT BEING RUN` instead of failing the overall run.
+- `SW_Thermal`-only exits are treated as remarks in the stress summary, provided there are no hard-crash indicators.
 
 ---
 

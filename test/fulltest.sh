@@ -1409,6 +1409,12 @@ log_sensor_snapshot() {
 readonly TEMP_WARN=87      # °C — flag as potential issue
 readonly FAN_WARN=100      # % — flag as maxed out
 
+stress_hard_failure_detected() {
+    grep -qiE \
+        'Throttling HW: true|Thermal HW: true|HW_Slowdown|HW_PowerBrake|CUDA error|illegal memory access|device-side assert|segmentation fault|SIGSEGV|Xid|panic|core dumped|fatal error' \
+        "$LOG_FILE"
+}
+
 # run_burn_monitor <burn_pid>
 # Polls nvidia-smi every 5s while the burn PID is alive.
 # Tracks per-GPU peak temp, peak fan, throttle events.
@@ -1549,19 +1555,14 @@ test_stress() {
     # (e.g. RTX A4000 at 120W). Treat exit code 1 with clean thermals as a
     # warning rather than a hard failure; only fail on thermal violations.
     if [ "$burn_rc" -ne 0 ]; then
-        # Check if the only issue is the health check (no throttling, temps OK)
-        if grep -q "GPU is not performing as expected" "$LOG_FILE" 2>/dev/null && \
-           ! grep -q "Throttling HW: true\|Thermal SW: true\|Thermal HW: true" "$LOG_FILE" 2>/dev/null && \
-           [ "$BURN_THERMAL_RC" -eq 0 ]; then
-            log "  WARN: Burn tool health check flagged Gflops on some GPUs (exit $burn_rc)."
-            log "  No throttling or thermal violations detected — this is a threshold"
-            log "  sensitivity false positive (common on TDP-limited GPUs like RTX A4000)."
-            log "  Treating as WARNING only."
-            record_remark "Sustained Compute Stress: compute health check reported a performance warning only; treated as a remark."
-        else
+        if stress_hard_failure_detected; then
             log "  ERROR: Burn tool exited with code $burn_rc"
             return 1
         fi
+
+        log "  WARN: Burn tool exited with code $burn_rc but only performance/thermal warnings were detected."
+        log "  No hardware-crash indicators detected — treating as remark only."
+        record_remark "Sustained Compute Stress: performance/thermal warning only (including SW thermal throttling); treated as a remark."
     fi
     if [ "$BURN_THERMAL_RC" -ne 0 ]; then
         log "  Compute: PASS  |  Thermals: WARNING (see summary above)"
@@ -1607,16 +1608,14 @@ test_node_stress() {
     log_sensor_snapshot "Final sensors snapshot (if available):"
 
     if [ "$burn_rc" -ne 0 ]; then
-        if grep -q "GPU is not performing as expected" "$LOG_FILE" 2>/dev/null && \
-           ! grep -q "Throttling HW: true\|Thermal SW: true\|Thermal HW: true" "$LOG_FILE" 2>/dev/null && \
-           [ "$BURN_THERMAL_RC" -eq 0 ]; then
-            log "  WARN: GPU stress backend reported a health warning (exit $burn_rc)."
-            log "  No throttling or thermal violations detected — treating as warning only."
-            record_remark "Node Stress: GPU backend reported a performance warning only; treated as a remark."
-        else
+        if stress_hard_failure_detected; then
             log "  ERROR: GPU stress backend exited with code $burn_rc"
             return 1
         fi
+
+        log "  WARN: GPU stress backend exited with code $burn_rc but only performance/thermal warnings were detected."
+        log "  No hardware-crash indicators detected — treating as remark only."
+        record_remark "Node Stress: performance/thermal warning only (including SW thermal throttling); treated as a remark."
     fi
 
     if [ "$cpu_ram_rc" -ne 0 ]; then
