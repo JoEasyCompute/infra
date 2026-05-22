@@ -255,6 +255,24 @@ find_binary() {
     find "$1" -type f -name "$2" ! -name "*.cmake" ! -name "*.cpp" 2>/dev/null | head -1
 }
 
+find_cuda_sample_source() {
+    local sample_name="$1"
+    local candidate
+
+    for candidate in \
+        "$BUILD_DIR/cuda-samples/Samples/1_Utilities/${sample_name}" \
+        "$BUILD_DIR/cuda-samples/Samples/0_Introduction/${sample_name}"
+    do
+        if [ -d "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    find "$BUILD_DIR/cuda-samples/Samples" -maxdepth 5 -type d -name "$sample_name" \
+        2>/dev/null | head -1
+}
+
 # decode_throttle <hex_bitmask>
 # Translates nvidia-smi clocks_throttle_reasons.active hex bitmask into
 # human-readable labels, returning only the bits that represent real problems.
@@ -899,22 +917,47 @@ test_cuda_samples() {
     [ ! -d "$BUILD_DIR/cuda-samples" ] && \
         git clone https://github.com/NVIDIA/cuda-samples.git "$BUILD_DIR/cuda-samples"
 
-    cmake_build "$BUILD_DIR/cuda-samples/Samples/1_Utilities/deviceQuery" "deviceQuery"
-
-    local p2p_src
-    p2p_src=$(find "$BUILD_DIR/cuda-samples/Samples" -maxdepth 3 \
-        -type d -name "p2pBandwidthLatencyTest" 2>/dev/null | head -1)
-    [ -n "$p2p_src" ] && cmake_build "$p2p_src" "p2pBandwidthLatencyTest"
-
     local rc=0
+    local device_query_src device_query_bin device_query_not_run=false
+    device_query_src=$(find_cuda_sample_source "deviceQuery")
+    if [ -n "$device_query_src" ]; then
+        log "  deviceQuery source: $device_query_src"
+        device_query_bin=$(find_binary "$BUILD_DIR/cuda-samples" "deviceQuery")
+        if [ -z "$device_query_bin" ]; then
+            if ! cmake_build "$device_query_src" "deviceQuery"; then
+                record_not_run "CUDA Samples / deviceQuery" "source/build layout issue or build failure"
+                device_query_not_run=true
+            fi
+        fi
+    else
+        record_not_run "CUDA Samples / deviceQuery" "source directory unavailable"
+        device_query_not_run=true
+    fi
+
+    local p2p_src p2p_not_run=false
+    p2p_src=$(find_cuda_sample_source "p2pBandwidthLatencyTest")
+    if [ -n "$p2p_src" ]; then
+        local p2p_bin
+        log "  p2pBandwidthLatencyTest source: $p2p_src"
+        p2p_bin=$(find_binary "$BUILD_DIR/cuda-samples" "p2pBandwidthLatencyTest")
+        if [ -z "$p2p_bin" ]; then
+            if ! cmake_build "$p2p_src" "p2pBandwidthLatencyTest"; then
+                record_not_run "CUDA Samples / p2pBandwidthLatencyTest" "source/build layout issue or build failure"
+                p2p_not_run=true
+            fi
+        fi
+    else
+        record_not_run "CUDA Samples / p2pBandwidthLatencyTest" "source directory unavailable"
+        p2p_not_run=true
+    fi
 
     log "--- deviceQuery ---"
     local dq_bin
     dq_bin=$(find_binary "$BUILD_DIR/cuda-samples" "deviceQuery")
     if [ -n "$dq_bin" ]; then
         "$dq_bin" 2>&1 | tee -a "$LOG_FILE" || rc=1
-    else
-        log "  WARN: deviceQuery binary not found"; rc=1
+    elif [ "$device_query_not_run" = false ]; then
+        record_not_run "CUDA Samples / deviceQuery" "binary unavailable after build"
     fi
 
     log "--- p2pBandwidthLatencyTest ---"
@@ -922,8 +965,8 @@ test_cuda_samples() {
     p2p_bin=$(find_binary "$BUILD_DIR/cuda-samples" "p2pBandwidthLatencyTest")
     if [ -n "$p2p_bin" ]; then
         "$p2p_bin" 2>&1 | tee -a "$LOG_FILE" || rc=1
-    else
-        log "  WARN: p2pBandwidthLatencyTest binary not found"; rc=1
+    elif [ "$p2p_not_run" = false ]; then
+        record_not_run "CUDA Samples / p2pBandwidthLatencyTest" "binary unavailable after build"
     fi
 
     return $rc

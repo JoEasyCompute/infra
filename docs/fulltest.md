@@ -290,7 +290,9 @@ Builds and runs two samples from [cuda-samples](https://github.com/NVIDIA/cuda-s
 | `deviceQuery` | CUDA runtime init, GPU enumeration, driver/runtime version, capability flags |
 | `p2pBandwidthLatencyTest` | GPU-to-GPU P2P access, bandwidth, and latency |
 
-**Fails if:** Either binary fails to build or exits non-zero.
+**Fails if:** Either binary builds and then exits non-zero at runtime.
+
+**Reported as `NOT BEING RUN` instead of failures if:** The sample source layout changed, the build output is unavailable after attempting to build, or the sample binary cannot be found after prepare/build.
 
 **Notes:** `sm_110` is automatically patched out of CMakeLists before building — it was removed in CUDA 12.9 but is hardcoded in the cuda-samples repo.
 

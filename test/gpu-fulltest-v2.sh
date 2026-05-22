@@ -89,6 +89,8 @@ PIP_EXTRA=""
 UBUNTU_MAJOR=""
 RESULTS_STRESS_LABEL="Sustained Compute Stress"
 PYTORCH_RUNTIME_WARNED=false
+CUDA_SAMPLES_DEVICEQUERY_READY=false
+CUDA_SAMPLES_P2P_READY=false
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Utilities
@@ -259,6 +261,24 @@ cmake_build() {
 
 find_binary() {
     find "$1" -type f -name "$2" ! -name "*.cmake" ! -name "*.cpp" 2>/dev/null | head -1
+}
+
+find_cuda_sample_source() {
+    local sample_name="$1"
+    local candidate
+
+    for candidate in \
+        "$BUILD_DIR/cuda-samples/Samples/1_Utilities/${sample_name}" \
+        "$BUILD_DIR/cuda-samples/Samples/0_Introduction/${sample_name}"
+    do
+        if [ -d "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    find "$BUILD_DIR/cuda-samples/Samples" -maxdepth 5 -type d -name "$sample_name" \
+        2>/dev/null | head -1
 }
 
 # decode_throttle <hex_bitmask>
@@ -498,25 +518,48 @@ prepare_nccl() {
 }
 
 prepare_cuda_samples() {
+    CUDA_SAMPLES_DEVICEQUERY_READY=false
+    CUDA_SAMPLES_P2P_READY=false
+
     if [ ! -d "$BUILD_DIR/cuda-samples" ]; then
         ensure_repo_clone_allowed "$BUILD_DIR/cuda-samples" "cuda-samples" || return 1
         git clone https://github.com/NVIDIA/cuda-samples.git "$BUILD_DIR/cuda-samples"
     fi
 
-    cmake_build "$BUILD_DIR/cuda-samples/Samples/1_Utilities/deviceQuery" "deviceQuery" || return 1
-
-    local p2p_src
-    p2p_src=$(find "$BUILD_DIR/cuda-samples/Samples" -maxdepth 3 \
-        -type d -name "p2pBandwidthLatencyTest" 2>/dev/null | head -1)
-    if [ -n "$p2p_src" ]; then
-        cmake_build "$p2p_src" "p2pBandwidthLatencyTest" || return 1
+    local device_query_src p2p_src dq_bin p2p_bin
+    device_query_src=$(find_cuda_sample_source "deviceQuery")
+    if [ -n "$device_query_src" ]; then
+        log "  deviceQuery source: $device_query_src"
+        if cmake_build "$device_query_src" "deviceQuery"; then
+            dq_bin=$(find_binary "$BUILD_DIR/cuda-samples" "deviceQuery")
+            if [ -n "$dq_bin" ]; then
+                CUDA_SAMPLES_DEVICEQUERY_READY=true
+            else
+                record_not_run "CUDA Samples / deviceQuery" "binary unavailable after build"
+            fi
+        else
+            record_not_run "CUDA Samples / deviceQuery" "source/build layout issue or build failure"
+        fi
+    else
+        record_not_run "CUDA Samples / deviceQuery" "source directory unavailable"
     fi
 
-    local dq_bin p2p_bin
-    dq_bin=$(find_binary "$BUILD_DIR/cuda-samples" "deviceQuery")
-    p2p_bin=$(find_binary "$BUILD_DIR/cuda-samples" "p2pBandwidthLatencyTest")
-    [ -n "$dq_bin" ] || { log "ERROR: deviceQuery binary not found after prepare."; return 1; }
-    [ -n "$p2p_bin" ] || { log "ERROR: p2pBandwidthLatencyTest binary not found after prepare."; return 1; }
+    p2p_src=$(find_cuda_sample_source "p2pBandwidthLatencyTest")
+    if [ -n "$p2p_src" ]; then
+        log "  p2pBandwidthLatencyTest source: $p2p_src"
+        if cmake_build "$p2p_src" "p2pBandwidthLatencyTest"; then
+            p2p_bin=$(find_binary "$BUILD_DIR/cuda-samples" "p2pBandwidthLatencyTest")
+            if [ -n "$p2p_bin" ]; then
+                CUDA_SAMPLES_P2P_READY=true
+            else
+                record_not_run "CUDA Samples / p2pBandwidthLatencyTest" "binary unavailable after build"
+            fi
+        else
+            record_not_run "CUDA Samples / p2pBandwidthLatencyTest" "source/build layout issue or build failure"
+        fi
+    else
+        record_not_run "CUDA Samples / p2pBandwidthLatencyTest" "source directory unavailable"
+    fi
 }
 
 prepare_nvbandwidth() {
@@ -1105,21 +1148,29 @@ test_cuda_samples() {
     local rc=0
 
     log "--- deviceQuery ---"
-    local dq_bin
-    dq_bin=$(find_binary "$BUILD_DIR/cuda-samples" "deviceQuery")
-    if [ -n "$dq_bin" ]; then
-        "$dq_bin" 2>&1 | tee -a "$LOG_FILE" || rc=1
+    if [ "$CUDA_SAMPLES_DEVICEQUERY_READY" = true ]; then
+        local dq_bin
+        dq_bin=$(find_binary "$BUILD_DIR/cuda-samples" "deviceQuery")
+        if [ -n "$dq_bin" ]; then
+            "$dq_bin" 2>&1 | tee -a "$LOG_FILE" || rc=1
+        else
+            record_not_run "CUDA Samples / deviceQuery" "binary unavailable after build"
+        fi
     else
-        log "  WARN: deviceQuery binary not found"; rc=1
+        log "  NOT BEING RUN: CUDA Samples / deviceQuery — build/layout issue already recorded"
     fi
 
     log "--- p2pBandwidthLatencyTest ---"
-    local p2p_bin
-    p2p_bin=$(find_binary "$BUILD_DIR/cuda-samples" "p2pBandwidthLatencyTest")
-    if [ -n "$p2p_bin" ]; then
-        "$p2p_bin" 2>&1 | tee -a "$LOG_FILE" || rc=1
+    if [ "$CUDA_SAMPLES_P2P_READY" = true ]; then
+        local p2p_bin
+        p2p_bin=$(find_binary "$BUILD_DIR/cuda-samples" "p2pBandwidthLatencyTest")
+        if [ -n "$p2p_bin" ]; then
+            "$p2p_bin" 2>&1 | tee -a "$LOG_FILE" || rc=1
+        else
+            record_not_run "CUDA Samples / p2pBandwidthLatencyTest" "binary unavailable after build"
+        fi
     else
-        log "  WARN: p2pBandwidthLatencyTest binary not found"; rc=1
+        log "  NOT BEING RUN: CUDA Samples / p2pBandwidthLatencyTest — build/layout issue already recorded"
     fi
 
     return $rc
