@@ -4,7 +4,8 @@
 # Supports: RTX 4090/5090, A4000, A100, H100 on Ubuntu 22.04/24.04
 # Usage:  ./gpu-fulltest-v2.sh [test...] [--burn-duration <s>] [--clean] [--list] [--help]
 #   Tests: preflight, ecc, pcie, clocks, nccl, cuda-samples, nvbandwidth,
-#          dcgm, pytorch, memtest, stress
+#          dcgm, pytorch, memtest, stress, node-stress, post-stress-recovery,
+#          gpu-policy
 #   If no tests specified, all are run in the order above.
 # =============================================================================
 
@@ -88,6 +89,7 @@ TORCH_CUDA=""
 PIP_EXTRA=""
 UBUNTU_MAJOR=""
 RESULTS_STRESS_LABEL="Sustained Compute Stress"
+STRESS_ACTIVITY_START_TS=""
 PYTORCH_RUNTIME_WARNED=false
 CUDA_SAMPLES_DEVICEQUERY_READY=false
 CUDA_SAMPLES_P2P_READY=false
@@ -366,6 +368,10 @@ record_not_run() {
 
 record_remark() {
     RESULTS_REMARK+=("$1")
+}
+
+record_stress_activity_start() {
+    [ -n "$STRESS_ACTIVITY_START_TS" ] || STRESS_ACTIVITY_START_TS=$(date +%s)
 }
 
 run_prepare_step() {
@@ -1734,6 +1740,7 @@ test_stress() {
     local duration_min burn_rc=0
     duration_min=$(echo "scale=1; $BURN_DURATION / 60" | bc)
     BURN_THERMAL_RC=0
+    record_stress_activity_start
 
     # Launch the burn tool in the background, monitor thermals alongside it,
     # then wait for it to finish and collect both the compute RC and thermal RC.
@@ -1775,6 +1782,7 @@ test_node_stress() {
     duration_min="$NODE_STRESS_MINUTES"
     duration_s=$(( duration_min * 60 ))
     BURN_THERMAL_RC=0
+    record_stress_activity_start
 
     log "  Running full-node stress for ${duration_min} minute(s)"
     log_sensor_snapshot "Initial sensors snapshot (if available):"
@@ -1826,6 +1834,201 @@ test_node_stress() {
     fi
 
     return 0
+}
+
+test_post_stress_recovery() {
+    local label="Post-Stress Recovery"
+    local cooldown_s="${POST_STRESS_RECOVERY_COOLDOWN_SECONDS:-20}"
+    local since_ts="${STRESS_ACTIVITY_START_TS:-}"
+    local rc=0
+
+    log "  Cooling down for ${cooldown_s} second(s) before recovery check"
+    sleep "$cooldown_s"
+
+    if [ -n "$since_ts" ]; then
+        log "  Stress window start : $(date -u -d "@$since_ts" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || echo "$since_ts")"
+    else
+        log "  NOTE: No prior stress timestamp recorded; kernel-log scan is limited to the current runtime."
+        record_remark "$label: no prior stress timestamp recorded; kernel-log scan limited to the current runtime."
+    fi
+
+    local gpu_count
+    gpu_count=$(nvidia-smi $SMI_FILTER -L 2>/dev/null | grep -c '^GPU' || true)
+    if [ -z "$gpu_count" ] || [ "$gpu_count" -eq 0 ]; then
+        log "  ERROR: nvidia-smi could not enumerate GPUs during recovery."
+        return 1
+    fi
+    if [ "$gpu_count" -ne "$NUM_GPUS" ]; then
+        log "  ERROR: GPU count changed after stress (expected $NUM_GPUS, found $gpu_count)."
+        return 1
+    fi
+
+    if [ -n "$since_ts" ]; then
+        if command -v journalctl >/dev/null 2>&1; then
+            local journal_cmd=(journalctl -k --since "@$since_ts")
+            local kernel_errors
+            kernel_errors=$("${journal_cmd[@]}" 2>/dev/null \
+                | grep -Ei 'NVRM: Xid|Xid|fallen off the bus|GPU has fallen off the bus|PCIe Bus Error|nvrm.*error|nvidia.*error|segfault|fatal error|panic' \
+                | tail -40)
+            if [ -n "$kernel_errors" ]; then
+                log "  ERROR: Kernel log showed recovery-window GPU errors:"
+                log "$kernel_errors"
+                return 1
+            fi
+        else
+            record_remark "$label: kernel-log recovery scan unavailable (journalctl missing)."
+        fi
+    fi
+
+    local recovery_lines
+    if ! recovery_lines=$(nvidia-smi $SMI_FILTER \
+        --query-gpu=index,name,temperature.gpu,power.draw,fan.speed,clocks.sm,clocks_throttle_reasons.active \
+        --format=csv,noheader,nounits 2>/dev/null); then
+        log "  ERROR: nvidia-smi recovery snapshot failed."
+        return 1
+    fi
+
+    log "  Recovery snapshot:"
+    while IFS=, read -r gpu_idx gpu_name temp power fan clk_sm throttle; do
+        [ -n "$gpu_idx" ] || continue
+
+        gpu_idx=$(echo "$gpu_idx" | xargs)
+        gpu_name=$(echo "$gpu_name" | xargs)
+        temp=$(echo "$temp" | xargs)
+        power=$(echo "$power" | xargs)
+        fan=$(echo "$fan" | xargs)
+        clk_sm=$(echo "$clk_sm" | xargs)
+        throttle=$(echo "$throttle" | xargs)
+        local throttle_decoded
+        throttle_decoded=$(decode_throttle "$throttle")
+
+        local temp_val fan_val
+        temp_val="${temp//[^0-9]/}"
+        fan_val="${fan//[^0-9]/}"
+
+        local issues=()
+        local hard_issue=false
+        if [ "$throttle_decoded" != "Not Active" ]; then
+            if echo "$throttle_decoded" | grep -q 'SW_Thermal'; then
+                issues+=("soft thermal throttle still active (${throttle_decoded})")
+            fi
+            if echo "$throttle_decoded" | grep -Eq 'HW_Slowdown|HW_PowerBrake'; then
+                issues+=("hard throttle still active (${throttle_decoded})")
+                hard_issue=true
+            fi
+        fi
+        if [ -n "$temp_val" ] && [ "$temp_val" -ge "$TEMP_WARN" ] 2>/dev/null; then
+            issues+=("temp ${temp_val}°C >= ${TEMP_WARN}°C")
+        fi
+        if [ -n "$fan_val" ] && [ "$fan_val" -ge "$FAN_WARN" ] 2>/dev/null; then
+            issues+=("fan ${fan_val}% >= ${FAN_WARN}%")
+        fi
+
+        if [ "${#issues[@]}" -eq 0 ]; then
+            log "  GPU $gpu_idx ($gpu_name): OK — ${temp}°C, ${fan}, ${clk_sm} MHz, ${throttle_decoded}"
+            continue
+        fi
+
+        local issue_text="${issues[*]}"
+        if [ "$hard_issue" = true ]; then
+            log "  ERROR: GPU $gpu_idx ($gpu_name): $issue_text"
+            rc=1
+        else
+            log "  WARN: GPU $gpu_idx ($gpu_name): $issue_text"
+            record_remark "$label: GPU $gpu_idx ($gpu_name) — $issue_text"
+        fi
+    done <<< "$recovery_lines"
+
+    if [ "$rc" -eq 0 ]; then
+        log "  Recovery check completed."
+    fi
+    return "$rc"
+}
+
+test_gpu_policy() {
+    local label="GPU Policy"
+    local strict="${GPU_POLICY_STRICT:-0}"
+    local require_persistence="${GPU_POLICY_REQUIRE_PERSISTENCE:-0}"
+    local max_idle_temp="${GPU_POLICY_MAX_IDLE_TEMP:-}"
+    local min_power_limit="${GPU_POLICY_MIN_POWER_LIMIT_W:-}"
+    local max_power_limit="${GPU_POLICY_MAX_POWER_LIMIT_W:-}"
+    local configured=false
+    local rc=0
+
+    [ "$require_persistence" = 1 ] && configured=true
+    [ -n "$max_idle_temp" ] && configured=true
+    [ -n "$min_power_limit" ] && configured=true
+    [ -n "$max_power_limit" ] && configured=true
+
+    if [ "$configured" = false ]; then
+        record_not_run "$label" "no GPU_POLICY_* thresholds configured"
+        log "  NOTE: Set GPU_POLICY_REQUIRE_PERSISTENCE=1 and/or GPU_POLICY_MAX_IDLE_TEMP / GPU_POLICY_*_POWER_LIMIT_W to enable this test."
+        return 0
+    fi
+
+    log "  Policy mode        : $([ "$strict" = 1 ] && echo strict || echo advisory)"
+    log "  Persistence required: $([ "$require_persistence" = 1 ] && echo yes || echo no)"
+    [ -n "$max_idle_temp" ] && log "  Max idle temp      : ${max_idle_temp}°C"
+    [ -n "$min_power_limit" ] && log "  Min power limit    : ${min_power_limit}W"
+    [ -n "$max_power_limit" ] && log "  Max power limit    : ${max_power_limit}W"
+
+    local policy_lines
+    if ! policy_lines=$(nvidia-smi $SMI_FILTER \
+        --query-gpu=index,name,temperature.gpu,power.limit,persistence_mode,clocks_throttle_reasons.active \
+        --format=csv,noheader,nounits 2>/dev/null); then
+        log "  ERROR: nvidia-smi policy snapshot failed."
+        return 1
+    fi
+
+    while IFS=, read -r gpu_idx gpu_name temp power_limit persistence throttle; do
+        [ -n "$gpu_idx" ] || continue
+
+        gpu_idx=$(echo "$gpu_idx" | xargs)
+        gpu_name=$(echo "$gpu_name" | xargs)
+        temp=$(echo "$temp" | xargs)
+        power_limit=$(echo "$power_limit" | xargs)
+        persistence=$(echo "$persistence" | xargs)
+        throttle=$(echo "$throttle" | xargs)
+        local throttle_decoded
+        throttle_decoded=$(decode_throttle "$throttle")
+
+        local issues=()
+        if [ "$require_persistence" = 1 ] && [ "$persistence" != "Enabled" ]; then
+            issues+=("persistence mode is ${persistence}")
+        fi
+        if [ -n "$max_idle_temp" ] && awk -v val="$temp" -v max="$max_idle_temp" 'BEGIN { exit !(val > max) }'; then
+            issues+=("idle temp ${temp}°C > ${max_idle_temp}°C")
+        fi
+        if [ -n "$min_power_limit" ] && awk -v val="$power_limit" -v min="$min_power_limit" 'BEGIN { exit !(val < min) }'; then
+            issues+=("power limit ${power_limit}W < ${min_power_limit}W")
+        fi
+        if [ -n "$max_power_limit" ] && awk -v val="$power_limit" -v max="$max_power_limit" 'BEGIN { exit !(val > max) }'; then
+            issues+=("power limit ${power_limit}W > ${max_power_limit}W")
+        fi
+        if [ "$throttle_decoded" != "Not Active" ]; then
+            if echo "$throttle_decoded" | grep -q 'SW_Thermal'; then
+                issues+=("soft thermal throttle active (${throttle_decoded})")
+            else
+                issues+=("hard throttle active (${throttle_decoded})")
+            fi
+        fi
+
+        if [ "${#issues[@]}" -eq 0 ]; then
+            log "  GPU $gpu_idx ($gpu_name): OK — temp ${temp}°C, power limit ${power_limit}W, persistence ${persistence}"
+            continue
+        fi
+
+        local issue_text="${issues[*]}"
+        if [ "$strict" = 1 ]; then
+            log "  ERROR: GPU $gpu_idx ($gpu_name): $issue_text"
+            rc=1
+        else
+            log "  WARN: GPU $gpu_idx ($gpu_name): $issue_text"
+            record_remark "$label: GPU $gpu_idx ($gpu_name) — $issue_text"
+        fi
+    done <<< "$policy_lines"
+
+    return "$rc"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1941,6 +2144,12 @@ run_selected_tests() {
             node-stress)
                 run_test "Node Stress (CPU + RAM + GPU) (${NODE_STRESS_MINUTES} min)"      test_node_stress
                 ;;
+            post-stress-recovery)
+                run_test "Post-Stress Recovery"                                             test_post_stress_recovery
+                ;;
+            gpu-policy)
+                run_test "GPU Policy"                                                        test_gpu_policy
+                ;;
         esac
     done
 }
@@ -1969,6 +2178,8 @@ Available tests (run in this order if none specified):
   memtest       cuda_memtest VRAM integrity (10 passes per GPU)
   stress        Sustained compute stress: gpu-fryer / gpu-burn / PyTorch
   node-stress   Node-wide stress: stress-ng CPU + RAM plus GPU burn
+  post-stress-recovery  GPU recheck after stress: recovery, logs, throttle clear
+  gpu-policy    Optional policy check: persistence / power limit / idle temp
 
 Options:
   --gpu <index[,index...]>   Target specific GPU(s) by index — single (3) or comma-separated (2,4,5)
@@ -1989,12 +2200,15 @@ Examples:
   ./gpu-fulltest-v2.sh preflight ecc pcie clocks    # hardware health checks only
   ./gpu-fulltest-v2.sh nccl pytorch                 # communication + framework only
   ./gpu-fulltest-v2.sh stress --burn-duration 3600  # 1 hour stress test
+  ./gpu-fulltest-v2.sh post-stress-recovery          # recovery check after stress
+  GPU_POLICY_REQUIRE_PERSISTENCE=1 ./gpu-fulltest-v2.sh gpu-policy
   ./gpu-fulltest-v2.sh --clean                      # wipe build/ and exit
   ./gpu-fulltest-v2.sh --clean nccl                 # clean then run nccl
 EOF
 }
 
-ALL_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch memtest stress node-stress)
+ALL_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch memtest stress node-stress post-stress-recovery gpu-policy)
+DEFAULT_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch memtest stress node-stress post-stress-recovery)
 SELECTED_TESTS=()
 
 # Two-pass parse: first pass handles --help/--list which exit immediately,
@@ -2044,7 +2258,7 @@ while [ "$i" -lt "${#args[@]}" ]; do
             fi
             NODE_STRESS_MINUTES="$val"
             ;;
-        preflight|ecc|pcie|clocks|nccl|cuda-samples|nvbandwidth|dcgm|pytorch|memtest|stress|node-stress)
+        preflight|ecc|pcie|clocks|nccl|cuda-samples|nvbandwidth|dcgm|pytorch|memtest|stress|node-stress|post-stress-recovery|gpu-policy)
             SELECTED_TESTS+=("$arg") ;;
         *)
             echo "Unknown argument: $arg" >&2; usage >&2; exit 1 ;;
@@ -2064,7 +2278,7 @@ if [ "$CLEAN_BUILD" = true ]; then
     echo ""
 fi
 
-[ "${#SELECTED_TESTS[@]}" -eq 0 ] && SELECTED_TESTS=("${ALL_TESTS[@]}")
+[ "${#SELECTED_TESTS[@]}" -eq 0 ] && SELECTED_TESTS=("${DEFAULT_TESTS[@]}")
 
 detect_system
 prepare_selected_tests || {
