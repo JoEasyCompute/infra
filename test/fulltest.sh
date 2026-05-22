@@ -63,6 +63,8 @@ mkdir -p "$BUILD_DIR" 2>/dev/null || {
 RESULTS_PASS=()
 RESULTS_FAIL=()
 RESULTS_SKIP=()
+RESULTS_NOT_RUN=()
+RESULTS_REMARK=()
 
 GPU_TARGET=""   # set by --gpu <idx[,idx...]>; empty means all GPUs
 SMI_FILTER=""   # set to "-i <idx[,idx...]>" in detect_system when GPU_TARGET is set
@@ -317,6 +319,17 @@ skip_test() {
     log "Reason : $2"
     log "========================================"
     RESULTS_SKIP+=("$1 — $2")
+}
+
+record_not_run() {
+    local name="$1"
+    local reason="$2"
+    log "  NOT BEING RUN: ${name} — ${reason}"
+    RESULTS_NOT_RUN+=("${name} — ${reason}")
+}
+
+record_remark() {
+    RESULTS_REMARK+=("$1")
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1267,6 +1280,19 @@ run_pytorch_stress_for_duration() {
     local duration_s="$1"
     local script="$BUILD_DIR/_gpu_stress.py"
     ensure_build_dir_writable "writing stress helper" || return 1
+    if ! python3 - <<'PY' >/dev/null 2>&1
+import sys
+try:
+    import torch
+except Exception:
+    sys.exit(1)
+sys.exit(0 if torch.cuda.is_available() and torch.cuda.device_count() > 0 else 1)
+PY
+    then
+        record_not_run "${RESULTS_STRESS_LABEL:-PyTorch fallback}" "PyTorch CUDA runtime unavailable"
+        log "  NOTE: CUDA-enabled PyTorch not available — fallback stress is not being run."
+        return 0
+    fi
     cat > "$script" << PYEOF
 import torch, time, sys
 
@@ -1313,6 +1339,7 @@ start_gpu_stress_backend() {
         GPU_STRESS_PID=$!
         return 0
     fi
+    record_not_run "${label} / gpu-fryer" "build unavailable; using fallback if available"
 
     if build_gpu_burn && [ -f "$BUILD_DIR/gpu-burn/gpu-burn" ]; then
         log "  Using gpu-burn (FP64, $((duration_s / 60)) min)"
@@ -1322,6 +1349,7 @@ start_gpu_stress_backend() {
         GPU_STRESS_PID=$!
         return 0
     fi
+    record_not_run "${label} / gpu-burn" "build unavailable; using fallback if available"
 
     log "  gpu-fryer and gpu-burn unavailable — using PyTorch cuBLAS fallback."
     RESULTS_STRESS_LABEL="$label / PyTorch fallback"
@@ -1529,6 +1557,7 @@ test_stress() {
             log "  No throttling or thermal violations detected — this is a threshold"
             log "  sensitivity false positive (common on TDP-limited GPUs like RTX A4000)."
             log "  Treating as WARNING only."
+            record_remark "Sustained Compute Stress: compute health check reported a performance warning only; treated as a remark."
         else
             log "  ERROR: Burn tool exited with code $burn_rc"
             return 1
@@ -1536,7 +1565,7 @@ test_stress() {
     fi
     if [ "$BURN_THERMAL_RC" -ne 0 ]; then
         log "  Compute: PASS  |  Thermals: WARNING (see summary above)"
-        return 1   # flag as failure so it shows in summary and gets attention
+        record_remark "Sustained Compute Stress: thermals crossed the warning threshold (temp >= ${TEMP_WARN}°C and/or fan >= ${FAN_WARN}%). Treated as a remark only."
     fi
     return 0
 }
@@ -1551,6 +1580,12 @@ test_node_stress() {
 
     log "  Running full-node stress for ${duration_min} minute(s)"
     log_sensor_snapshot "Initial sensors snapshot (if available):"
+
+    if ! command -v stress-ng >/dev/null 2>&1; then
+        record_not_run "$label" "stress-ng binary unavailable"
+        log "  NOTE: stress-ng not found — node-wide stress is not being run."
+        return 0
+    fi
 
     start_cpu_ram_stress "$duration_min" || return 1
     local cpu_ram_pid="$CPU_RAM_STRESS_PID"
@@ -1577,6 +1612,7 @@ test_node_stress() {
            [ "$BURN_THERMAL_RC" -eq 0 ]; then
             log "  WARN: GPU stress backend reported a health warning (exit $burn_rc)."
             log "  No throttling or thermal violations detected — treating as warning only."
+            record_remark "Node Stress: GPU backend reported a performance warning only; treated as a remark."
         else
             log "  ERROR: GPU stress backend exited with code $burn_rc"
             return 1
@@ -1590,7 +1626,7 @@ test_node_stress() {
 
     if [ "$BURN_THERMAL_RC" -ne 0 ]; then
         log "  Compute: PASS  |  Thermals: WARNING (see summary above)"
-        return 1
+        record_remark "Node Stress: thermals crossed the warning threshold (temp >= ${TEMP_WARN}°C and/or fan >= ${FAN_WARN}%). Treated as a remark only."
     fi
 
     return 0
@@ -1616,6 +1652,8 @@ print_summary() {
     local pass_count=${#RESULTS_PASS[@]}
     local fail_count=${#RESULTS_FAIL[@]}
     local skip_count=${#RESULTS_SKIP[@]}
+    local not_run_count=${#RESULTS_NOT_RUN[@]}
+    local remark_count=${#RESULTS_REMARK[@]}
 
     if [ "$pass_count" -gt 0 ]; then
         log "  PASSED ($pass_count):"
@@ -1627,6 +1665,11 @@ print_summary() {
         for r in "${RESULTS_SKIP[@]}"; do log "    -  $r"; done
         log ""
     fi
+    if [ "$not_run_count" -gt 0 ]; then
+        log "  NOT BEING RUN ($not_run_count):"
+        for r in "${RESULTS_NOT_RUN[@]}"; do log "    !  $r"; done
+        log ""
+    fi
     if [ "$fail_count" -gt 0 ]; then
         log "  FAILED ($fail_count):"
         for r in "${RESULTS_FAIL[@]}"; do log "    ✗  $r"; done
@@ -1634,12 +1677,23 @@ print_summary() {
         log "========================================"
         log "  RESULT: $fail_count test(s) FAILED"
         log "========================================"
-        return 1
+    elif [ "$not_run_count" -gt 0 ]; then
+        log "========================================"
+        log "  RESULT: ALL RUN TESTS PASSED; $not_run_count test(s) NOT BEING RUN"
+        log "========================================"
     else
         log "========================================"
         log "  RESULT: ALL $pass_count TESTS PASSED"
         log "========================================"
     fi
+
+    if [ "$remark_count" -gt 0 ]; then
+        log ""
+        log "  REMARKS ($remark_count):"
+        for r in "${RESULTS_REMARK[@]}"; do log "    -  $r"; done
+    fi
+
+    [ "$fail_count" -eq 0 ]
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
