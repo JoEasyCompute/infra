@@ -409,6 +409,7 @@ At the end a per-GPU peak summary is printed:
 **Reported as remarks instead of failures if:**
 - Any GPU in scope exceeds the thermal warning threshold during the run (`TEMP_WARN` / `FAN_WARN`)
 - The burn tool emits a performance-health warning but thermals remain clean
+- The burn tool exits only because a GPU reports `SW_Thermal` / soft thermal throttling, with no hard-crash indicators
 
 When either of those warning-only cases happens, the final summary adds a `REMARKS` section rather than marking the test as failed. If a backend cannot be built and the script falls back to another engine, the summary also adds a `NOT BEING RUN` entry for the unavailable backend.
 
@@ -433,6 +434,7 @@ Runs the existing GPU stress backend at the same time as `stress-ng` CPU and RAM
 **Reported as remarks instead of failures if:**
 - Any GPU exceeds the thermal warning threshold tracked by the GPU burn monitor
 - The GPU backend emits a performance-health warning but thermals remain clean
+- The GPU backend exits only because of `SW_Thermal` / soft thermal throttling, with no hard-crash indicators
 
 If `stress-ng`, `gpu-fryer`, or `gpu-burn` is unavailable, the summary records that component as `NOT BEING RUN` rather than treating the whole run as a failure.
 
