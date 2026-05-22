@@ -404,10 +404,13 @@ At the end a per-GPU peak summary is printed:
 | `FAN_WARN` | `100%` | `FAN at 100% (cooling at limit)` |
 
 **Fails if:**
-- The burn tool exits non-zero (compute error or GPU crash)
-- Any GPU in scope exceeds a thermal threshold during the run
+- The burn tool exits non-zero for a real compute error or GPU crash
 
-> A thermal failure means the compute test passed but cooling needs investigation. The GPU appears as `FAIL` in the summary to ensure it gets attention rather than being buried in scrollback.
+**Reported as remarks instead of failures if:**
+- Any GPU in scope exceeds the thermal warning threshold during the run (`TEMP_WARN` / `FAN_WARN`)
+- The burn tool emits a performance-health warning but thermals remain clean
+
+When either of those warning-only cases happens, the final summary adds a `REMARKS` section rather than marking the test as failed. If a backend cannot be built and the script falls back to another engine, the summary also adds a `NOT BEING RUN` entry for the unavailable backend.
 
 ### `node-stress` — Node-Wide Stress
 
@@ -424,9 +427,14 @@ Runs the existing GPU stress backend at the same time as `stress-ng` CPU and RAM
 `stress-ng` picks a memory target dynamically from total system RAM so the default profile is heavy without immediately turning into an OOM test. The node-stress mode also prints `sensors` snapshots when `lm-sensors` is available.
 
 **Fails if:**
-- The GPU backend exits non-zero
+- The GPU backend exits non-zero for a real compute error or GPU crash
 - `stress-ng` exits non-zero
-- Any GPU exceeds the thermal thresholds tracked by the GPU burn monitor
+
+**Reported as remarks instead of failures if:**
+- Any GPU exceeds the thermal warning threshold tracked by the GPU burn monitor
+- The GPU backend emits a performance-health warning but thermals remain clean
+
+If `stress-ng`, `gpu-fryer`, or `gpu-burn` is unavailable, the summary records that component as `NOT BEING RUN` rather than treating the whole run as a failure.
 
 ---
 
