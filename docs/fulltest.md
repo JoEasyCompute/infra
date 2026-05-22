@@ -130,6 +130,12 @@ If `--clean` or a rebuild path fails because `./build/` is not writable, the scr
 # CPU + RAM + GPU stress for 15 minutes
 ./test/fulltest.sh node-stress --node-stress-minutes 15
 
+# Post-load recovery check after stress
+./test/fulltest.sh post-stress-recovery
+
+# Optional policy check with persistence enforcement
+GPU_POLICY_REQUIRE_PERSISTENCE=1 ./test/fulltest.sh gpu-policy
+
 # Quick hardware health check only
 ./test/fulltest.sh preflight ecc pcie clocks
 
@@ -439,6 +445,49 @@ Runs the existing GPU stress backend at the same time as `stress-ng` CPU and RAM
 - The GPU backend exits only because of `SW_Thermal` / soft thermal throttling, with no hard-crash indicators
 
 If `stress-ng`, `gpu-fryer`, or `gpu-burn` is unavailable, the summary records that component as `NOT BEING RUN` rather than treating the whole run as a failure.
+
+---
+
+### `post-stress-recovery` — Post-Stress Recovery
+
+Runs after stress workloads to confirm the node has recovered cleanly instead of only surviving under load.
+
+**Checks:**
+- `nvidia-smi` still enumerates the same GPU count in scope
+- kernel logs since the stress window do not contain new GPU faults, Xid events, bus drops, or driver resets
+- each GPU has moved back into a normal recovery state after the cool-down delay
+
+**Fails if:**
+- GPU enumeration changes or `nvidia-smi` cannot query the GPUs
+- new kernel log GPU faults appear during the recovery window
+- a hard throttle condition remains active after the cool-down window
+
+**Reported as remarks instead of failures if:**
+- GPUs are still warm / fans are still high while cooling down
+- only soft thermal throttling remains after the burn
+- kernel log recovery scanning is unavailable on the host
+
+The recovery delay is configurable via `POST_STRESS_RECOVERY_COOLDOWN_SECONDS` (default: 20).
+
+---
+
+### `gpu-policy` — GPU Policy Check
+
+Optional policy test for fleet-specific expectations such as persistence mode, idle temperature ceilings, and power limit bounds.
+
+This test is **selectable**, and it is advisory by default. Set `GPU_POLICY_STRICT=1` to make policy violations fail the test.
+
+**Policy inputs:**
+
+| Env var | Meaning |
+|---|---|
+| `GPU_POLICY_REQUIRE_PERSISTENCE=1` | Require persistence mode to be enabled |
+| `GPU_POLICY_MAX_IDLE_TEMP=<°C>` | Fail/remark if idle temperature exceeds this ceiling |
+| `GPU_POLICY_MIN_POWER_LIMIT_W=<W>` | Require a minimum power limit |
+| `GPU_POLICY_MAX_POWER_LIMIT_W=<W>` | Require a maximum power limit |
+| `GPU_POLICY_STRICT=1` | Treat policy violations as failures instead of remarks |
+
+If no `GPU_POLICY_*` thresholds are set, the script records the test as `NOT BEING RUN`.
 
 ---
 

@@ -38,6 +38,8 @@ This means build-heavy failures should happen earlier, before long test executio
 - `memtest`
 - `stress`
 - `node-stress`
+- `post-stress-recovery`
+- `gpu-policy`
 
 The main architectural difference is that selected build/runtime dependencies are prepared up front.
 
@@ -54,6 +56,8 @@ The script currently has explicit prepare steps for selected tests such as:
 - `cuda_memtest`
 - stress backends (`gpu-fryer`, `gpu-burn`, or PyTorch fallback)
 - node-stress, which combines `stress-ng` CPU + RAM load with the GPU burn backend
+- post-stress recovery, which verifies the GPUs and driver state settle cleanly after stress
+- optional GPU policy checks for persistence / idle temp / power-limit expectations
 
 Preparation is only done for tests the operator selected.
 
@@ -74,6 +78,8 @@ Examples:
 ./test/gpu-fulltest-v2.sh node-stress
 ./test/gpu-fulltest-v2.sh node-stress --node-stress-minutes 15
 ./test/gpu-fulltest-v2.sh nccl pytorch
+./test/gpu-fulltest-v2.sh post-stress-recovery
+GPU_POLICY_REQUIRE_PERSISTENCE=1 ./test/gpu-fulltest-v2.sh gpu-policy
 ./test/gpu-fulltest-v2.sh --clean
 ```
 
@@ -88,6 +94,8 @@ Examples:
 - The PyTorch prepare/run path now logs the active `python3` runtime and warns when Python 3.12+ is in use because `torch.distributed` / `torchrun` segfaults have been seen there.
 - Sustained stress and node-stress now treat thermal/performance-only outcomes as summary remarks, and unavailable backends are listed under `NOT BEING RUN` instead of failing the overall run.
 - `SW_Thermal`-only exits are treated as remarks in the stress summary, provided there are no hard-crash indicators.
+- `post-stress-recovery` adds an extra post-load driver / GPU sanity check after the stress tests and records thermal residue as remarks.
+- `gpu-policy` is an optional advisory test by default; set `GPU_POLICY_STRICT=1` and the `GPU_POLICY_*` thresholds to enforce fleet policy.
 - CUDA samples source-layout/build mismatches are recorded as `NOT BEING RUN` instead of failing the run. The lookup checks both the current `cpp/` tree and the legacy `Samples/` tree.
 
 ---
