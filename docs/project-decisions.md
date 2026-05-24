@@ -94,6 +94,16 @@ Current behavior:
 - `install/ipmi-power-cycle.sh` provides the out-of-band manual recovery path for that condition by asking the BMC/IPMI controller to power-cycle the chassis
 - uninstall removes the managed systemd block and the sysctl drop-in
 
+### 7. Sustained stress detects 12V-2x6 / 12VHPWR power anomalies as remarks by default
+
+Current behavior:
+
+- `test/fulltest.sh` and `test/gpu-fulltest-v2.sh` both analyse burn telemetry for sustained low-power / high-fan / cooler-than-peers patterns during `stress` and `node-stress`
+- the detector is remark-only by default (`POWER_ANOMALY_AS_REMARK=1`) so fleet operators can see the warning without failing the run
+- operators can opt back into hard-fail behavior by setting `POWER_ANOMALY_AS_REMARK=0`
+- the warning is treated as a connector early-warning, not a generic thermal failure, because it is intended to catch likely 12V-2x6 / 12VHPWR contact resistance issues before the GPU falls off the bus
+- the same detector and default behavior are documented in both `docs/fulltest.md` and `docs/gpu-fulltest-v2.md`
+
 ---
 
 ## Operator Notes

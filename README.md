@@ -373,6 +373,9 @@ This is the main NVIDIA validation suite. It covers:
 - PyTorch distributed checks
 - VRAM memtest
 - sustained compute stress
+- 12V-2x6 / 12VHPWR connector early-warning detection during sustained stress
+
+The experimental `test/gpu-fulltest-v2.sh` mirrors the same sustained-stress remarks, including the 12V-2x6 / 12VHPWR early-warning detector with remark-only default behavior.
 
 It writes timestamped logs in the same directory where `fulltest.sh` is run.
 

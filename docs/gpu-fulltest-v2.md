@@ -94,6 +94,7 @@ GPU_POLICY_REQUIRE_PERSISTENCE=1 ./test/gpu-fulltest-v2.sh gpu-policy
 - The PyTorch prepare/run path now logs the active `python3` runtime and warns when Python 3.12+ is in use because `torch.distributed` / `torchrun` segfaults have been seen there.
 - Sustained stress and node-stress now treat thermal/performance-only outcomes as summary remarks, and unavailable backends are listed under `NOT BEING RUN` instead of failing the overall run.
 - `SW_Thermal`-only exits are treated as remarks in the stress summary, provided there are no hard-crash indicators.
+- `stress` and `node-stress` also detect sustained 12V-2x6 / 12VHPWR connector power anomalies; these are remark-only by default unless `POWER_ANOMALY_AS_REMARK=0` is set.
 - `post-stress-recovery` adds an extra post-load driver / GPU sanity check after the stress tests and records thermal residue as remarks.
 - `gpu-policy` is an optional advisory test by default; set `GPU_POLICY_STRICT=1` and the `GPU_POLICY_*` thresholds to enforce fleet policy.
 - CUDA samples source-layout/build mismatches are recorded as `NOT BEING RUN` instead of failing the run. The lookup checks both the current `cpp/` tree and the legacy `Samples/` tree.
