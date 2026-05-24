@@ -110,7 +110,7 @@ In short:
   the burn;
 - it ignores the first 30 seconds so ramp-up noise does not trip the detector;
 - it compares each GPU against the peer median power at the same timestamp;
-- it flags a sample when power is at least 25 W below the peer median and fan
+- it flags a sample when power is at least `max(25 W, 6% of the peer median)` below the peer median and fan
   is at least 85%;
 - it marks a GPU when that pattern appears in at least 50% of post-warmup
   samples; and
@@ -118,8 +118,13 @@ In short:
 
 This is a heuristic warning for a likely connector or cable contact-resistance
 problem, not a direct electrical proof. By default, the experimental lane
-records it as a remark via `POWER_ANOMALY_AS_REMARK=1`; set
-`POWER_ANOMALY_AS_REMARK=0` if you want the same condition to fail the run.
+records it as a remark via `POWER_ANOMALY_AS_REMARK=1` and includes the
+flagged GPU index list in the remark text; set `POWER_ANOMALY_AS_REMARK=0` if
+you want the same condition to fail the run.
+
+If no usable fan telemetry is available, the detector skips rather than
+attempting a power-only judgment. That keeps the heuristic honest on
+chassis-managed cooling platforms where the on-card fan reading is not exposed.
 
 ---
 
