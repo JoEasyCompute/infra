@@ -1612,6 +1612,23 @@ log_sensor_snapshot() {
 readonly TEMP_WARN=87      # °C — flag as potential issue
 readonly FAN_WARN=100      # % — flag as maxed out
 
+# ─── Power anomaly detection (12V-2x6 connector early-warning) ──────────────
+# Detects a GPU that is self-throttling against high power-input contact
+# resistance: drawing significantly less power than its peers while its fan
+# is at or near max, and its die paradoxically runs cooler than peers under
+# the same workload. The driver does NOT report this as throttling, but it
+# is a documented precursor to Xid 79 → Xid 154 → node reboot required.
+#
+# All thresholds overridable via environment.
+readonly POWER_ANOMALY_DELTA_W="${POWER_ANOMALY_DELTA_W:-25}"     # W below peer median to flag a sample
+readonly POWER_ANOMALY_FAN_PCT="${POWER_ANOMALY_FAN_PCT:-85}"     # fan % at/above to count toward anomaly
+readonly POWER_ANOMALY_FRAC_PCT="${POWER_ANOMALY_FRAC_PCT:-50}"   # % of post-warmup samples that must be anomalous
+readonly POWER_ANOMALY_WARMUP_S="${POWER_ANOMALY_WARMUP_S:-30}"   # ignore first N seconds of burn (ramp/startup)
+readonly POWER_ANOMALY_AS_REMARK="${POWER_ANOMALY_AS_REMARK:-1}"  # 1 = record as remark only, 0 = fail the test
+
+BURN_POWER_ANOMALY_RC=0
+BURN_TELEMETRY_FILE=""
+
 stress_hard_failure_detected() {
     grep -qiE \
         'Throttling HW: true|Thermal HW: true|HW_Slowdown|HW_PowerBrake|CUDA error|illegal memory access|device-side assert|segmentation fault|SIGSEGV|Xid|panic|core dumped|fatal error' \
@@ -1628,6 +1645,15 @@ run_burn_monitor() {
     local sample_interval=5
     local telemetry_file="$BUILD_DIR/_burn_telemetry.csv"
     ensure_build_dir_writable "writing burn telemetry" || return 1
+
+    # Reset telemetry file for this run; analyse_power_anomalies will read it
+    # at the end of the monitor.
+    BURN_TELEMETRY_FILE="$telemetry_file"
+    BURN_POWER_ANOMALY_RC=0
+    : > "$telemetry_file" 2>/dev/null || {
+        log "  WARN: cannot truncate $telemetry_file — power anomaly analysis may be skipped"
+    }
+    echo "elapsed_s,gpu_idx,temp_c,power_w,fan_pct,clk_sm_mhz" >> "$telemetry_file"
 
     # Header for the live telemetry log
     log ""
@@ -1669,10 +1695,16 @@ run_burn_monitor() {
                 | tee -a "$LOG_FILE"
 
             # Track peaks — strip units (°C, W, %) for numeric comparison
-            local temp_val power_val fan_val
+            local temp_val power_val fan_val clk_val
             temp_val="${temp//[^0-9]/}"
             power_val="${power//[^0-9.]/}"
             fan_val="${fan//[^0-9]/}"
+            clk_val="${clk_sm//[^0-9]/}"
+
+            # Append normalized numeric sample to CSV for post-burn analysis
+            printf "%s,%s,%s,%s,%s,%s\n" \
+                "$elapsed" "$gpu_idx" "${temp_val:-0}" "${power_val:-0}" "${fan_val:-0}" "${clk_val:-0}" \
+                >> "$telemetry_file" 2>/dev/null || true
 
             if [ -n "$temp_val" ] && [ "$temp_val" -gt "${peak_temp[$gpu_idx]:-0}" ] 2>/dev/null; then
                 peak_temp[$gpu_idx]=$temp_val
@@ -1733,6 +1765,169 @@ run_burn_monitor() {
         log "  All GPUs within thermal limits during burn."
     fi
     log ""
+
+    analyse_power_anomalies "$telemetry_file"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# analyse_power_anomalies <telemetry_csv>
+#
+# Reads the per-sample telemetry CSV written by run_burn_monitor and detects
+# GPUs whose sustained behaviour matches the connector-self-throttle signature.
+# Power anomalies are remark-only by default.
+# ─────────────────────────────────────────────────────────────────────────────
+analyse_power_anomalies() {
+    local csv_file="$1"
+    BURN_POWER_ANOMALY_RC=0
+
+    if [ ! -s "$csv_file" ]; then
+        log "  Power anomaly check: skipped (no telemetry data)"
+        return 0
+    fi
+
+    local sample_count gpu_count
+    sample_count=$(($(wc -l < "$csv_file") - 1))
+    gpu_count=$(awk -F, 'NR>1 { g[$2]=1 } END { n=0; for (k in g) n++; print n }' "$csv_file")
+
+    if [ "$sample_count" -le 0 ] || [ "$gpu_count" -lt 3 ]; then
+        log "  Power anomaly check: skipped (need >=3 GPUs and samples; have ${gpu_count} GPUs, ${sample_count} samples)"
+        return 0
+    fi
+
+    log ""
+    log "  ── Power anomaly check (12V-2x6 connector early-warning) ────────"
+    log "    Thresholds: power >= ${POWER_ANOMALY_DELTA_W}W below peer median,"
+    log "                fan >= ${POWER_ANOMALY_FAN_PCT}%, sustained in >= ${POWER_ANOMALY_FRAC_PCT}% of samples,"
+    log "                ignoring first ${POWER_ANOMALY_WARMUP_S}s of burn."
+
+    local awk_out
+    awk_out=$(LC_NUMERIC=C awk \
+        -v delta_w="$POWER_ANOMALY_DELTA_W" \
+        -v fan_pct="$POWER_ANOMALY_FAN_PCT" \
+        -v frac_pct="$POWER_ANOMALY_FRAC_PCT" \
+        -v warmup_s="$POWER_ANOMALY_WARMUP_S" \
+        -F, '
+        NR == 1 { next }
+        {
+            t = $1 + 0
+            g = $2 + 0
+            p = $4 + 0
+            f = $5 + 0
+            if (t < warmup_s) next
+            powers[t SUBSEP g] = p
+            fans[t SUBSEP g]   = f
+            times[t] = 1
+            gpus[g]  = 1
+            sum_p[g] += p
+            sum_f[g] += f
+            n_g[g]++
+        }
+        END {
+            for (g in gpus) { anom[g] = 0; tot[g] = 0; sum_delta[g] = 0 }
+            for (t in times) {
+                n = 0
+                delete ps
+                for (g in gpus) {
+                    key = t SUBSEP g
+                    if (key in powers) ps[++n] = powers[key]
+                }
+                if (n < 3) continue
+                for (i = 2; i <= n; i++) {
+                    v = ps[i]; j = i
+                    while (j > 1 && ps[j-1] > v) { ps[j] = ps[j-1]; j-- }
+                    ps[j] = v
+                }
+                if (n % 2 == 1) median = ps[(n+1)/2]
+                else            median = (ps[n/2] + ps[n/2+1]) / 2
+
+                for (g in gpus) {
+                    key = t SUBSEP g
+                    if (!(key in powers)) continue
+                    tot[g]++
+                    d = median - powers[key]
+                    sum_delta[g] += d
+                    if (d >= delta_w && fans[key] >= fan_pct) anom[g]++
+                }
+            }
+
+            flagged = 0
+            n_keys = 0
+            for (g in gpus) sorted[++n_keys] = g
+            for (i = 2; i <= n_keys; i++) {
+                v = sorted[i]; j = i
+                while (j > 1 && sorted[j-1]+0 > v+0) { sorted[j] = sorted[j-1]; j-- }
+                sorted[j] = v
+            }
+            for (i = 1; i <= n_keys; i++) {
+                g = sorted[i]
+                if (tot[g] == 0) continue
+                pct  = (anom[g] * 100.0) / tot[g]
+                avgp = sum_p[g] / n_g[g]
+                avgf = sum_f[g] / n_g[g]
+                avgd = sum_delta[g] / tot[g]
+                status = "ok"
+                if (pct >= frac_pct) { status = "FLAG"; flagged++ }
+                else if (anom[g] > 0) status = "transient"
+                printf "GPU=%d status=%s anom=%d/%d pct=%.1f avg_power=%.1fW avg_fan=%.1f%% avg_delta_from_median=%.1fW\n", \
+                    g, status, anom[g], tot[g], pct, avgp, avgf, avgd
+            }
+            print "TOTAL_FLAGGED=" flagged
+        }
+    ' "$csv_file")
+
+    if [ -z "$awk_out" ]; then
+        log "  Power anomaly check: no output from analyzer (skipped)"
+        return 0
+    fi
+
+    local flagged=0
+    printf "  %-4s %-10s %12s %14s %14s %18s\n" \
+        "GPU" "Status" "Anom/Total" "AvgPower" "AvgFan" "AvgΔ-from-median" \
+        | tee -a "$LOG_FILE"
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            GPU=*)
+                local g s at pct avgp avgf avgd
+                g=$(  echo "$line" | sed -n 's/.*GPU=\([0-9]*\).*/\1/p')
+                s=$(  echo "$line" | sed -n 's/.*status=\([A-Za-z]*\).*/\1/p')
+                at=$( echo "$line" | sed -n 's/.*anom=\([0-9]*\/[0-9]*\).*/\1/p')
+                pct=$(echo "$line" | sed -n 's/.*pct=\([0-9.]*\).*/\1/p')
+                avgp=$(echo "$line" | sed -n 's/.*avg_power=\([0-9.]*\)W.*/\1/p')
+                avgf=$(echo "$line" | sed -n 's/.*avg_fan=\([0-9.]*\)%.*/\1/p')
+                avgd=$(echo "$line" | sed -n 's/.*avg_delta_from_median=\([-0-9.]*\)W.*/\1/p')
+                printf "  %-4s %-10s %12s %12sW %13s%% %16sW\n" \
+                    "$g" "$s" "$at (${pct}%)" "$avgp" "$avgf" "$avgd" \
+                    | tee -a "$LOG_FILE"
+                ;;
+            TOTAL_FLAGGED=*)
+                flagged="${line#TOTAL_FLAGGED=}"
+                ;;
+        esac
+    done <<< "$awk_out"
+
+    log "  ─────────────────────────────────────────────────────────────────"
+    if [ "$flagged" -gt 0 ]; then
+        BURN_POWER_ANOMALY_RC=1
+        log "  POWER ANOMALY DETECTED: ${flagged} GPU(s) showed the connector-self-throttle signature."
+        log ""
+        log "  This signature (low power + high fan + cool die, sustained, no driver-reported throttle)"
+        log "  is a documented precursor to Xid 79 GPU fall-off under production load. Most common"
+        log "  cause is elevated contact resistance in the 12V-2x6 / 12VHPWR cable feeding the GPU."
+        log ""
+        log "  Recommended actions for any flagged GPU:"
+        log "    1. Replace the 12V-2x6 power cable from PSU to that GPU position."
+        log "    2. If multi-PSU, also move that GPU's input to a different PSU output."
+        log "    3. Visually inspect the OLD cable's connectors at BOTH ends for:"
+        log "       discolouration, recessed pins, partial melting, deformed plastic."
+        log "    4. Re-run this test after the swap — anomaly should clear."
+        log "    5. If anomaly persists after cable+PSU swap, the GPU-side connector"
+        log "       socket may be damaged — RMA / retire that card."
+        log ""
+    else
+        log "  Power balance OK across GPUs (no connector-self-throttle signature detected)."
+    fi
+    log ""
 }
 
 test_stress() {
@@ -1771,6 +1966,17 @@ test_stress() {
     if [ "$BURN_THERMAL_RC" -ne 0 ]; then
         log "  Compute: PASS  |  Thermals: WARNING (see summary above)"
         record_remark "Sustained Compute Stress: thermals crossed the warning threshold (temp >= ${TEMP_WARN}°C and/or fan >= ${FAN_WARN}%). Treated as a remark only."
+    fi
+    if [ "$BURN_POWER_ANOMALY_RC" -ne 0 ]; then
+        if [ "$POWER_ANOMALY_AS_REMARK" = "1" ]; then
+            log "  Compute: PASS  |  Power balance: ANOMALY (see summary above; recorded as remark per POWER_ANOMALY_AS_REMARK=1)"
+        else
+            log "  Compute: PASS  |  Power balance: FAIL (connector-self-throttle signature; see analysis above)"
+        fi
+        record_remark "Sustained Compute Stress: power anomaly detected (connector-self-throttle signature) — see analysis above. Replace 12V-2x6 cable for flagged GPU(s) before production."
+        if [ "$POWER_ANOMALY_AS_REMARK" != "1" ]; then
+            return 1
+        fi
     fi
     return 0
 }
@@ -1831,6 +2037,17 @@ test_node_stress() {
     if [ "$BURN_THERMAL_RC" -ne 0 ]; then
         log "  Compute: PASS  |  Thermals: WARNING (see summary above)"
         record_remark "Node Stress: thermals crossed the warning threshold (temp >= ${TEMP_WARN}°C and/or fan >= ${FAN_WARN}%). Treated as a remark only."
+    fi
+    if [ "$BURN_POWER_ANOMALY_RC" -ne 0 ]; then
+        if [ "$POWER_ANOMALY_AS_REMARK" = "1" ]; then
+            log "  Compute: PASS  |  Power balance: ANOMALY (see summary above; recorded as remark per POWER_ANOMALY_AS_REMARK=1)"
+        else
+            log "  Compute: PASS  |  Power balance: FAIL (connector-self-throttle signature; see analysis above)"
+        fi
+        record_remark "Node Stress: power anomaly detected (connector-self-throttle signature) — see analysis above. Replace 12V-2x6 cable for flagged GPU(s) before production."
+        if [ "$POWER_ANOMALY_AS_REMARK" != "1" ]; then
+            return 1
+        fi
     fi
 
     return 0
