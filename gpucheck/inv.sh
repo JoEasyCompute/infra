@@ -5,6 +5,7 @@
 # Default outputs
 csv_file=""
 json_file=""
+smi_timeout="${GPUCHECK_SMI_TIMEOUT:-8}"
 
 # --- Argument Parsing ---
 while [[ $# -gt 0 ]]; do
@@ -89,9 +90,17 @@ done < <(dmidecode -t slot)
 
 # Process GPUs
 # Query includes extended metrics
-if ! nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max,temperature.gpu,power.draw,power.limit,driver_version \
-    --format=csv,noheader,nounits >"$smi_out_file" 2>"$smi_err_file"; then
-    true
+smi_rc=0
+if command -v timeout >/dev/null 2>&1; then
+    timeout --kill-after=2 "${smi_timeout}s" \
+        nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max,temperature.gpu,power.draw,power.limit,driver_version \
+        --format=csv,noheader,nounits >"$smi_out_file" 2>"$smi_err_file" || smi_rc=$?
+else
+    nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max,temperature.gpu,power.draw,power.limit,driver_version \
+        --format=csv,noheader,nounits >"$smi_out_file" 2>"$smi_err_file" || smi_rc=$?
+fi
+if [[ "$smi_rc" -eq 124 ]]; then
+    echo "Warning: nvidia-smi timed out after ${smi_timeout}s; output may be incomplete." >&2
 fi
 
 declare -A bus_lost_by_pci
@@ -271,4 +280,8 @@ if [[ -s "$remark_file" ]]; then
     echo ""
     echo "=== Remark: GPUs that appear to have fallen off the bus ==="
     cat "$remark_file"
+elif [[ "$smi_rc" -eq 124 ]]; then
+    echo ""
+    echo "=== Remark: GPUs that appear to have fallen off the bus ==="
+    echo "nvidia-smi timed out after ${smi_timeout}s; one or more GPUs may be unresponsive or have fallen off the bus."
 fi
