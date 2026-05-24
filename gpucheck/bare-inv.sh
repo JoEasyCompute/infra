@@ -204,7 +204,7 @@ if ((${#rows[@]} > 0)); then
         }
 
         if ($13 == "BusLost") {
-             printf "GPU %s in slot %s (%s): %s %s\n", idx, $1, $2, $13, ($12 != "" ? $12 : "") >> remark_file
+             printf "GPU %s in slot %s (%s, %s): %s %s\n", idx, $1, $2, $3, $13, ($12 != "" ? $12 : "") >> remark_file
         }
       }'
 fi
