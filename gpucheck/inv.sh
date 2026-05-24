@@ -118,6 +118,7 @@ while IFS=',' read -r pci gpu_name serial gen_cur gen_max width_cur width_max te
 
     pci_lower=$(echo "$pci" | tr '[:upper:]' '[:lower:]')
     pci_trimmed=$(echo "$pci_lower" | cut -d':' -f2-)
+    [[ -z "$pci_lower" ]] && continue
 
     # Match slot
     slot_name="(Unknown)"
@@ -157,7 +158,7 @@ while IFS=',' read -r pci gpu_name serial gen_cur gen_max width_cur width_max te
         bus_lost=1
     fi
 
-    if [[ -n "${bus_lost_by_pci[$pci_lower]:-}" ]]; then
+    if [[ -n "$pci_lower" && -n "${bus_lost_by_pci[$pci_lower]:-}" ]]; then
         bus_lost=1
     fi
 
