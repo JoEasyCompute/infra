@@ -101,6 +101,19 @@ speed_to_gen() {
     esac
 }
 
+get_pci_model() {
+    local addr="$1" sv sd vv dd subsys
+    sv=$(lspci -vmm -s "$addr" 2>/dev/null | sed -n 's/^SVendor:[[:space:]]*//p' | head -n1)
+    sd=$(lspci -vmm -s "$addr" 2>/dev/null | sed -n 's/^SDevice:[[:space:]]*//p' | head -n1)
+    [[ -n "$sv" && -n "$sd" ]] && { echo "$sv $sd"; return; }
+    subsys=$(lspci -s "$addr" -vv 2>/dev/null | sed -n 's/^[[:space:]]*Subsystem:[[:space:]]*//p' | head -n1)
+    [[ -n "$subsys" ]] && { echo "$subsys"; return; }
+    vv=$(lspci -vmm -s "$addr" 2>/dev/null | sed -n 's/^Vendor:[[:space:]]*//p' | head -n1)
+    dd=$(lspci -vmm -s "$addr" 2>/dev/null | sed -n 's/^Device:[[:space:]]*//p' | head -n1)
+    [[ -n "$vv" && -n "$dd" ]] && { echo "$vv $dd"; return; }
+    echo "-"
+}
+
 # Process GPUs
 # Fast path: use the plain `nvidia-smi` table output, which still reports the
 # PCI address for the broken GPU on stderr without querying the missing device.
@@ -285,7 +298,8 @@ for pci_lower in "${!bus_lost_by_pci[@]}"; do
     if [[ -n "$match" ]]; then
         slot_name=$(echo "$match" | cut -d'|' -f2)
     fi
-    printf "PCI %s in slot %s: BusLost (nvidia-smi reported device handle error)\n" "$pci_lower" "$slot_name" >> "$remark_file"
+    model=$(get_pci_model "$pci_lower")
+    printf "PCI %s in slot %s (%s): BusLost (nvidia-smi reported device handle error)\n" "$pci_lower" "$slot_name" "$model" >> "$remark_file"
 done
 
 # 2. CSV Output
