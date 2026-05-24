@@ -99,6 +99,28 @@ GPU_POLICY_REQUIRE_PERSISTENCE=1 ./test/gpu-fulltest-v2.sh gpu-policy
 - `gpu-policy` is an optional advisory test by default; set `GPU_POLICY_STRICT=1` and the `GPU_POLICY_*` thresholds to enforce fleet policy.
 - CUDA samples source-layout/build mismatches are recorded as `NOT BEING RUN` instead of failing the run. The lookup checks both the current `cpp/` tree and the legacy `Samples/` tree.
 
+### 12V-2x6 / 12VHPWR Early-Warning Methodology
+
+The sustained power-anomaly detector used by `stress` and `node-stress` is the
+same one documented in `docs/fulltest.md`.
+
+In short:
+
+- it samples GPU temperature, power, fan, and SM clock every 5 seconds during
+  the burn;
+- it ignores the first 30 seconds so ramp-up noise does not trip the detector;
+- it compares each GPU against the peer median power at the same timestamp;
+- it flags a sample when power is at least 25 W below the peer median and fan
+  is at least 85%;
+- it marks a GPU when that pattern appears in at least 50% of post-warmup
+  samples; and
+- it requires 3 or more GPUs in scope so the peer median is meaningful.
+
+This is a heuristic warning for a likely connector or cable contact-resistance
+problem, not a direct electrical proof. By default, the experimental lane
+records it as a remark via `POWER_ANOMALY_AS_REMARK=1`; set
+`POWER_ANOMALY_AS_REMARK=0` if you want the same condition to fail the run.
+
 ---
 
 ## Operator Guidance

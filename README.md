@@ -71,10 +71,10 @@ This is the main end-to-end path for NVIDIA nodes.
 
 Scripts involved:
 
-- [install/provision.sh](/Users/josephcheung/Desktop/dev/infra/install/provision.sh)
-- [install/base-install.sh](/Users/josephcheung/Desktop/dev/infra/install/base-install.sh)
-- [install/docker-install.sh](/Users/josephcheung/Desktop/dev/infra/install/docker-install.sh)
-- [test/fulltest.sh](/Users/josephcheung/Desktop/dev/infra/test/fulltest.sh)
+- [install/provision.sh](install/provision.sh)
+- [install/base-install.sh](install/base-install.sh)
+- [install/docker-install.sh](install/docker-install.sh)
+- [test/fulltest.sh](test/fulltest.sh)
 
 How it works:
 
@@ -110,15 +110,15 @@ Shared runtime location used by the orchestrator:
 
 If you want more control, run the stages directly:
 
-1. [install/base-install.sh](/Users/josephcheung/Desktop/dev/infra/install/base-install.sh)
+1. [install/base-install.sh](install/base-install.sh)
 2. reboot if required
-3. [install/docker-install.sh](/Users/josephcheung/Desktop/dev/infra/install/docker-install.sh)
+3. [install/docker-install.sh](install/docker-install.sh)
 4. reboot if required
-5. [test/fulltest.sh](/Users/josephcheung/Desktop/dev/infra/test/fulltest.sh)
+5. [test/fulltest.sh](test/fulltest.sh)
 
 ### NVIDIA: Disable Selected GPUs At Boot
 
-Use [install/manage-gpu.sh](/Users/josephcheung/Desktop/dev/infra/install/manage-gpu.sh) to select NVIDIA PCI slots that should bind to `vfio-pci` in initramfs instead of the NVIDIA driver.
+Use [install/manage-gpu.sh](install/manage-gpu.sh) to select NVIDIA PCI slots that should bind to `vfio-pci` in initramfs instead of the NVIDIA driver.
 
 ```bash
 sudo install/manage-gpu.sh              # interactive toggle menu
@@ -126,7 +126,7 @@ sudo install/manage-gpu.sh --disable 25:00
 sudo install/manage-gpu.sh --enable 25:00
 ```
 
-Each selected slot is applied as a `.0` and `.1` pair, and the script runs `update-initramfs -u`. Reboot for changes to take effect. See [docs/manage-gpu.md](/Users/josephcheung/Desktop/dev/infra/docs/manage-gpu.md).
+Each selected slot is applied as a `.0` and `.1` pair, and the script runs `update-initramfs -u`. Reboot for changes to take effect. See [docs/manage-gpu.md](docs/manage-gpu.md).
 
 ### AMD: Orchestrated Provisioning
 
@@ -134,9 +134,9 @@ This is the main end-to-end path for AMD nodes.
 
 Scripts involved:
 
-- [install/provision-amd.sh](/Users/josephcheung/Desktop/dev/infra/install/provision-amd.sh)
-- [install/amd-base-install.sh](/Users/josephcheung/Desktop/dev/infra/install/amd-base-install.sh)
-- [install/docker-install.sh](/Users/josephcheung/Desktop/dev/infra/install/docker-install.sh)
+- [install/provision-amd.sh](install/provision-amd.sh)
+- [install/amd-base-install.sh](install/amd-base-install.sh)
+- [install/docker-install.sh](install/docker-install.sh)
 
 How it works:
 
@@ -178,11 +178,11 @@ Shared runtime location used by the AMD orchestrator:
 
 The AMD manual path starts with:
 
-- [install/amd-base-install.sh](/Users/josephcheung/Desktop/dev/infra/install/amd-base-install.sh)
+- [install/amd-base-install.sh](install/amd-base-install.sh)
 
 This installs the AMDGPU DKMS driver, ROCm stack, and post-install environment setup. It is documented in:
 
-- [docs/amd-base-install.md](/Users/josephcheung/Desktop/dev/infra/docs/amd-base-install.md)
+- [docs/amd-base-install.md](docs/amd-base-install.md)
 
 ## Quick Start
 
@@ -262,21 +262,21 @@ Use `amd-stack-pin.sh --status` to inspect the active pin and `amd-stack-pin.sh 
 |---|---|---|
 | `install/provision.sh` | Orchestrates NVIDIA provisioning across reboots | Covered here |
 | `install/provision-amd.sh` | Orchestrates AMD provisioning across reboots | Covered here |
-| `install/base-install.sh` | NVIDIA driver, CUDA, cuDNN, DCGM, and base tooling | [docs/base-install.md](/Users/josephcheung/Desktop/dev/infra/docs/base-install.md) |
+| `install/base-install.sh` | NVIDIA driver, CUDA, cuDNN, DCGM, and base tooling | [docs/base-install.md](docs/base-install.md) |
 | `install/nvidia-stack-hold.sh` | Freeze or unfreeze the validated NVIDIA/CUDA stack | Covered here |
-| `install/docker-install.sh` | Docker CE, NVIDIA Container Toolkit, and runtime storage layout | [docs/docker-install.md](/Users/josephcheung/Desktop/dev/infra/docs/docker-install.md) |
-| `test/fulltest.sh` | NVIDIA GPU acceptance and health validation | [docs/fulltest.md](/Users/josephcheung/Desktop/dev/infra/docs/fulltest.md) |
-| `test/gpu-fulltest-v2.sh` | Experimental prepare-then-run variant of the NVIDIA GPU validation flow | [docs/gpu-fulltest-v2.md](/Users/josephcheung/Desktop/dev/infra/docs/gpu-fulltest-v2.md) |
-| `install/amd-base-install.sh` | AMDGPU + ROCm base install | [docs/amd-base-install.md](/Users/josephcheung/Desktop/dev/infra/docs/amd-base-install.md) |
+| `install/docker-install.sh` | Docker CE, NVIDIA Container Toolkit, and runtime storage layout | [docs/docker-install.md](docs/docker-install.md) |
+| `test/fulltest.sh` | NVIDIA GPU acceptance and health validation | [docs/fulltest.md](docs/fulltest.md) |
+| `test/gpu-fulltest-v2.sh` | Experimental prepare-then-run variant of the NVIDIA GPU validation flow | [docs/gpu-fulltest-v2.md](docs/gpu-fulltest-v2.md) |
+| `install/amd-base-install.sh` | AMDGPU + ROCm base install | [docs/amd-base-install.md](docs/amd-base-install.md) |
 | `install/amd-stack-pin.sh` | Inspect or reset the AMD ROCm apt pin | Covered here |
-| `test/disktest.sh` | Disk health, throughput, and stress validation with guided interactive mode and per-disk reports | [docs/disktest.md](/Users/josephcheung/Desktop/dev/infra/docs/disktest.md) |
-| `test/cpu-test.sh` | CPU socket or per-thread stress tester with crash-state checkpoints, default `/var/tmp/cpu-test` state, `--status`, `--reset-status`, and optional temperature logging | [docs/cpu-test.md](/Users/josephcheung/Desktop/dev/infra/docs/cpu-test.md) |
-| `test/cpu-ram-stress.sh` | CPU + RAM isolation stress using stress-ng | [docs/cpu-ram-stress.md](/Users/josephcheung/Desktop/dev/infra/docs/cpu-ram-stress.md) |
-| `test/ramtest.sh` | System RAM burn-in and ECC-aware memory validation | [docs/ramtest.md](/Users/josephcheung/Desktop/dev/infra/docs/ramtest.md) |
-| `test/network-test.sh` | Network connectivity, latency, MTU, and bandwidth validation | [docs/network-test.md](/Users/josephcheung/Desktop/dev/infra/docs/network-test.md) |
-| `test/network-batch.sh` | SSH-based orchestration helper for chain, pair, rotate, grouped, and plan-export network validation | [docs/network-batch.md](/Users/josephcheung/Desktop/dev/infra/docs/network-batch.md) |
-| `install/gpu-power-limit.sh` | Installs a persistent NVIDIA power-limit policy service | [docs/gpu-power-limit.md](/Users/josephcheung/Desktop/dev/infra/docs/gpu-power-limit.md) |
-| Combined acceptance workflow | Client-facing 60-node validation kit combining GPU, network, disk, burn, reboot, and variance checks | [docs/client-acceptance-test-kit.md](/Users/josephcheung/Desktop/dev/infra/docs/client-acceptance-test-kit.md) |
+| `test/disktest.sh` | Disk health, throughput, and stress validation with guided interactive mode and per-disk reports | [docs/disktest.md](docs/disktest.md) |
+| `test/cpu-test.sh` | CPU socket or per-thread stress tester with crash-state checkpoints, default `/var/tmp/cpu-test` state, `--status`, `--reset-status`, and optional temperature logging | [docs/cpu-test.md](docs/cpu-test.md) |
+| `test/cpu-ram-stress.sh` | CPU + RAM isolation stress using stress-ng | [docs/cpu-ram-stress.md](docs/cpu-ram-stress.md) |
+| `test/ramtest.sh` | System RAM burn-in and ECC-aware memory validation | [docs/ramtest.md](docs/ramtest.md) |
+| `test/network-test.sh` | Network connectivity, latency, MTU, and bandwidth validation | [docs/network-test.md](docs/network-test.md) |
+| `test/network-batch.sh` | SSH-based orchestration helper for chain, pair, rotate, grouped, and plan-export network validation | [docs/network-batch.md](docs/network-batch.md) |
+| `install/gpu-power-limit.sh` | Installs a persistent NVIDIA power-limit policy service | [docs/gpu-power-limit.md](docs/gpu-power-limit.md) |
+| Combined acceptance workflow | Client-facing 60-node validation kit combining GPU, network, disk, burn, reboot, and variance checks | [docs/client-acceptance-test-kit.md](docs/client-acceptance-test-kit.md) |
 
 ## Provisioning Details
 
@@ -383,30 +383,30 @@ It writes timestamped logs in the same directory where `fulltest.sh` is run.
 
 ### Inventory / Hardware
 
-Important scripts under [gpucheck/](/Users/josephcheung/Desktop/dev/infra/gpucheck):
+Important scripts under [gpucheck/](gpucheck):
 
-- [gpucheck/inv.sh](/Users/josephcheung/Desktop/dev/infra/gpucheck/inv.sh): GPU to PCIe slot mapping, link details, power, temperature, NUMA, CSV/JSON output
+- [gpucheck/inv.sh](gpucheck/inv.sh): GPU to PCIe slot mapping, link details, power, temperature, NUMA, CSV/JSON output
 - `srv-inv.sh`, `srv-inv-lite.sh`, `modinv.sh`, `dimm-inv.sh`, `bare-inv.sh`: broader host inventory helpers
 - `gpu-watchdog.sh` plus matching `.service` and `.timer`: watchdog support
 
 ### Recovery
 
-Important recovery helpers under [install/](/Users/josephcheung/Desktop/dev/infra/install):
+Important recovery helpers under [install/](install):
 
-- [install/ipmi-power-cycle.sh](/Users/josephcheung/Desktop/dev/infra/install/ipmi-power-cycle.sh): out-of-band BMC/IPMI chassis power-cycle helper for hosts that cannot complete an in-band reboot
+- [install/ipmi-power-cycle.sh](install/ipmi-power-cycle.sh): out-of-band BMC/IPMI chassis power-cycle helper for hosts that cannot complete an in-band reboot
 
 ### Monitoring
 
-Important files under [monitor/](/Users/josephcheung/Desktop/dev/infra/monitor):
+Important files under [monitor/](monitor):
 
-- [monitor/ipmi-watch.sh](/Users/josephcheung/Desktop/dev/infra/monitor/ipmi-watch.sh): IPMI reachability checks, outage tracking, Prometheus textfile export, email alerting
-- [monitor/calc_ipmi_energy.py](/Users/josephcheung/Desktop/dev/infra/monitor/calc_ipmi_energy.py): IPMI energy-related helper
+- [monitor/ipmi-watch.sh](monitor/ipmi-watch.sh): IPMI reachability checks, outage tracking, Prometheus textfile export, email alerting
+- [monitor/calc_ipmi_energy.py](monitor/calc_ipmi_energy.py): IPMI energy-related helper
 
 ### Network
 
-Important files under [network/](/Users/josephcheung/Desktop/dev/infra/network):
+Important files under [network/](network):
 
-- [network/iptest.sh](/Users/josephcheung/Desktop/dev/infra/network/iptest.sh): CSV-driven ping sweep for unresponsive IPs
+- [network/iptest.sh](network/iptest.sh): CSV-driven ping sweep for unresponsive IPs
 - `iplist.csv`, `iplist_clean.csv`, `googledns-ipv6.txt`: network input/reference data
 
 ## Logs, State, and Generated Files
@@ -417,7 +417,7 @@ What this repo will generate locally:
 - `test/fulltest_*.log`
 - `test/logs/`
 
-These are ignored in [.gitignore](/Users/josephcheung/Desktop/dev/infra/.gitignore).
+These are ignored in [.gitignore](.gitignore).
 
 When using the orchestrated `/opt/provision` flow, expect:
 
@@ -432,19 +432,19 @@ When using the orchestrated `/opt/provision-amd` flow, expect:
 
 ## Detailed Documentation
 
-Script reference guides now live under [docs/](/Users/josephcheung/Desktop/dev/infra/docs):
+Script reference guides now live under [docs/](docs):
 
-- [docs/base-install.md](/Users/josephcheung/Desktop/dev/infra/docs/base-install.md)
-- [docs/docker-install.md](/Users/josephcheung/Desktop/dev/infra/docs/docker-install.md)
-- [docs/fulltest.md](/Users/josephcheung/Desktop/dev/infra/docs/fulltest.md)
-- [docs/gpu-fulltest-v2.md](/Users/josephcheung/Desktop/dev/infra/docs/gpu-fulltest-v2.md)
-- [docs/disktest.md](/Users/josephcheung/Desktop/dev/infra/docs/disktest.md)
-- [docs/ramtest.md](/Users/josephcheung/Desktop/dev/infra/docs/ramtest.md)
-- [docs/network-test.md](/Users/josephcheung/Desktop/dev/infra/docs/network-test.md)
-- [docs/network-batch.md](/Users/josephcheung/Desktop/dev/infra/docs/network-batch.md)
-- [docs/client-acceptance-test-kit.md](/Users/josephcheung/Desktop/dev/infra/docs/client-acceptance-test-kit.md)
-- [docs/gpu-power-limit.md](/Users/josephcheung/Desktop/dev/infra/docs/gpu-power-limit.md)
-- [docs/amd-base-install.md](/Users/josephcheung/Desktop/dev/infra/docs/amd-base-install.md)
+- [docs/base-install.md](docs/base-install.md)
+- [docs/docker-install.md](docs/docker-install.md)
+- [docs/fulltest.md](docs/fulltest.md)
+- [docs/gpu-fulltest-v2.md](docs/gpu-fulltest-v2.md)
+- [docs/disktest.md](docs/disktest.md)
+- [docs/ramtest.md](docs/ramtest.md)
+- [docs/network-test.md](docs/network-test.md)
+- [docs/network-batch.md](docs/network-batch.md)
+- [docs/client-acceptance-test-kit.md](docs/client-acceptance-test-kit.md)
+- [docs/gpu-power-limit.md](docs/gpu-power-limit.md)
+- [docs/amd-base-install.md](docs/amd-base-install.md)
 
 The root README is intended to answer:
 
@@ -460,11 +460,11 @@ The `docs/` files are intended to answer:
 - platform-specific notes
 - troubleshooting at the individual script level
 
-For repo-level decision history and current stable/experimental lanes, see [docs/project-decisions.md](/Users/josephcheung/Desktop/dev/infra/docs/project-decisions.md).
+For repo-level decision history and current stable/experimental lanes, see [docs/project-decisions.md](docs/project-decisions.md).
 
 ## Legacy Material
 
-[install/backup/](/Users/josephcheung/Desktop/dev/infra/install/backup) contains archived or older helper scripts.
+[install/backup/](install/backup) contains archived or older helper scripts.
 
 Treat that directory as reference material, not the primary supported workflow.
 

@@ -1,6 +1,6 @@
 # GPU Management Helper
 
-[install/manage-gpu.sh](/Users/josephcheung/Desktop/dev/infra/install/manage-gpu.sh) installs an initramfs hook that binds selected NVIDIA GPU PCI slots to `vfio-pci` early in boot.
+[install/manage-gpu.sh](../install/manage-gpu.sh) installs an initramfs hook that binds selected NVIDIA GPU PCI slots to `vfio-pci` early in boot.
 
 Use it when a host needs one or more GPUs hidden from the NVIDIA driver. Each selected GPU slot is applied as a pair:
 
@@ -29,7 +29,7 @@ Select one or more menu numbers to toggle those slots. Each row shows the curren
 
 The helper uses standard Ubuntu tools: `bash`, `lspci`, `modprobe`, `update-initramfs`, and core utilities such as `awk`, `sed`, `sort`, `tee`, `install`, `readlink`, and `basename`.
 
-[install/base-install.sh](/Users/josephcheung/Desktop/dev/infra/install/base-install.sh) already installs `pciutils`, which provides `lspci`. The remaining tools are part of a normal Ubuntu Server install or the `initramfs-tools`/`kmod` base packages.
+[install/base-install.sh](../install/base-install.sh) already installs `pciutils`, which provides `lspci`. The remaining tools are part of a normal Ubuntu Server install or the `initramfs-tools`/`kmod` base packages.
 
 ## Non-Interactive Use
 

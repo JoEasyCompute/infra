@@ -411,6 +411,42 @@ At the end a per-GPU peak summary is printed:
 | `TEMP_WARN` | `87°C` | `TEMP <n>°C >= 87°C (check thermal paste/airflow)` |
 | `FAN_WARN` | `100%` | `FAN at 100% (cooling at limit)` |
 
+### 12V-2x6 / 12VHPWR Early-Warning Methodology
+
+`stress` and `node-stress` also watch for a *power-balance* pattern that can
+precede a 12V-2x6 / 12VHPWR cable or connector failure. This is a heuristic
+signal, not a direct electrical measurement, so the script treats it as an
+early warning rather than proof of damage.
+
+How the detector works:
+
+1. The burn monitor samples each GPU every 5 seconds and records temperature,
+   power draw, fan percentage, and SM clock.
+2. The first 30 seconds of the burn are ignored to skip startup ramp and fan
+   spin-up.
+3. For each timestamp, the script computes the median power draw across all
+   GPUs in scope.
+4. A GPU sample is considered anomalous if:
+   - its power draw is at least 25 W below the peer median, and
+   - its fan is at or above 85%.
+5. If a GPU meets that condition in at least 50% of the post-warmup samples,
+   it is flagged as a potential connector issue.
+
+Why this helps:
+
+- A weak 12V-2x6 / 12VHPWR connection can make one GPU self-limit under load
+  even when the driver does not report a hard throttle reason.
+- That often shows up as a GPU that stays cooler, draws less power, and runs
+  its fan harder than peers at the same time.
+- Because the driver may not expose this as a normal throttle state, the burn
+  test checks the raw telemetry directly instead of relying only on
+  `nvidia-smi` throttle flags.
+
+The detector requires at least 3 GPUs in scope so it has a meaningful peer
+median to compare against. When it triggers, `fulltest.sh` records the result
+as a remark by default (`POWER_ANOMALY_AS_REMARK=1`); set
+`POWER_ANOMALY_AS_REMARK=0` if you want the same condition to fail the test.
+
 **Fails if:**
 - The burn tool exits non-zero for a real compute error or GPU crash
 
@@ -418,7 +454,7 @@ At the end a per-GPU peak summary is printed:
 - Any GPU in scope exceeds the thermal warning threshold during the run (`TEMP_WARN` / `FAN_WARN`)
 - The burn tool emits a performance-health warning but thermals remain clean
 - The burn tool exits only because a GPU reports `SW_Thermal` / soft thermal throttling, with no hard-crash indicators
-- A 12V-2x6 / 12VHPWR connector early-warning pattern is detected; this is remark-only by default
+- A 12V-2x6 / 12VHPWR connector early-warning pattern is detected; see the methodology above (remark-only by default)
 
 When either of those warning-only cases happens, the final summary adds a `REMARKS` section rather than marking the test as failed. If a backend cannot be built and the script falls back to another engine, the summary also adds a `NOT BEING RUN` entry for the unavailable backend.
 
@@ -436,6 +472,10 @@ Runs the existing GPU stress backend at the same time as `stress-ng` CPU and RAM
 
 `stress-ng` picks a memory target dynamically from total system RAM so the default profile is heavy without immediately turning into an OOM test. The node-stress mode also prints `sensors` snapshots when `lm-sensors` is available.
 
+The same 12V-2x6 / 12VHPWR power-balance detector used by `stress` is applied
+here as well, because the GPU backend is shared and the extra CPU/RAM pressure
+can make marginal power delivery issues easier to reproduce.
+
 **Fails if:**
 - The GPU backend exits non-zero for a real compute error or GPU crash
 - `stress-ng` exits non-zero
@@ -444,7 +484,7 @@ Runs the existing GPU stress backend at the same time as `stress-ng` CPU and RAM
 - Any GPU exceeds the thermal warning threshold tracked by the GPU burn monitor
 - The GPU backend emits a performance-health warning but thermals remain clean
 - The GPU backend exits only because of `SW_Thermal` / soft thermal throttling, with no hard-crash indicators
-- A 12V-2x6 / 12VHPWR connector early-warning pattern is detected; this is remark-only by default
+- A 12V-2x6 / 12VHPWR connector early-warning pattern is detected; see the methodology above (remark-only by default)
 
 If `stress-ng`, `gpu-fryer`, or `gpu-burn` is unavailable, the summary records that component as `NOT BEING RUN` rather than treating the whole run as a failure.
 
