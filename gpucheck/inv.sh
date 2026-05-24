@@ -66,7 +66,8 @@ lines_file=$(mktemp)
 remark_file=$(mktemp)
 smi_out_file=$(mktemp)
 smi_err_file=$(mktemp)
-trap 'rm -f "$slot_file" "$lines_file" "$remark_file" "$smi_out_file" "$smi_err_file"' EXIT
+smi_rc_file=$(mktemp)
+trap 'rm -f "$slot_file" "$lines_file" "$remark_file" "$smi_out_file" "$smi_err_file" "$smi_rc_file"' EXIT
 
 echo -e "=== PCIe Slot ↔ GPU Mapping ==="
 echo ""
@@ -91,13 +92,26 @@ done < <(dmidecode -t slot)
 # Process GPUs
 # Query includes extended metrics
 smi_rc=0
-if command -v timeout >/dev/null 2>&1; then
-    timeout --kill-after=2 "${smi_timeout}s" \
-        nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max,temperature.gpu,power.draw,power.limit,driver_version \
-        --format=csv,noheader,nounits >"$smi_out_file" 2>"$smi_err_file" || smi_rc=$?
-else
+(
     nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max,temperature.gpu,power.draw,power.limit,driver_version \
-        --format=csv,noheader,nounits >"$smi_out_file" 2>"$smi_err_file" || smi_rc=$?
+        --format=csv,noheader,nounits >"$smi_out_file" 2>"$smi_err_file"
+    printf '%s' "$?" > "$smi_rc_file"
+) &
+smi_pid=$!
+start_ts=$SECONDS
+while [[ ! -s "$smi_rc_file" ]]; do
+    if (( SECONDS - start_ts >= smi_timeout )); then
+        smi_rc=124
+        kill "$smi_pid" 2>/dev/null || true
+        sleep 2
+        kill -9 "$smi_pid" 2>/dev/null || true
+        break
+    fi
+    sleep 0.2
+done
+if [[ -s "$smi_rc_file" ]]; then
+    smi_rc=$(cat "$smi_rc_file")
+    wait "$smi_pid" 2>/dev/null || true
 fi
 if [[ "$smi_rc" -eq 124 ]]; then
     echo "Warning: nvidia-smi timed out after ${smi_timeout}s; output may be incomplete." >&2
