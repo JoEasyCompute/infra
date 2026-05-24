@@ -63,7 +63,9 @@ fi
 slot_file=$(mktemp)
 lines_file=$(mktemp)
 remark_file=$(mktemp)
-trap 'rm -f "$slot_file" "$lines_file" "$remark_file"' EXIT
+smi_out_file=$(mktemp)
+smi_err_file=$(mktemp)
+trap 'rm -f "$slot_file" "$lines_file" "$remark_file" "$smi_out_file" "$smi_err_file"' EXIT
 
 echo -e "=== PCIe Slot ↔ GPU Mapping ==="
 echo ""
@@ -87,8 +89,19 @@ done < <(dmidecode -t slot)
 
 # Process GPUs
 # Query includes extended metrics
-nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max,temperature.gpu,power.draw,power.limit,driver_version \
-    --format=csv,noheader,nounits | while IFS=',' read -r pci gpu_name serial gen_cur gen_max width_cur width_max temp power_draw power_limit driver; do
+if ! nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max,temperature.gpu,power.draw,power.limit,driver_version \
+    --format=csv,noheader,nounits >"$smi_out_file" 2>"$smi_err_file"; then
+    true
+fi
+
+declare -A bus_lost_by_pci
+while IFS= read -r err_line; do
+    if [[ $err_line =~ Unable\ to\ determine\ the\ device\ handle\ for\ GPU[0-9]+:\ ([0-9A-Fa-f:.]+):\ Unknown\ Error ]]; then
+        bus_lost_by_pci["${BASH_REMATCH[1],,}"]=1
+    fi
+done < "$smi_err_file"
+
+while IFS=',' read -r pci gpu_name serial gen_cur gen_max width_cur width_max temp power_draw power_limit driver; do
 
     # Trim whitespace
     pci=$(echo "$pci" | xargs)
@@ -117,7 +130,6 @@ nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link
     link_speed="N/A"
     link_width="N/A"
     numa_node="?"
-    degraded=0
     negotiated_below_max=0
     bus_lost=0
     
@@ -128,7 +140,6 @@ nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link
         if [[ -n "$link_line" ]]; then
             link_speed=$(echo "$link_line" | sed -n 's/.*Speed \([^,]*\).*/\1/p')
             link_width=$(echo "$link_line" | sed -n 's/.*Width \([^,]*\).*/\1/p')
-            [[ "$link_line" == *"(downgraded)"* ]] && degraded=1
         fi
         
         # Try finding NUMA node
@@ -146,9 +157,12 @@ nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link
         bus_lost=1
     fi
 
+    if [[ -n "${bus_lost_by_pci[$pci_lower]:-}" ]]; then
+        bus_lost=1
+    fi
+
     # Negotiated speed/width below max is often normal while the GPU is idle.
-    # Keep that fact visible, but only treat it as degraded if lspci explicitly
-    # reports a downgraded link state.
+    # Keep that fact visible, but do not treat it as a failure condition.
     if [[ "$gen_cur" -lt "$gen_max" || "$width_cur" -lt "$width_max" ]]; then
         negotiated_below_max=1
     fi
@@ -160,10 +174,7 @@ nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link
     power_fmt="${power_draw}/${power_limit}W"
     
     # Status coloring
-    if [[ "$degraded" -eq 1 ]]; then
-        status_text="Degraded"
-        status_color="${RED}Degraded${NC}"
-    elif [[ "$bus_lost" -eq 1 ]]; then
+    if [[ "$bus_lost" -eq 1 ]]; then
         status_text="BusLost"
         status_color="${RED}BusLost${NC}"
     elif [[ "$negotiated_below_max" -eq 1 ]]; then
@@ -186,7 +197,7 @@ sort -t'|' -k1,1V "$lines_file" -o "$lines_file"
 
 # --- Output Generation ---
 
-# 1. Console Output
+    # 1. Console Output
 gpu_idx=0
 while IFS='|' read -r slot pci name serial gc gm wc wm ls lw temp pd pl numa drv st_txt st_col; do
     gen_fmt="${gc}/${gm}"
@@ -202,6 +213,17 @@ while IFS='|' read -r slot pci name serial gc gm wc wm ls lw temp pd pl numa drv
     fi
     ((gpu_idx++))
 done < "$lines_file"
+
+for pci_lower in "${!bus_lost_by_pci[@]}"; do
+    slot_name="(Unknown)"
+    pci_key="${pci_lower#00000000:}"
+    pci_key="${pci_key#0000:}"
+    match=$(grep "^${pci_key}|" "$slot_file" 2>/dev/null || true)
+    if [[ -n "$match" ]]; then
+        slot_name=$(echo "$match" | cut -d'|' -f2)
+    fi
+    printf "PCI %s in slot %s: BusLost (nvidia-smi reported device handle error)\n" "$pci_lower" "$slot_name" >> "$remark_file"
+done
 
 # 2. CSV Output
 if [[ -n "$csv_file" ]]; then
