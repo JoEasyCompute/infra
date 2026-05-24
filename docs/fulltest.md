@@ -427,7 +427,7 @@ How the detector works:
 3. For each timestamp, the script computes the median power draw across all
    GPUs in scope.
 4. A GPU sample is considered anomalous if:
-   - its power draw is at least 25 W below the peer median, and
+   - its power draw is at least `max(25 W, 6% of the peer median)` below the peer median, and
    - its fan is at or above 85%.
 5. If a GPU meets that condition in at least 50% of the post-warmup samples,
    it is flagged as a potential connector issue.
@@ -444,8 +444,13 @@ Why this helps:
 
 The detector requires at least 3 GPUs in scope so it has a meaningful peer
 median to compare against. When it triggers, `fulltest.sh` records the result
-as a remark by default (`POWER_ANOMALY_AS_REMARK=1`); set
-`POWER_ANOMALY_AS_REMARK=0` if you want the same condition to fail the test.
+as a remark by default (`POWER_ANOMALY_AS_REMARK=1`) and includes the flagged
+GPU index list in the remark text; set `POWER_ANOMALY_AS_REMARK=0` if you want
+the same condition to fail the test.
+
+If no usable fan telemetry is available, the detector skips cleanly rather than
+guessing from power alone. That is intentional for chassis-managed cooling
+platforms where on-card fan speed is not exposed.
 
 **Fails if:**
 - The burn tool exits non-zero for a real compute error or GPU crash
