@@ -5,7 +5,6 @@
 # Default outputs
 csv_file=""
 json_file=""
-smi_timeout="${GPUCHECK_SMI_TIMEOUT:-8}"
 
 # --- Argument Parsing ---
 while [[ $# -gt 0 ]]; do
@@ -66,8 +65,8 @@ lines_file=$(mktemp)
 remark_file=$(mktemp)
 smi_out_file=$(mktemp)
 smi_err_file=$(mktemp)
-smi_rc_file=$(mktemp)
-trap 'rm -f "$slot_file" "$lines_file" "$remark_file" "$smi_out_file" "$smi_err_file" "$smi_rc_file"' EXIT
+gpu_raw_file=$(mktemp)
+trap 'rm -f "$slot_file" "$lines_file" "$remark_file" "$smi_out_file" "$smi_err_file" "$gpu_raw_file"' EXIT
 
 echo -e "=== PCIe Slot ↔ GPU Mapping ==="
 echo ""
@@ -89,33 +88,75 @@ while IFS= read -r line; do
     fi
 done < <(dmidecode -t slot)
 
+speed_to_gen() {
+    case "$1" in
+        *"2.5GT/s"*) echo "1" ;;
+        *"5.0GT/s"*|*"5GT/s"*) echo "2" ;;
+        *"8.0GT/s"*|*"8GT/s"*) echo "3" ;;
+        *"16.0GT/s"*|*"16GT/s"*) echo "4" ;;
+        *"32.0GT/s"*|*"32GT/s"*) echo "5" ;;
+        *"64.0GT/s"*|*"64GT/s"*) echo "6" ;;
+        *"128.0GT/s"*|*"128GT/s"*) echo "7" ;;
+        *) echo "N/A" ;;
+    esac
+}
+
 # Process GPUs
-# Query includes extended metrics
-smi_rc=0
-(
-    nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max,temperature.gpu,power.draw,power.limit,driver_version \
-        --format=csv,noheader,nounits >"$smi_out_file" 2>"$smi_err_file"
-    printf '%s' "$?" > "$smi_rc_file"
-) &
-smi_pid=$!
-start_ts=$SECONDS
-while [[ ! -s "$smi_rc_file" ]]; do
-    if (( SECONDS - start_ts >= smi_timeout )); then
-        smi_rc=124
-        kill "$smi_pid" 2>/dev/null || true
-        sleep 2
-        kill -9 "$smi_pid" 2>/dev/null || true
-        break
-    fi
-    sleep 0.2
-done
-if [[ -s "$smi_rc_file" ]]; then
-    smi_rc=$(cat "$smi_rc_file")
-    wait "$smi_pid" 2>/dev/null || true
-fi
-if [[ "$smi_rc" -eq 124 ]]; then
-    echo "Warning: nvidia-smi timed out after ${smi_timeout}s; output may be incomplete." >&2
-fi
+# Fast path: use the plain `nvidia-smi` table output, which still reports the
+# PCI address for the broken GPU on stderr without querying the missing device.
+nvidia-smi >"$smi_out_file" 2>"$smi_err_file" || true
+
+# Pull the driver version from the banner.
+driver_version=$(sed -n 's/.*Driver Version:[[:space:]]*\([^[:space:]]*\).*/\1/p' "$smi_out_file" | head -n1)
+driver_version="${driver_version:-N/A}"
+
+awk '
+function trim(s) {
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+    return s
+}
+BEGIN {
+    pending = 0
+}
+{
+    if ($0 ~ /^\|[[:space:]]+[0-9]+[[:space:]]+/ && $0 ~ /\|[[:space:]]+[0-9A-Fa-f]{8}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}\.[0-9][[:space:]]+/) {
+        split($0, a, "|")
+        left = trim(a[2])
+        right = trim(a[3])
+        if (match(left, /^([0-9]+)[[:space:]]+(.+)[[:space:]]+On$/, m)) {
+            idx = m[1]
+            name = trim(m[2])
+        } else {
+            next
+        }
+        split(right, b, /[[:space:]]+/)
+        pci = tolower(b[1])
+        pending_idx = idx
+        pending_pci = pci
+        pending_name = name
+        pending = 1
+        next
+    }
+    if (pending && $0 ~ /^\|/) {
+        split($0, a, "|")
+        metrics = trim(a[2])
+        fan = "N/A"
+        temp = "N/A"
+        power_draw = "N/A"
+        power_limit = "N/A"
+        if (match(metrics, /^([0-9]+)%[[:space:]]+([0-9]+)C.*([0-9.]+)W[[:space:]]*\/[[:space:]]*([0-9.]+)W/, m)) {
+            fan = m[1]
+            temp = m[2]
+            power_draw = m[3]
+            power_limit = m[4]
+        }
+        print pending_idx "|" pending_pci "|" pending_name "|" fan "|" temp "|" power_draw "|" power_limit
+        pending = 0
+        next
+    }
+    pending = 0
+}
+' "$smi_out_file" > "$gpu_raw_file"
 
 declare -A bus_lost_by_pci
 while IFS= read -r err_line; do
@@ -124,20 +165,15 @@ while IFS= read -r err_line; do
     fi
 done < "$smi_err_file"
 
-while IFS=',' read -r pci gpu_name serial gen_cur gen_max width_cur width_max temp power_draw power_limit driver; do
+while IFS='|' read -r gpu_idx pci gpu_name fan temp power_draw power_limit; do
+    [[ -z "$gpu_idx" || -z "$pci" ]] && continue
 
-    # Trim whitespace
     pci=$(echo "$pci" | xargs)
     gpu_name=$(echo "$gpu_name" | xargs)
-    serial=$(echo "$serial" | xargs)
-    gen_cur=$(echo "$gen_cur" | xargs)
-    gen_max=$(echo "$gen_max" | xargs)
-    width_cur=$(echo "$width_cur" | xargs)
-    width_max=$(echo "$width_max" | xargs)
+    fan=$(echo "$fan" | xargs)
     temp=$(echo "$temp" | xargs)
     power_draw=$(echo "$power_draw" | xargs)
     power_limit=$(echo "$power_limit" | xargs)
-    driver=$(echo "$driver" | xargs)
 
     pci_lower=$(echo "$pci" | tr '[:upper:]' '[:lower:]')
     pci_trimmed=$(echo "$pci_lower" | cut -d':' -f2-)
@@ -150,54 +186,63 @@ while IFS=',' read -r pci gpu_name serial gen_cur gen_max width_cur width_max te
         slot_name=$(echo "$match" | cut -d'|' -f2)
     fi
 
-    # Read LnkSta and NUMA via lspci
+    # Read LnkSta/LnkCap and NUMA via lspci
     link_speed="N/A"
     link_width="N/A"
+    cap_speed="N/A"
+    cap_width="N/A"
     numa_node="?"
     negotiated_below_max=0
     bus_lost=0
-    
-    # lspci might fail if device is in a bad state, suppress stderr
+
     lspci_output=$(lspci -s "$pci_lower" -vv 2>/dev/null)
     if [[ -n "$lspci_output" ]]; then
+        cap_line=$(echo "$lspci_output" | grep -i "LnkCap:" | head -n1)
         link_line=$(echo "$lspci_output" | grep -i "LnkSta:" | head -n1)
+        if [[ -n "$cap_line" ]]; then
+            cap_speed=$(echo "$cap_line" | sed -n 's/.*Speed \([^,]*\).*/\1/p')
+            cap_width=$(echo "$cap_line" | sed -n 's/.*Width \([^,]*\).*/\1/p')
+        fi
         if [[ -n "$link_line" ]]; then
             link_speed=$(echo "$link_line" | sed -n 's/.*Speed \([^,]*\).*/\1/p')
             link_width=$(echo "$link_line" | sed -n 's/.*Width \([^,]*\).*/\1/p')
         fi
-        
-        # Try finding NUMA node
+
         numa_line=$(echo "$lspci_output" | grep -i "NUMA node:")
         if [[ -n "$numa_line" ]]; then
-             numa_node=$(echo "$numa_line" | awk '{print $NF}')
+            numa_node=$(echo "$numa_line" | awk '{print $NF}')
         else
-            # Fallback to sysfs
             if [[ -r "/sys/bus/pci/devices/$pci_lower/numa_node" ]]; then
                 numa_node=$(cat "/sys/bus/pci/devices/$pci_lower/numa_node")
-                 [[ "$numa_node" == "-1" ]] && numa_node="0" # Assume 0 if -1 (often means UMA/Single socket)
+                [[ "$numa_node" == "-1" ]] && numa_node="0"
             fi
         fi
     else
         bus_lost=1
     fi
 
-    if [[ -n "$pci_lower" && -n "${bus_lost_by_pci[$pci_lower]:-}" ]]; then
+    if [[ -n "${bus_lost_by_pci[$pci_lower]:-}" ]]; then
         bus_lost=1
     fi
 
-    # Negotiated speed/width below max is often normal while the GPU is idle.
-    # Keep that fact visible, but do not treat it as a failure condition.
-    if [[ "$gen_cur" -lt "$gen_max" || "$width_cur" -lt "$width_max" ]]; then
+    gen_cur=$(speed_to_gen "$link_speed")
+    gen_max=$(speed_to_gen "$cap_speed")
+    width_cur="${link_width#x}"
+    width_max="${cap_width#x}"
+    [[ "$width_cur" == "$link_width" ]] && width_cur="$link_width"
+    [[ "$width_max" == "$cap_width" ]] && width_max="$cap_width"
+
+    if [[ "$gen_cur" =~ ^[0-9]+$ && "$gen_max" =~ ^[0-9]+$ && "$gen_cur" -lt "$gen_max" ]] || \
+       [[ "$width_cur" =~ ^[0-9]+$ && "$width_max" =~ ^[0-9]+$ && "$width_cur" -lt "$width_max" ]]; then
         negotiated_below_max=1
     fi
 
-    # Formatting for display
     gen_fmt="${gen_cur}/${gen_max}"
     width_fmt="${width_cur}/${width_max}"
     link_fmt="${link_speed}/${link_width}"
     power_fmt="${power_draw}/${power_limit}W"
-    
-    # Status coloring
+    serial="N/A"
+
     if [[ "$bus_lost" -eq 1 ]]; then
         status_text="BusLost"
         status_color="${RED}BusLost${NC}"
@@ -209,33 +254,27 @@ while IFS=',' read -r pci gpu_name serial gen_cur gen_max width_cur width_max te
         status_color="${GREEN}OK${NC}"
     fi
 
-    # Store all fields for sorting and later output
-    # Delimiter: |
-    # 1:Slot 2:PCI 3:Name 4:Serial 5:GenCur 6:GenMax 7:WdthCur 8:WdthMax 9:LnkSpd 10:LnkWdth 11:Temp 12:PwrDraw 13:PwrLim 14:NUMA 15:Driver 16:StatusText 17:StatusColor
-    echo "$slot_name|$pci|$gpu_name|$serial|$gen_cur|$gen_max|$width_cur|$width_max|$link_speed|$link_width|$temp|$power_draw|$power_limit|$numa_node|$driver|$status_text|$status_color" >> "$lines_file"
-done
+    echo "$gpu_idx|$slot_name|$pci|$gpu_name|$serial|$gen_cur|$gen_max|$width_cur|$width_max|$link_speed|$link_width|$temp|$power_draw|$power_limit|$numa_node|$driver_version|$status_text|$status_color" >> "$lines_file"
+done < "$gpu_raw_file"
 
-# Sort by SLOT (using sort -V for version sort on the slot string if possible, or usually just text)
-# We will do a best effort sort. `sort -k1,1`
-sort -t'|' -k1,1V "$lines_file" -o "$lines_file"
+# Sort by SLOT (best effort)
+sort -t'|' -k2,2V "$lines_file" -o "$lines_file"
 
 # --- Output Generation ---
 
-    # 1. Console Output
-gpu_idx=0
-while IFS='|' read -r slot pci name serial gc gm wc wm ls lw temp pd pl numa drv st_txt st_col; do
+# 1. Console Output
+while IFS='|' read -r gpu_idx slot pci name serial gc gm wc wm ls lw temp pd pl numa drv st_txt st_col; do
     gen_fmt="${gc}/${gm}"
     width_fmt="${wc}/${wm}"
     link_fmt="${ls}/${lw}"
     power_fmt="${pd}/${pl}W"
-    
+
     printf "%-4s %-20s %-14s %-25s %-16s %-10s %-10s %-10s %-12s %-10s %-8s %-10s %-8b\n" \
         "$gpu_idx" "$slot" "$pci" "${name:0:22}.." "$serial" "$gen_fmt" "$width_fmt" "$link_fmt" "${temp}C" "$power_fmt" "$numa" "$drv" "$st_col"
 
     if [[ "$st_txt" == "BusLost" ]]; then
         printf "GPU %s in slot %s (%s): %s\n" "$gpu_idx" "$slot" "$pci" "$st_txt" >> "$remark_file"
     fi
-    ((gpu_idx++))
 done < "$lines_file"
 
 for pci_lower in "${!bus_lost_by_pci[@]}"; do
@@ -252,40 +291,34 @@ done
 # 2. CSV Output
 if [[ -n "$csv_file" ]]; then
     echo "Idx,Slot,PCI,Name,Serial,GenCurrent,GenMax,WidthCurrent,WidthMax,LinkSpeed,LinkWidth,TempC,PowerDrawW,PowerLimitW,NUMA,Driver,Status" > "$csv_file"
-    gpu_idx=0
-    while IFS='|' read -r slot pci name serial gc gm wc wm ls lw temp pd pl numa drv st_txt st_col; do
+    while IFS='|' read -r gpu_idx slot pci name serial gc gm wc wm ls lw temp pd pl numa drv st_txt st_col; do
         echo "$gpu_idx,\"$slot\",\"$pci\",\"$name\",\"$serial\",$gc,$gm,$wc,$wm,\"$ls\",\"$lw\",$temp,$pd,$pl,$numa,\"$drv\",\"$st_txt\"" >> "$csv_file"
-        ((gpu_idx++))
     done < "$lines_file"
     echo "CSV written to $csv_file"
 fi
 
 # 3. JSON Output
 if [[ -n "$json_file" ]]; then
-    # We'll construct JSON using jq for safety, or a loop if we assume simple data.
-    # To be robust, let's use jq if available (checked at start), or fallback?
-    # We enforced jq check if json_file is set.
-    
-    # Create valid JSON array
     jq -nR '
-        [inputs 
-        | split("|") 
+        [inputs
+        | split("|")
         | {
-            slot: .[0],
-            pci_address: .[1],
-            name: .[2],
-            serial: .[3],
+            gpu_index: .[0],
+            slot: .[1],
+            pci_address: .[2],
+            name: .[3],
+            serial: .[4],
             pcie: {
-                gen: {current: .[4], max: .[5]},
-                width: {current: .[6], max: .[7]},
-                link: {speed: .[8], width: .[9]}
+                gen: {current: .[5], max: .[6]},
+                width: {current: .[7], max: .[8]},
+                link: {speed: .[9], width: .[10]}
             },
-            thermals: {temp_c: .[10]},
-            power: {draw_w: .[11], limit_w: .[12]},
-            system: {numa_node: .[13], driver: .[14]},
-            status: .[15]
+            thermals: {temp_c: .[11]},
+            power: {draw_w: .[12], limit_w: .[13]},
+            system: {numa_node: .[14], driver: .[15]},
+            status: .[16]
           }
-        ] |  to_entries | map(.value + {index: .key})
+        ] | to_entries | map(.value + {index: .key})
     ' "$lines_file" > "$json_file"
     echo "JSON written to $json_file"
 fi
@@ -294,8 +327,4 @@ if [[ -s "$remark_file" ]]; then
     echo ""
     echo "=== Remark: GPUs that appear to have fallen off the bus ==="
     cat "$remark_file"
-elif [[ "$smi_rc" -eq 124 ]]; then
-    echo ""
-    echo "=== Remark: GPUs that appear to have fallen off the bus ==="
-    echo "nvidia-smi timed out after ${smi_timeout}s; one or more GPUs may be unresponsive or have fallen off the bus."
 fi
