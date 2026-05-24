@@ -62,7 +62,8 @@ fi
 # Cleanup trap
 slot_file=$(mktemp)
 lines_file=$(mktemp)
-trap 'rm -f "$slot_file" "$lines_file"' EXIT
+remark_file=$(mktemp)
+trap 'rm -f "$slot_file" "$lines_file" "$remark_file"' EXIT
 
 echo -e "=== PCIe Slot ↔ GPU Mapping ==="
 echo ""
@@ -118,6 +119,7 @@ nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link
     numa_node="?"
     degraded=0
     negotiated_below_max=0
+    bus_lost=0
     
     # lspci might fail if device is in a bad state, suppress stderr
     lspci_output=$(lspci -s "$pci_lower" -vv 2>/dev/null)
@@ -136,10 +138,12 @@ nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link
         else
             # Fallback to sysfs
             if [[ -r "/sys/bus/pci/devices/$pci_lower/numa_node" ]]; then
-                 numa_node=$(cat "/sys/bus/pci/devices/$pci_lower/numa_node")
+                numa_node=$(cat "/sys/bus/pci/devices/$pci_lower/numa_node")
                  [[ "$numa_node" == "-1" ]] && numa_node="0" # Assume 0 if -1 (often means UMA/Single socket)
             fi
         fi
+    else
+        bus_lost=1
     fi
 
     # Negotiated speed/width below max is often normal while the GPU is idle.
@@ -159,6 +163,9 @@ nvidia-smi --query-gpu=pci.bus_id,name,serial,pcie.link.gen.gpucurrent,pcie.link
     if [[ "$degraded" -eq 1 ]]; then
         status_text="Degraded"
         status_color="${RED}Degraded${NC}"
+    elif [[ "$bus_lost" -eq 1 ]]; then
+        status_text="BusLost"
+        status_color="${RED}BusLost${NC}"
     elif [[ "$negotiated_below_max" -eq 1 ]]; then
         status_text="BelowMax"
         status_color="${YELLOW}BelowMax${NC}"
@@ -189,6 +196,10 @@ while IFS='|' read -r slot pci name serial gc gm wc wm ls lw temp pd pl numa drv
     
     printf "%-4s %-20s %-14s %-25s %-16s %-10s %-10s %-10s %-12s %-10s %-8s %-10s %-8b\n" \
         "$gpu_idx" "$slot" "$pci" "${name:0:22}.." "$serial" "$gen_fmt" "$width_fmt" "$link_fmt" "${temp}C" "$power_fmt" "$numa" "$drv" "$st_col"
+
+    if [[ "$st_txt" == "BusLost" ]]; then
+        printf "GPU %s in slot %s (%s): %s\n" "$gpu_idx" "$slot" "$pci" "$st_txt" >> "$remark_file"
+    fi
     ((gpu_idx++))
 done < "$lines_file"
 
@@ -231,4 +242,10 @@ if [[ -n "$json_file" ]]; then
         ] |  to_entries | map(.value + {index: .key})
     ' "$lines_file" > "$json_file"
     echo "JSON written to $json_file"
+fi
+
+if [[ -s "$remark_file" ]]; then
+    echo ""
+    echo "=== Remark: GPUs that appear to have fallen off the bus ==="
+    cat "$remark_file"
 fi

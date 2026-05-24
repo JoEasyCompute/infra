@@ -5,6 +5,8 @@ set -euo pipefail
 
 # Optional CSV output file
 csv_file="${1:-}"
+remark_file=$(mktemp)
+trap 'rm -f "$remark_file"' EXIT
 
 have(){ command -v "$1" >/dev/null 2>&1; }
 require(){ for c in "$@"; do have "$c" || { echo "ERROR: missing dependency: $c" >&2; exit 1; }; done; }
@@ -164,6 +166,10 @@ for addr in "${gpu_addrs[@]}"; do
 
   degrade=""
   status="OK"
+  lspci_output="$(lspci -s "$addr" -vv 2>/dev/null || true)"
+  if [[ -z "$lspci_output" ]]; then
+    status="BusLost"
+  fi
   if [[ "$cur_w" =~ ^[0-9]+$ && "$max_w" =~ ^[0-9]+$ && "$cur_w" -lt "$max_w" ]]; then degrade="(WIDTH↓)"; status="Degraded"; fi
   if [[ "$cur_gen" =~ ^Gen([0-9]+)$ && "$max_gen" =~ ^Gen([0-9]+)$ && "${BASH_REMATCH[1]}" -lt "${max_gen#Gen}" ]]; then degrade="${degrade:+$degrade }(GEN↓)"; status="Degraded"; fi
 
@@ -179,7 +185,7 @@ if ((${#rows[@]} > 0)); then
       function firstnum(s,    r){ if (match(s, /[0-9]+/)) return substr(s, RSTART, RLENGTH); else return 2147483647 }  # push "-" or non-numeric to end
       { print firstnum($1), $0 }
     ' | sort -t$'\t' -k1,1n -k2,2 | cut -f2- | \
-    awk -F'\t' -v OFS='\t' -v csv="${csv_file:-}" '
+    awk -F'\t' -v OFS='\t' -v csv="${csv_file:-}" -v remark_file="$remark_file" '
       BEGIN{ idx=0 }
       { 
         idx++; 
@@ -196,7 +202,17 @@ if ((${#rows[@]} > 0)); then
              printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n", \
              idx, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $13 >> csv
         }
+
+        if ($13 == "BusLost") {
+             printf "GPU %s in slot %s (%s): %s %s\n", idx, $1, $2, $13, ($12 != "" ? $12 : "") >> remark_file
+        }
       }'
+fi
+
+if [[ -s "$remark_file" ]]; then
+  echo
+  echo "=== Remark: GPUs that appear to have fallen off the bus ==="
+  cat "$remark_file"
 fi
 
 if [[ "$DEBUG" == "1" ]]; then

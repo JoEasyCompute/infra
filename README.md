@@ -389,6 +389,7 @@ Important scripts under [gpucheck/](gpucheck):
 
 - [gpucheck/inv.sh](gpucheck/inv.sh): GPU to PCIe slot mapping, link details, power, temperature, NUMA, CSV/JSON output
 - `srv-inv.sh`, `srv-inv-lite.sh`, `modinv.sh`, `dimm-inv.sh`, `bare-inv.sh`: broader host inventory helpers
+- `gpucheck/inv.sh` and `gpucheck/bare-inv.sh` print a final remark section naming any GPU that appears to have fallen off the bus and its associated slot; ordinary below-max or degraded link states are not remarked
 - `gpu-watchdog.sh` plus matching `.service` and `.timer`: watchdog support
 
 ### Recovery
