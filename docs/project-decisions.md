@@ -81,6 +81,19 @@ Current behavior:
 - AMD orchestration accepts the same flags for CLI symmetry, but the AMD stack is governed by repo pinning rather than apt-mark holds
 - `install/amd-stack-pin.sh --status` shows the active ROCm pin and `--reset` restores the expected pin file
 
+### 6. NVIDIA base install applies GPU fallback recovery policy
+
+Current behavior:
+
+- `install/base-install.sh` manages a systemd timeout block in `/etc/systemd/system.conf`
+- the managed systemd values are `DefaultTimeoutStopSec=30s` and `DefaultTimeoutAbortSec=15s`
+- it writes `/etc/sysctl.d/99-gpu-fallback.conf` with kernel panic / oops / hung-task fallback settings
+- the policy is host-wide: a kernel oops or hung task from any subsystem can trigger panic/reboot, not only NVIDIA/GPU faults
+- this is intentional for unattended compute nodes where automatic recovery is preferred over leaving a wedged host online for live debugging
+- this is a first-layer, in-band mitigation; it does not guarantee recovery when the kernel reboot path blocks on a GPU that has fallen off the PCIe bus
+- `install/ipmi-power-cycle.sh` provides the out-of-band manual recovery path for that condition by asking the BMC/IPMI controller to power-cycle the chassis
+- uninstall removes the managed systemd block and the sysctl drop-in
+
 ---
 
 ## Operator Notes

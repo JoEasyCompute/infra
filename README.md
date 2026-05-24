@@ -199,6 +199,8 @@ sudo /opt/provision/provision.sh --status
 
 Use this when you want the provisioning flow to resume automatically across reboots.
 On Ubuntu 26.04, `base-install.sh` automatically uses the `ubuntu2604` CUDA repo codename.
+Stage 1 also applies the managed GPU fallback policy in `/etc/systemd/system.conf` and `/etc/sysctl.d/99-gpu-fallback.conf`.
+That policy shortens systemd stop/abort timeouts and makes kernel oops or hung-task conditions trigger panic/reboot recovery, so it is best suited to unattended compute nodes rather than live-debug hosts.
 If you later want to freeze the validated NVIDIA stack, run `install/nvidia-stack-hold.sh --hold` after validation.
 The orchestrator also passes through `--freeze-gpu-stack` and `--unfreeze-gpu-stack` to stage 1 if you want to freeze or refresh the NVIDIA stack during provisioning.
 
@@ -383,6 +385,12 @@ Important scripts under [gpucheck/](/Users/josephcheung/Desktop/dev/infra/gpuche
 - [gpucheck/inv.sh](/Users/josephcheung/Desktop/dev/infra/gpucheck/inv.sh): GPU to PCIe slot mapping, link details, power, temperature, NUMA, CSV/JSON output
 - `srv-inv.sh`, `srv-inv-lite.sh`, `modinv.sh`, `dimm-inv.sh`, `bare-inv.sh`: broader host inventory helpers
 - `gpu-watchdog.sh` plus matching `.service` and `.timer`: watchdog support
+
+### Recovery
+
+Important recovery helpers under [install/](/Users/josephcheung/Desktop/dev/infra/install):
+
+- [install/ipmi-power-cycle.sh](/Users/josephcheung/Desktop/dev/infra/install/ipmi-power-cycle.sh): out-of-band BMC/IPMI chassis power-cycle helper for hosts that cannot complete an in-band reboot
 
 ### Monitoring
 

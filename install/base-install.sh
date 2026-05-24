@@ -433,6 +433,96 @@ install_python_tooling() {
 }
 
 # ═══════════════════════════════════════════════════════════════
+# STEP 5.55 — GPU fallback recovery policy
+# ═══════════════════════════════════════════════════════════════
+configure_gpu_fallback_recovery() {
+    section "GPU Fallback Recovery Policy"
+
+    local system_conf="/etc/systemd/system.conf"
+    local sysctl_conf="/etc/sysctl.d/99-gpu-fallback.conf"
+    local managed_start="# >>> infra GPU fallback recovery >>>"
+    local managed_end="# <<< infra GPU fallback recovery <<<"
+    local tmp_file
+
+    tmp_file="$(mktemp)"
+    if [[ -f "${system_conf}" ]]; then
+        awk -v start="${managed_start}" -v end="${managed_end}" '
+            BEGIN { skip = 0 }
+            $0 == start { skip = 1; next }
+            $0 == end { skip = 0; next }
+            skip == 0 { print }
+        ' "${system_conf}" > "${tmp_file}"
+    fi
+    {
+        printf '\n%s\n' "${managed_start}"
+        printf '[Manager]\n'
+        printf 'DefaultTimeoutStopSec=30s\n'
+        printf 'DefaultTimeoutAbortSec=15s\n'
+        printf '%s\n' "${managed_end}"
+    } >> "${tmp_file}"
+    sudo install -m 0644 -o root -g root "${tmp_file}" "${system_conf}" \
+        || error "Failed to update ${system_conf}"
+    rm -f "${tmp_file}"
+    success "Configured systemd stop/abort timeouts in ${system_conf}"
+
+    sudo tee "${sysctl_conf}" >/dev/null <<'EOF'
+# GPU node fallback policy — added by base-install.sh
+kernel.panic=10
+kernel.panic_on_oops=1
+kernel.hung_task_panic=1
+kernel.hung_task_timeout_secs=120
+EOF
+    sudo chown root:root "${sysctl_conf}"
+    sudo chmod 0644 "${sysctl_conf}"
+    sudo sysctl --system >/dev/null \
+        && success "Applied GPU fallback sysctl policy from ${sysctl_conf}" \
+        || warn "sysctl --system reported warnings while applying ${sysctl_conf}"
+
+    sudo systemctl daemon-reexec 2>/dev/null \
+        && success "systemd manager configuration reloaded" \
+        || warn "systemd daemon-reexec failed; timeout changes will apply after reboot"
+}
+
+remove_gpu_fallback_recovery() {
+    section "Removing GPU Fallback Recovery Policy"
+
+    local system_conf="/etc/systemd/system.conf"
+    local sysctl_conf="/etc/sysctl.d/99-gpu-fallback.conf"
+    local managed_start="# >>> infra GPU fallback recovery >>>"
+    local managed_end="# <<< infra GPU fallback recovery <<<"
+
+    if [[ -f "${system_conf}" ]] && grep -Fxq "${managed_start}" "${system_conf}"; then
+        local tmp_file
+        tmp_file="$(mktemp)"
+        awk -v start="${managed_start}" -v end="${managed_end}" '
+            BEGIN { skip = 0 }
+            $0 == start { skip = 1; next }
+            $0 == end { skip = 0; next }
+            skip == 0 { print }
+        ' "${system_conf}" > "${tmp_file}"
+        sudo install -m 0644 -o root -g root "${tmp_file}" "${system_conf}" \
+            || warn "Failed to remove managed systemd timeout block from ${system_conf}"
+        rm -f "${tmp_file}"
+        success "Removed managed systemd timeout block"
+    else
+        info "Managed systemd timeout block not present — skipping"
+    fi
+
+    if [[ -f "${sysctl_conf}" ]]; then
+        sudo rm -f "${sysctl_conf}"
+        success "Removed ${sysctl_conf}"
+        sudo sysctl --system >/dev/null \
+            || warn "sysctl --system reported warnings after removing ${sysctl_conf}"
+    else
+        info "${sysctl_conf} not present — skipping"
+    fi
+
+    sudo systemctl daemon-reexec 2>/dev/null \
+        && success "systemd manager configuration reloaded" \
+        || warn "systemd daemon-reexec failed; timeout cleanup will fully apply after reboot"
+}
+
+# ═══════════════════════════════════════════════════════════════
 # STEP 5.6 — User access
 # ═══════════════════════════════════════════════════════════════
 install_user_access() {
@@ -824,6 +914,7 @@ uninstall_node() {
     echo "  • graphics-drivers PPA"
     echo "  • /etc/profile.d/cuda.sh PATH entry"
     echo "  • /etc/ld.so.conf.d/ CUDA library path entries"
+    echo "  • GPU fallback recovery systemd/sysctl settings"
     echo "  • GCC update-alternatives entries"
     echo "  • Storage tools: smartmontools, lvm2, mdadm, lsof, ioping"
     echo "  • gpu-burn and infra repos (optional)"
@@ -976,6 +1067,9 @@ uninstall_node() {
     # Also clean current session PATH of cuda entries
     export PATH=$(echo "${PATH}" | tr ':' '\n' | grep -v cuda | tr '\n' ':' | sed 's/:$//')
     export LD_LIBRARY_PATH=$(echo "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v cuda | tr '\n' ':' | sed 's/:$//')
+
+    # ── 9.1. Remove GPU fallback recovery policy ──────────────
+    remove_gpu_fallback_recovery
 
     # ── 9.5. Remove shell aliases ─────────────────────────────
     section "Removing Shell Aliases"
@@ -1206,6 +1300,7 @@ main() {
 
         install_base_packages
         install_python_tooling
+        configure_gpu_fallback_recovery
         install_user_access
         install_shell_aliases
         configure_gcc_alternatives
