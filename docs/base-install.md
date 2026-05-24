@@ -88,6 +88,50 @@ across a fleet of nodes.
 
 Ubuntu 26.04 is supported too; the script automatically maps it to the `ubuntu2604` NVIDIA repo codename.
 
+### GPU fallback recovery policy
+
+During install, `base-install.sh` also writes a managed GPU fallback policy:
+
+- `/etc/systemd/system.conf`
+  - `DefaultTimeoutStopSec=30s`
+  - `DefaultTimeoutAbortSec=15s`
+- `/etc/sysctl.d/99-gpu-fallback.conf`
+  - `kernel.panic=10`
+  - `kernel.panic_on_oops=1`
+  - `kernel.hung_task_panic=1`
+  - `kernel.hung_task_timeout_secs=120`
+
+The systemd settings are wrapped in a managed block so reruns are idempotent and uninstall can remove only the installer-managed lines. The sysctl file is owned by root and applied with `sysctl --system`.
+
+Operational effect:
+
+- Shortens systemd service shutdown waits:
+  - `DefaultTimeoutStopSec=30s` limits the default time systemd waits for services to stop cleanly.
+  - `DefaultTimeoutAbortSec=15s` limits the default time allowed for abort/termination handling.
+- Enables automatic reboot after severe kernel failure conditions:
+  - `kernel.panic=10` reboots the node 10 seconds after a kernel panic.
+  - `kernel.panic_on_oops=1` treats a kernel oops as fatal, causing a panic instead of trying to continue.
+  - `kernel.hung_task_panic=1` panics the kernel when a hung task is detected.
+  - `kernel.hung_task_timeout_secs=120` defines the hung-task threshold as 120 seconds.
+
+This is intended for unattended GPU nodes where a wedged driver, kernel fault, or hung task is worse than an automatic reboot. It is a **host-wide** policy, not NVIDIA-only: kernel oops and hung-task conditions from non-GPU components can also trigger a panic/reboot. Operators should only use this behavior on nodes where automatic recovery is preferred over preserving a stuck system for live debugging.
+
+This policy is a first-layer, in-band recovery aid. It can help when a NVIDIA driver failure turns into a kernel oops, panic, hung-task detection, or a userspace shutdown timeout. It is not guaranteed to recover every `GPU has fallen off the bus` case: if the kernel reboot path itself blocks while waiting on a disappeared PCIe GPU, the OS may still be unable to complete a warm reboot. In that condition, an out-of-band BMC/IPMI power cycle is the reliable recovery path because it does not depend on the wedged host OS.
+
+For manual out-of-band recovery, use `install/ipmi-power-cycle.sh` from an operator machine that can reach the BMC/IPMI network:
+
+```bash
+# Dry run: checks BMC reachability and chassis power status only
+IPMI_PASS='redacted' ./install/ipmi-power-cycle.sh --host 192.0.2.50 --user ADMIN
+
+# Destructive action: asks the BMC to power-cycle the chassis
+IPMI_PASS='redacted' ./install/ipmi-power-cycle.sh --host 192.0.2.50 --user ADMIN --yes
+```
+
+The helper requires the BMC/IPMI address, not the host OS address. It reads the password from `IPMI_PASS` or `IPMI_PASSWORD`, or prompts securely when run interactively. It refuses to power cycle unless `--yes` is supplied.
+
+Uninstall removes the managed systemd block and `/etc/sysctl.d/99-gpu-fallback.conf`, then reloads systemd/sysctl state where possible.
+
 ### Freeze or update the NVIDIA stack
 
 After a successful validation run, you can freeze the validated GPU stack:
@@ -426,6 +470,8 @@ This means `disktest.sh` can be run immediately after a reboot following
 |---|---|
 | `/var/log/gpu-node-install/` | Timestamped install/uninstall logs |
 | `/etc/profile.d/cuda.sh` | CUDA PATH for all users (all login shells) |
+| `/etc/systemd/system.conf` | Managed systemd stop/abort timeout block for GPU fallback recovery |
+| `/etc/sysctl.d/99-gpu-fallback.conf` | Kernel panic / hung-task fallback policy for GPU nodes |
 | `~/.aliases` | Bash alias file copied from repo root by `base-install.sh` |
 | `~/.aliases.fish` | Fish wrapper file generated from `~/.aliases` and sourced by `config.fish` |
 | `~/.ssh/authorized_keys` | Target user authorized key file updated with the repo SSH key |
