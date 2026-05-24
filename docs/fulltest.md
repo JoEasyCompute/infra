@@ -452,6 +452,21 @@ If no usable fan telemetry is available, the detector skips cleanly rather than
 guessing from power alone. That is intentional for chassis-managed cooling
 platforms where on-card fan speed is not exposed.
 
+### Future improvement plans
+
+The current detector is intentionally conservative. Future follow-up work may
+add:
+
+- a replay mode so archived burn telemetry can be re-analysed without rerunning
+  the stress test
+- late-onset anomaly detection for GPUs that look normal early in the run but
+  drift into a connector-fault pattern after heat soak
+- a policy review for whether the detector should remain remark-only by
+  default once more fleet data exists across different GPU families
+
+These are planned improvements only; they are not part of the current stable
+behavior.
+
 **Fails if:**
 - The burn tool exits non-zero for a real compute error or GPU crash
 

@@ -126,6 +126,19 @@ If no usable fan telemetry is available, the detector skips rather than
 attempting a power-only judgment. That keeps the heuristic honest on
 chassis-managed cooling platforms where the on-card fan reading is not exposed.
 
+### Future improvement plans
+
+The experimental lane documents the same detector as the stable flow, and the
+planned follow-up work is the same:
+
+- add a replay mode for archived burn telemetry
+- detect late-onset anomalies by comparing the early and late portions of the
+  post-warmup window
+- revisit the default severity once more real-host data exists across multiple
+  GPU families and cooling topologies
+
+These are future improvements only; they are not currently implemented.
+
 ---
 
 ## Operator Guidance

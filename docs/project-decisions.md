@@ -104,6 +104,16 @@ Current behavior:
 - the warning is treated as a connector early-warning, not a generic thermal failure, because it is intended to catch likely 12V-2x6 / 12VHPWR contact resistance issues before the GPU falls off the bus
 - the same detector and default behavior are documented in both `docs/fulltest.md` and `docs/gpu-fulltest-v2.md`
 
+### 8. Future improvement plans for the power-anomaly detector
+
+Planned follow-up work:
+
+- add a standalone replay mode so archived burn telemetry can be analyzed without rerunning a stress test
+- consider late-onset anomaly detection by comparing early vs late portions of the post-warmup window
+- revisit the default severity only after more real-host data is collected across multiple GPU families and cooling topologies
+
+These are tracked as future improvements, not current behavior.
+
 ---
 
 ## Operator Notes

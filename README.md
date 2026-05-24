@@ -377,6 +377,8 @@ This is the main NVIDIA validation suite. It covers:
 
 The experimental `test/gpu-fulltest-v2.sh` mirrors the same sustained-stress remarks, including the 12V-2x6 / 12VHPWR early-warning detector with remark-only default behavior.
 
+Future improvements for that detector are tracked in `docs/project-decisions.md`; the current plan is to keep the stable behavior conservative while adding replay analysis and late-onset detection only after more fleet data is available.
+
 It writes timestamped logs in the same directory where `fulltest.sh` is run.
 
 ## Operational Utility Scripts
