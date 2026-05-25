@@ -253,6 +253,8 @@ while IFS='|' read -r gpu_idx pci gpu_name fan temp power_draw power_limit; do
     width_max="${cap_width#x}"
     [[ "$width_cur" == "$link_width" ]] && width_cur="$link_width"
     [[ "$width_max" == "$cap_width" ]] && width_max="$cap_width"
+    width_cur="${width_cur%% *}"
+    width_max="${width_max%% *}"
 
     if [[ "$gen_cur" =~ ^[0-9]+$ && "$gen_max" =~ ^[0-9]+$ && "$gen_cur" -lt "$gen_max" ]] || \
        [[ "$width_cur" =~ ^[0-9]+$ && "$width_max" =~ ^[0-9]+$ && "$width_cur" -lt "$width_max" ]]; then
@@ -288,13 +290,25 @@ sort -t'|' -k2,2V "$lines_file" -o "$lines_file"
 while IFS='|' read -r gpu_idx slot pci name serial gc gm wc wm ls lw temp pd pl numa drv st_txt st_col; do
     gen_fmt="${gc}/${gm}"
     width_fmt="${wc}/${wm}"
-    link_fmt="${ls}/${lw}"
+    link_speed_short="${ls%% *}"
+    link_speed_short="${link_speed_short%%GT/s}"
+    link_fmt="${link_speed_short}/${lw}"
     power_fmt="${pd}/${pl}W"
     slot_disp="$(clip "$slot" 20)"
+    pci_disp="$(clip "$pci" 14)"
     name_disp="$(clip "$name" 25)"
+    serial_disp="$(clip "$serial" 16)"
+    gen_disp="$(clip "$gen_fmt" 10)"
+    width_disp="$(clip "$width_fmt" 10)"
+    link_disp="$(clip "$link_fmt" 10)"
+    temp_disp="$(clip "${temp}C" 12)"
+    power_disp="$(clip "$power_fmt" 10)"
+    numa_disp="$(clip "$numa" 8)"
+    drv_disp="$(clip "$drv" 10)"
+    status_disp="$(clip "$st_txt" 8)"
 
     printf "%-4s %-20s %-14s %-25s %-16s %-10s %-10s %-10s %-12s %-10s %-8s %-10s %-8b\n" \
-        "$gpu_idx" "$slot_disp" "$pci" "$name_disp" "$serial" "$gen_fmt" "$width_fmt" "$link_fmt" "${temp}C" "$power_fmt" "$numa" "$drv" "$st_col"
+        "$gpu_idx" "$slot_disp" "$pci_disp" "$name_disp" "$serial_disp" "$gen_disp" "$width_disp" "$link_disp" "$temp_disp" "$power_disp" "$numa_disp" "$drv_disp" "$status_disp"
 
     if [[ "$st_txt" == "BusLost" ]]; then
         printf "GPU %s in slot %s (%s): %s\n" "$gpu_idx" "$slot" "$pci" "$st_txt" >> "$remark_file"
