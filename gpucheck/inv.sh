@@ -101,6 +101,15 @@ speed_to_gen() {
     esac
 }
 
+clip() {
+    local s="$1" w="$2"
+    if [[ ${#s} -le $w ]]; then
+        echo -n "$s"
+    else
+        echo -n "${s:0:w-1}…"
+    fi
+}
+
 get_pci_model() {
     local addr="$1" sv sd vv dd subsys
     sv=$(lspci -vmm -s "$addr" 2>/dev/null | sed -n 's/^SVendor:[[:space:]]*//p' | head -n1)
@@ -281,9 +290,11 @@ while IFS='|' read -r gpu_idx slot pci name serial gc gm wc wm ls lw temp pd pl 
     width_fmt="${wc}/${wm}"
     link_fmt="${ls}/${lw}"
     power_fmt="${pd}/${pl}W"
+    slot_disp="$(clip "$slot" 20)"
+    name_disp="$(clip "$name" 25)"
 
     printf "%-4s %-20s %-14s %-25s %-16s %-10s %-10s %-10s %-12s %-10s %-8s %-10s %-8b\n" \
-        "$gpu_idx" "$slot" "$pci" "${name:0:22}.." "$serial" "$gen_fmt" "$width_fmt" "$link_fmt" "${temp}C" "$power_fmt" "$numa" "$drv" "$st_col"
+        "$gpu_idx" "$slot_disp" "$pci" "$name_disp" "$serial" "$gen_fmt" "$width_fmt" "$link_fmt" "${temp}C" "$power_fmt" "$numa" "$drv" "$st_col"
 
     if [[ "$st_txt" == "BusLost" ]]; then
         printf "GPU %s in slot %s (%s): %s\n" "$gpu_idx" "$slot" "$pci" "$st_txt" >> "$remark_file"
