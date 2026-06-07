@@ -51,6 +51,7 @@ Current platform status:
 │   └── backup/                 # Legacy / archived helper scripts
 ├── test/
 │   ├── fulltest.sh             # NVIDIA multi-GPU acceptance test
+│   ├── code.sh                 # CUDA int32 stress wrapper for code.cu
 │   ├── disktest.sh             # Disk validation and fio-based health/perf suite
 │   ├── cpu-test.sh             # CPU socket or per-thread stress tester with crash-state checkpoints
 │   ├── cpu-ram-stress.sh       # CPU + RAM isolation stress using stress-ng
@@ -186,11 +187,13 @@ This installs the AMDGPU DKMS driver, ROCm stack, and post-install environment s
 
 ## Quick Start
 
+The NVIDIA and AMD base-install scripts also install a small operator tool bundle for day-to-day shell work: `fzf`, `jq`, `ripgrep`, `yq`, `fd`, and `bat` (with compatibility symlinks where Ubuntu packages expose `fdfind` / `batcat`).
+
 ### NVIDIA Orchestrated: Automated
 
 ```bash
 sudo mkdir -p /opt/provision
-sudo cp install/base-install.sh install/docker-install.sh install/provision.sh install/nvidia-stack-hold.sh test/fulltest.sh /opt/provision/
+sudo cp install/base-install.sh install/docker-install.sh install/provision.sh install/nvidia-stack-hold.sh test/fulltest.sh test/code.sh /opt/provision/
 sudo chmod +x /opt/provision/*.sh
 
 sudo /opt/provision/provision.sh --non-interactive --with-compose
@@ -208,7 +211,7 @@ The orchestrator also passes through `--freeze-gpu-stack` and `--unfreeze-gpu-st
 
 ```bash
 sudo mkdir -p /opt/provision
-sudo cp install/base-install.sh install/docker-install.sh install/provision.sh install/nvidia-stack-hold.sh test/fulltest.sh /opt/provision/
+sudo cp install/base-install.sh install/docker-install.sh install/provision.sh install/nvidia-stack-hold.sh test/fulltest.sh test/code.sh /opt/provision/
 sudo chmod +x /opt/provision/*.sh
 
 sudo /opt/provision/provision.sh --with-compose
@@ -219,7 +222,7 @@ Interactive mode allows prompts in the underlying scripts where applicable.
 ### NVIDIA Manual
 
 ```bash
-chmod +x install/base-install.sh install/docker-install.sh install/nvidia-stack-hold.sh test/fulltest.sh
+chmod +x install/base-install.sh install/docker-install.sh install/nvidia-stack-hold.sh test/fulltest.sh test/code.sh
 
 sudo ./install/base-install.sh
 sudo reboot
@@ -228,6 +231,7 @@ sudo ./install/docker-install.sh --with-compose
 sudo reboot
 
 ./test/fulltest.sh
+./test/code.sh 15
 ```
 
 ### AMD Manual
@@ -267,6 +271,7 @@ Use `amd-stack-pin.sh --status` to inspect the active pin and `amd-stack-pin.sh 
 | `install/docker-install.sh` | Docker CE, NVIDIA Container Toolkit, and runtime storage layout | [docs/docker-install.md](docs/docker-install.md) |
 | `test/fulltest.sh` | NVIDIA GPU acceptance and health validation | [docs/fulltest.md](docs/fulltest.md) |
 | `test/gpu-fulltest-v2.sh` | Experimental prepare-then-run variant of the NVIDIA GPU validation flow | [docs/gpu-fulltest-v2.md](docs/gpu-fulltest-v2.md) |
+| `test/code.sh` | Tiny nvcc wrapper that compiles and runs `test/code.cu` across the selected GPU(s) | Covered here |
 | `install/amd-base-install.sh` | AMDGPU + ROCm base install | [docs/amd-base-install.md](docs/amd-base-install.md) |
 | `install/amd-stack-pin.sh` | Inspect or reset the AMD ROCm apt pin | Covered here |
 | `test/disktest.sh` | Disk health, throughput, and stress validation with guided interactive mode and per-disk reports | [docs/disktest.md](docs/disktest.md) |

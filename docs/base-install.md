@@ -190,6 +190,7 @@ must be done manually afterwards.
 | `linux-headers-$(uname -r)`, `linux-headers-generic` | Kernel headers — required for DKMS to build `nvidia.ko` |
 | `python3`, `python3-pip`, `python3-venv` | Python runtime |
 | `uv` | Python package/project manager installed to `/usr/local/bin` |
+| `fzf`, `jq`, `ripgrep`, `yq`, `fd-find`, `bat` | Common operator CLI search/inspection tools (`fd` and `bat` compatibility symlinks are created when needed) |
 | shell aliases | Repo `.aliases` copied to `~/.aliases`, sourced by bash/zsh, and converted to `~/.aliases.fish` for fish |
 | SSH / sudo access | Adds the repo SSH key to `~/.ssh/authorized_keys` and a passwordless sudoers drop-in for the target user |
 | `git` | Source control |
@@ -210,6 +211,8 @@ must be done manually afterwards.
 `uv` is installed by `base-install.sh` via Astral's standalone installer and
 placed in `/usr/local/bin` so it is available on the system PATH without
 modifying shell profiles.
+`fd` and `bat` compatibility symlinks are created when the Ubuntu packages
+expose the commands as `fdfind` and `batcat`.
 
 ### NVIDIA / CUDA stack
 | Package | Purpose |
