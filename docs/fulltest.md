@@ -76,6 +76,7 @@ sudo chown -R "$USER":"$(id -gn)" ./test/build
 ```bash
 ./test/fulltest.sh preflight ecc pcie clocks       # hardware health checks only
 ./test/fulltest.sh nccl pytorch                    # communication + framework only
+./test/fulltest.sh code                             # CUDA int32 stress across all visible GPUs
 ./test/fulltest.sh memtest                         # VRAM integrity only
 ./test/fulltest.sh stress                          # stress test only (default 5 min)
 ./test/fulltest.sh node-stress                     # CPU + RAM + GPU stress (default 5 min)
@@ -361,6 +362,18 @@ Runs 100 forward passes of a 10,000×10,000 linear layer across all GPUs in scop
 | 12.5+ | `cu128` |
 
 **Notes:** On Ubuntu 24.04+, `--break-system-packages` is added to pip installs automatically (PEP 668 compliance).
+
+---
+
+### `code` — CUDA Int32 Compute Stress
+
+Runs the tiny `test/code.sh` wrapper, which compiles `test/code.cu` with `nvcc` if needed and then executes it on each visible GPU in turn.
+
+The suite invokes it sequentially across all GPUs in scope using logical device IDs `0..N-1`, so it respects `--gpu` remapping via `CUDA_VISIBLE_DEVICES`.
+
+The per-GPU runtime is controlled by `CUDA_CODE_SECONDS` and defaults to `15` seconds inside the suite. The standalone wrapper defaults to `30` seconds when run directly.
+
+**Fails if:** the wrapper is missing, `nvcc` is unavailable, the CUDA build fails, or the kernel exits non-zero on any visible GPU.
 
 ---
 

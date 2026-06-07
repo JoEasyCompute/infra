@@ -395,7 +395,8 @@ install_base_packages() {
     apt_get install -y \
         git cmake build-essential dkms alsa-utils \
         gcc-11 g++-11 gcc-12 g++-12 lsb-release \
-        ipmitool jq pciutils iproute2 util-linux dmidecode lshw \
+        ipmitool jq fzf ripgrep yq fd-find bat \
+        pciutils iproute2 util-linux dmidecode lshw \
         coreutils chrony nvme-cli bpytop mokutil \
         python3 python3-pip python3-venv \
         python3-setuptools python3-wheel \
@@ -406,6 +407,30 @@ install_base_packages() {
     sudo systemctl enable --now chrony \
         || warn "Failed to enable chrony"
     success "Base packages installed"
+}
+
+install_cli_tool_compat_symlinks() {
+    section "CLI Tool Compatibility Symlinks"
+
+    if command -v fdfind &>/dev/null; then
+        if command -v fd &>/dev/null; then
+            info "fd already available: $(command -v fd)"
+        else
+            info "Creating fd compatibility symlink to fdfind"
+            sudo install -d /usr/local/bin
+            sudo ln -sf "$(command -v fdfind)" /usr/local/bin/fd
+        fi
+    fi
+
+    if command -v batcat &>/dev/null; then
+        if command -v bat &>/dev/null; then
+            info "bat already available: $(command -v bat)"
+        else
+            info "Creating bat compatibility symlink to batcat"
+            sudo install -d /usr/local/bin
+            sudo ln -sf "$(command -v batcat)" /usr/local/bin/bat
+        fi
+    fi
 }
 
 # ================================================================
@@ -1082,6 +1107,7 @@ main() {
         confirm_install
 
         install_base_packages
+        install_cli_tool_compat_symlinks
         install_python_tooling
         configure_gcc_alternatives
         install_rocm_repos

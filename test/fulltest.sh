@@ -4,8 +4,8 @@
 # Supports: RTX 4090/5090, A4000, A100, H100 on Ubuntu 22.04/24.04
 # Usage:  ./fulltest.sh [test...] [--burn-duration <s>] [--node-stress-minutes <m>] [--clean] [--list] [--help]
 #   Tests: preflight, ecc, pcie, clocks, nccl, cuda-samples, nvbandwidth,
-#          dcgm, pytorch, memtest, stress, node-stress, post-stress-recovery,
-#          gpu-policy
+#          dcgm, pytorch, code, memtest, stress, node-stress,
+#          post-stress-recovery, gpu-policy
 #   If no tests specified, all are run in the order above.
 # =============================================================================
 
@@ -85,6 +85,7 @@ UBUNTU_MAJOR=""
 RESULTS_STRESS_LABEL="Sustained Compute Stress"
 PYTORCH_RUNTIME_WARNED=false
 STRESS_ACTIVITY_START_TS=""
+CUDA_CODE_SECONDS="${CUDA_CODE_SECONDS:-15}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Utilities
@@ -1216,7 +1217,63 @@ PYEOF
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 6: cuda_memtest
+# Test 6: CUDA int32 stress
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_cuda_code() {
+    local code_script="$SCRIPT_DIR/code.sh"
+    local gpu_rows=()
+    local failed=0
+    local gpu_count=0
+    local seconds="$CUDA_CODE_SECONDS"
+
+    if [ ! -x "$code_script" ]; then
+        log "ERROR: CUDA int32 stress wrapper not found or not executable: $code_script"
+        return 1
+    fi
+
+    if [ -z "${NVCC_PATH:-}" ] || [ ! -x "$NVCC_PATH" ]; then
+        record_not_run "CUDA int32 stress" "nvcc not found — install the CUDA toolkit or add nvcc to PATH"
+        return 0
+    fi
+
+    if ! [[ "$seconds" =~ ^[0-9]+$ ]] || [ "$seconds" -lt 1 ]; then
+        log "ERROR: CUDA_CODE_SECONDS must be a positive integer (got: $seconds)"
+        return 1
+    fi
+
+    mapfile -t gpu_rows < <(nvidia-smi $SMI_FILTER --query-gpu=index,name --format=csv,noheader | tr -d '\r')
+    gpu_count="${#gpu_rows[@]}"
+    if [ "$gpu_count" -le 0 ]; then
+        record_not_run "CUDA int32 stress" "no visible GPUs found"
+        return 0
+    fi
+
+    log "  CUDA int32 stress duration: ${seconds}s per visible GPU"
+    log "  Wrapper                  : $code_script"
+
+    local logical_idx row physical_idx gpu_name
+    for logical_idx in $(seq 0 $((gpu_count - 1))); do
+        row="${gpu_rows[$logical_idx]}"
+        physical_idx="${row%%,*}"
+        gpu_name="${row#*,}"
+        physical_idx="$(echo "$physical_idx" | xargs)"
+        gpu_name="$(echo "$gpu_name" | xargs)"
+
+        log "  Running CUDA int32 stress on visible GPU ${logical_idx} (physical GPU ${physical_idx}: ${gpu_name})"
+        if ! "$code_script" "$seconds" "$logical_idx" 2>&1 | tee -a "$LOG_FILE"; then
+            log "  WARNING: CUDA int32 stress failed on visible GPU ${logical_idx} (physical GPU ${physical_idx})"
+            failed=1
+        else
+            log "  CUDA int32 stress passed on visible GPU ${logical_idx} (physical GPU ${physical_idx})"
+        fi
+    done
+
+    return "$failed"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 7: cuda_memtest
 # ─────────────────────────────────────────────────────────────────────────────
 
 test_memtest() {
@@ -2220,6 +2277,7 @@ Available tests (run in this order if none specified):
   nvbandwidth   Host<->device and device<->device memory bandwidth
   dcgm          DCGM diagnostics (skipped if dcgmi not installed)
   pytorch       PyTorch multi-GPU DDP benchmark
+  code          CUDA int32 compute stress (code.cu) — loops across all visible GPUs
   memtest       cuda_memtest VRAM integrity (10 passes per GPU)
   stress        Sustained compute stress: gpu-fryer / gpu-burn / PyTorch
   node-stress   Node-wide stress: stress-ng CPU + RAM plus GPU burn
@@ -2240,6 +2298,7 @@ Examples:
   ./fulltest.sh --gpu 2,4,5                  # run all tests on GPUs 2, 4, and 5
   ./fulltest.sh --gpu 2,4,5 memtest stress   # memtest + stress on GPUs 2, 4, 5
   ./fulltest.sh --gpu 3 memtest stress       # memtest + stress on GPU 3 only
+  ./fulltest.sh code                         # CUDA int32 stress across all visible GPUs
   ./fulltest.sh node-stress                  # CPU + RAM + GPU stress, default 5 min
   ./fulltest.sh node-stress --node-stress-minutes 15
   ./fulltest.sh preflight ecc pcie clocks    # hardware health checks only
@@ -2252,8 +2311,8 @@ Examples:
 EOF
 }
 
-ALL_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch memtest stress node-stress post-stress-recovery gpu-policy)
-DEFAULT_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch memtest stress node-stress post-stress-recovery)
+ALL_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch code memtest stress node-stress post-stress-recovery gpu-policy)
+DEFAULT_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch code memtest stress node-stress post-stress-recovery)
 SELECTED_TESTS=()
 
 # Two-pass parse: first pass handles --help/--list which exit immediately,
@@ -2303,7 +2362,7 @@ while [ "$i" -lt "${#args[@]}" ]; do
             fi
             NODE_STRESS_MINUTES="$val"
             ;;
-        preflight|ecc|pcie|clocks|nccl|cuda-samples|nvbandwidth|dcgm|pytorch|memtest|stress|node-stress|post-stress-recovery|gpu-policy)
+        preflight|ecc|pcie|clocks|nccl|cuda-samples|nvbandwidth|dcgm|pytorch|code|memtest|stress|node-stress|post-stress-recovery|gpu-policy)
             SELECTED_TESTS+=("$arg") ;;
         *)
             echo "Unknown argument: $arg" >&2; usage >&2; exit 1 ;;
@@ -2346,6 +2405,7 @@ for test in "${SELECTED_TESTS[@]}"; do
             fi
             ;;
         pytorch)      run_test "PyTorch Multi-GPU Benchmark"                           test_pytorch     ;;
+        code)         run_test "CUDA Int32 Compute Stress (code.cu)"                   test_cuda_code   ;;
         memtest)      run_test "cuda_memtest (GPU Memory Stress)"                      test_memtest     ;;
         stress)
             local stress_min

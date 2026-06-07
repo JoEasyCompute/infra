@@ -114,6 +114,18 @@ Planned follow-up work:
 
 These are tracked as future improvements, not current behavior.
 
+### 9. `code.sh` is a lightweight per-GPU CUDA stress lane
+
+Current behavior:
+
+- `test/code.sh` compiles `test/code.cu` with `nvcc` when needed and runs the resulting binary
+- `test/fulltest.sh` and `test/gpu-fulltest-v2.sh` include a `code` test that loops across every visible GPU in order
+- the suites respect `--gpu` remapping by running the wrapper against logical device IDs `0..N-1`
+- `CUDA_CODE_SECONDS` controls the per-GPU runtime inside the suites and defaults to `15`
+- if `nvcc` is unavailable, the suites record the test as `NOT BEING RUN` instead of failing the whole validation pass
+
+This gives the GPU test kit a simple, explicit integer-ALU stress path in addition to `memtest` and the heavier sustained-stress backends.
+
 ---
 
 ## Operator Notes

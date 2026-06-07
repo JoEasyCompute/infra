@@ -35,6 +35,7 @@ This means build-heavy failures should happen earlier, before long test executio
 - `nvbandwidth`
 - `dcgm`
 - `pytorch`
+- `code`
 - `memtest`
 - `stress`
 - `node-stress`
@@ -51,6 +52,7 @@ The script currently has explicit prepare steps for selected tests such as:
 
 - NCCL libraries and `nccl-tests`
 - CUDA sample binaries
+- the `test/code.sh` wrapper, which compiles and runs `test/code.cu`
 - `nvbandwidth`
 - PyTorch runtime
 - `cuda_memtest`
@@ -76,6 +78,7 @@ Examples:
 ./test/gpu-fulltest-v2.sh --gpu 3
 ./test/gpu-fulltest-v2.sh --gpu 2,4,5 memtest stress
 ./test/gpu-fulltest-v2.sh node-stress
+./test/gpu-fulltest-v2.sh code
 ./test/gpu-fulltest-v2.sh node-stress --node-stress-minutes 15
 ./test/gpu-fulltest-v2.sh nccl pytorch
 ./test/gpu-fulltest-v2.sh post-stress-recovery
@@ -90,6 +93,7 @@ GPU_POLICY_REQUIRE_PERSISTENCE=1 ./test/gpu-fulltest-v2.sh gpu-policy
 - This script is intentionally **experimental**.
 - It should be validated on real GPU hosts before being treated as a replacement for `fulltest.sh`.
 - Build / permission handling inherited from the current fulltest improvements is still active here, so stale root-owned build trees should warn before rebuilds.
+- `code` runs the standalone CUDA int32 stress wrapper sequentially across every visible GPU, using logical device IDs `0..N-1` so it respects `--gpu` remapping.
 - The PyTorch benchmark now keeps its generated DDP repro script on failure and prints a condensed failure summary plus a suggested debug rerun command.
 - The PyTorch prepare/run path now logs the active `python3` runtime and warns when Python 3.12+ is in use because `torch.distributed` / `torchrun` segfaults have been seen there.
 - Sustained stress and node-stress now treat thermal/performance-only outcomes as summary remarks, and unavailable backends are listed under `NOT BEING RUN` instead of failing the overall run.
