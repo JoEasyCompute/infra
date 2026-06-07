@@ -395,7 +395,7 @@ install_base_packages() {
     apt_get install -y \
         git cmake build-essential dkms alsa-utils \
         gcc-11 g++-11 gcc-12 g++-12 lsb-release \
-        ipmitool jq fzf ripgrep yq fd-find bat \
+        ipmitool jq fzf ripgrep fd-find bat \
         pciutils iproute2 util-linux dmidecode lshw \
         coreutils chrony nvme-cli bpytop mokutil \
         python3 python3-pip python3-venv \
@@ -407,6 +407,40 @@ install_base_packages() {
     sudo systemctl enable --now chrony \
         || warn "Failed to enable chrony"
     success "Base packages installed"
+}
+
+install_yq_tool() {
+    section "yq Installation"
+
+    if command -v yq &>/dev/null; then
+        success "yq already installed: $(yq --version 2>/dev/null || echo unknown)"
+        return
+    fi
+
+    local binary tmp_file
+    case "$(uname -m)" in
+        x86_64) binary="yq_linux_amd64" ;;
+        aarch64|arm64) binary="yq_linux_arm64" ;;
+        *)
+            error "Unsupported architecture for yq binary install: $(uname -m)"
+            ;;
+    esac
+
+    tmp_file="$(mktemp /tmp/yq.XXXXXX)" || error "Unable to create temporary file for yq download"
+    trap 'rm -f "$tmp_file"' RETURN
+
+    info "Downloading yq from GitHub releases (${binary})..."
+    curl -fsSL "https://github.com/mikefarah/yq/releases/latest/download/${binary}" -o "$tmp_file" \
+        || error "Failed to download yq binary"
+
+    sudo install -m 0755 "$tmp_file" /usr/local/bin/yq \
+        || error "Failed to install yq to /usr/local/bin"
+    rm -f "$tmp_file"
+    trap - RETURN
+
+    command -v yq &>/dev/null \
+        || error "yq install completed but command is still not on PATH"
+    success "yq installed: $(yq --version 2>/dev/null || echo unknown)"
 }
 
 install_cli_tool_compat_symlinks() {
@@ -1009,6 +1043,16 @@ uninstall_node() {
         info "uv not present -- already clean"
     fi
 
+    # -- 8.5. Remove yq standalone binary -------------------------
+    section "Removing yq"
+    if command -v yq &>/dev/null || [[ -x /usr/local/bin/yq ]]; then
+        sudo rm -f /usr/local/bin/yq
+        hash -r 2>/dev/null || true
+        success "yq removed from /usr/local/bin"
+    else
+        info "yq not present -- already clean"
+    fi
+
     # -- 9. Optional: remove repos --------------------------------
     section "Repo Cleanup (Optional)"
     local infra_dir="${HOME}/infra"
@@ -1064,6 +1108,10 @@ uninstall_node() {
         && warn "/usr/local/bin/uv still exists" \
         || success "uv check: removed"
 
+    [[ -x /usr/local/bin/yq ]] \
+        && warn "/usr/local/bin/yq still exists" \
+        || success "yq check: removed"
+
     [[ -d /opt/rocm ]] \
         && warn "/opt/rocm still present" \
         || success "/opt/rocm check: removed"
@@ -1108,6 +1156,7 @@ main() {
 
         install_base_packages
         install_cli_tool_compat_symlinks
+        install_yq_tool
         install_python_tooling
         configure_gcc_alternatives
         install_rocm_repos

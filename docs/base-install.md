@@ -190,7 +190,8 @@ must be done manually afterwards.
 | `linux-headers-$(uname -r)`, `linux-headers-generic` | Kernel headers — required for DKMS to build `nvidia.ko` |
 | `python3`, `python3-pip`, `python3-venv` | Python runtime |
 | `uv` | Python package/project manager installed to `/usr/local/bin` |
-| `fzf`, `jq`, `ripgrep`, `yq`, `fd-find`, `bat` | Common operator CLI search/inspection tools (`fd` and `bat` compatibility symlinks are created when needed) |
+| `fzf`, `jq`, `ripgrep`, `fd-find`, `bat` | Common operator CLI search/inspection tools (`fd` and `bat` compatibility symlinks are created when needed) |
+| `yq` | Official GitHub release binary installed to `/usr/local/bin/yq` (not via apt) |
 | shell aliases | Repo `.aliases` copied to `~/.aliases`, sourced by bash/zsh, and converted to `~/.aliases.fish` for fish |
 | SSH / sudo access | Adds the repo SSH key to `~/.ssh/authorized_keys` and a passwordless sudoers drop-in for the target user |
 | `git` | Source control |
