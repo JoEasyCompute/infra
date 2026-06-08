@@ -105,6 +105,8 @@ sudo chown -R "$USER":"$(id -gn)" ./test/build
 
 If `--clean` or a rebuild path fails because `./build/` is not writable, the script now prints the affected path, current owner / permissions when available, and a suggested `chown` command instead of failing later in the build.
 
+If you are trying to decide whether a failure looks like software, hardware, power, thermal, or configuration drift, see [docs/test-triage.md](docs/test-triage.md) for a generic decision path.
+
 ---
 
 ## Examples

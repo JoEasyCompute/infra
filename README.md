@@ -272,6 +272,7 @@ Use `amd-stack-pin.sh --status` to inspect the active pin and `amd-stack-pin.sh 
 | `test/fulltest.sh` | NVIDIA GPU acceptance and health validation | [docs/fulltest.md](docs/fulltest.md) |
 | `test/gpu-fulltest-v2.sh` | Experimental prepare-then-run variant of the NVIDIA GPU validation flow | [docs/gpu-fulltest-v2.md](docs/gpu-fulltest-v2.md) |
 | `test/code.sh` | Tiny nvcc wrapper that compiles and runs `test/code.cu` across the selected GPU(s) | Covered here |
+| `docs/test-triage.md` | Generic failure decision path for isolating software vs hardware vs environment issues | [docs/test-triage.md](docs/test-triage.md) |
 | `install/amd-base-install.sh` | AMDGPU + ROCm base install | [docs/amd-base-install.md](docs/amd-base-install.md) |
 | `install/amd-stack-pin.sh` | Inspect or reset the AMD ROCm apt pin | Covered here |
 | `test/disktest.sh` | Disk health, throughput, and stress validation with guided interactive mode and per-disk reports | [docs/disktest.md](docs/disktest.md) |
