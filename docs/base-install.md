@@ -190,6 +190,7 @@ must be done manually afterwards.
 | `linux-headers-$(uname -r)`, `linux-headers-generic` | Kernel headers — required for DKMS to build `nvidia.ko` |
 | `python3`, `python3-pip`, `python3-venv` | Python runtime |
 | `uv` | Python package/project manager installed to `/usr/local/bin` |
+| `Benchmark Python 3.11 runtime` | Managed via `uv python install 3.11` into `/opt/infra/python`; exposed through `/etc/profile.d/infra-python.sh` for the PyTorch benchmark lane |
 | `fzf`, `jq`, `ripgrep`, `fd-find`, `bat` | Common operator CLI search/inspection tools (`fd` and `bat` compatibility symlinks are created when needed) |
 | `yq` | Official GitHub release binary installed to `/usr/local/bin/yq` (not via apt) |
 | shell aliases | Repo `.aliases` copied to `~/.aliases`, sourced by bash/zsh, and converted to `~/.aliases.fish` for fish |
@@ -212,6 +213,8 @@ must be done manually afterwards.
 `uv` is installed by `base-install.sh` via Astral's standalone installer and
 placed in `/usr/local/bin` so it is available on the system PATH without
 modifying shell profiles.
+`base-install.sh` also uses `uv` to provision a benchmark-safe Python 3.11
+runtime for the PyTorch lane, keeping the distro's default `python3` unchanged.
 `fd` and `bat` compatibility symlinks are created when the Ubuntu packages
 expose the commands as `fdfind` and `batcat`.
 
@@ -256,6 +259,7 @@ validate_combination   — Warns on known-incompatible combinations
 confirm_install        — Summary box + final y/n prompt (skipped with --yes)
 install_base_packages  — Bootstrap → PPA → kernel headers → base packages
 install_python_tooling  — Installs uv via Astral installer
+install_benchmark_python_runtime — Installs benchmark Python 3.11 via uv and writes /etc/profile.d/infra-python.sh
 install_user_access     — Adds SSH authorized key and passwordless sudoers for the target user
 install_shell_aliases   — Copies repo .aliases and wires bash/zsh/fish startup files
 configure_gcc_alts     — update-alternatives for gcc-11/12
@@ -461,6 +465,8 @@ DCGM at that point:
 | `pciutils` | `base-install.sh` |
 | `util-linux` | `base-install.sh` |
 | `python3` | `base-install.sh` |
+| benchmark Python 3.11 runtime | `base-install.sh` |
+| `uv` | `base-install.sh` |
 | `fio` | `base-install.sh` |
 
 This means `disktest.sh` can be run immediately after a reboot following
@@ -474,8 +480,10 @@ This means `disktest.sh` can be run immediately after a reboot following
 |---|---|
 | `/var/log/gpu-node-install/` | Timestamped install/uninstall logs |
 | `/etc/profile.d/cuda.sh` | CUDA PATH for all users (all login shells) |
+| `/etc/profile.d/infra-python.sh` | Benchmark Python 3.11 PATH/runtime exports for the PyTorch lane |
 | `/etc/systemd/system.conf` | Managed systemd stop/abort timeout block for GPU fallback recovery |
 | `/etc/sysctl.d/99-gpu-fallback.conf` | Kernel panic / hung-task fallback policy for GPU nodes |
+| `/opt/infra/python/` | Benchmark Python 3.11 installation root managed by `uv` |
 | `~/.aliases` | Bash alias file copied from repo root by `base-install.sh` |
 | `~/.aliases.fish` | Fish wrapper file generated from `~/.aliases` and sourced by `config.fish` |
 | `~/.ssh/authorized_keys` | Target user authorized key file updated with the repo SSH key |

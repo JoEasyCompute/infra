@@ -491,6 +491,51 @@ install_python_tooling() {
     success "uv installed: $(uv --version)"
 }
 
+install_benchmark_python_runtime() {
+    section "Benchmark Python Runtime"
+
+    local benchmark_root="/opt/infra/python"
+    local benchmark_version="3.11"
+    local uv_path py_bin py_bin_dir
+
+    uv_path="$(command -v uv 2>/dev/null || true)"
+    [ -n "${uv_path}" ] || error "uv not found — install_python_tooling must run first"
+
+    if [ -n "${INFRA_PYTHON_BENCH:-}" ] && [ -x "${INFRA_PYTHON_BENCH}" ]; then
+        if "${INFRA_PYTHON_BENCH}" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' \
+            >/dev/null 2>&1; then
+            success "Benchmark Python already present: $(${INFRA_PYTHON_BENCH} --version 2>/dev/null || echo unknown)"
+            return 0
+        fi
+    fi
+
+    info "Installing benchmark Python ${benchmark_version} via uv..."
+    sudo install -d -m 0755 "${benchmark_root}"
+    sudo env UV_PYTHON_INSTALL_DIR="${benchmark_root}" "${uv_path}" python install "${benchmark_version}" --managed-python \
+        || error "Failed to install benchmark Python ${benchmark_version}"
+
+    py_bin="$(sudo env UV_PYTHON_INSTALL_DIR="${benchmark_root}" "${uv_path}" python find "${benchmark_version}" 2>/dev/null | tail -n 1)"
+    if [ -z "${py_bin}" ] || [ ! -x "${py_bin}" ]; then
+        error "Benchmark Python ${benchmark_version} install completed but the executable could not be found"
+    fi
+
+    "${py_bin}" -m venv /tmp/infra-benchmark-python-check 2>/dev/null \
+        || error "Benchmark Python ${benchmark_version} cannot create virtual environments"
+    rm -rf /tmp/infra-benchmark-python-check
+
+    py_bin_dir="$(dirname "${py_bin}")"
+    sudo tee /etc/profile.d/infra-python.sh > /dev/null <<EOF
+# Infra benchmark Python — added by base-install.sh
+export INFRA_PYTHON_BENCH="${py_bin}"
+export INFRA_PYTHON_BENCH_DIR="${py_bin_dir}"
+export INFRA_PYTHON_BENCH_VERSION="${benchmark_version}"
+export PATH="${py_bin_dir}:\${PATH}"
+EOF
+    sudo chmod 644 /etc/profile.d/infra-python.sh
+
+    success "Benchmark Python configured: ${py_bin}"
+}
+
 # ═══════════════════════════════════════════════════════════════
 # STEP 5.55 — GPU fallback recovery policy
 # ═══════════════════════════════════════════════════════════════
@@ -895,6 +940,14 @@ validate_install() {
         warn "nvcc not in PATH (reboot or re-source /etc/profile.d/cuda.sh)"; (( warnings++ )) || true
     fi
 
+    if [[ -n "${INFRA_PYTHON_BENCH:-}" ]] && [[ -x "${INFRA_PYTHON_BENCH}" ]]; then
+        success "benchmark python: $(${INFRA_PYTHON_BENCH} --version 2>/dev/null || echo unknown)"
+    elif command -v python3.11 &>/dev/null; then
+        success "python3.11: $(python3.11 --version 2>/dev/null || echo unknown)"
+    else
+        warn "benchmark Python 3.11 not found (PyTorch DDP lane may be skipped)"; (( warnings++ )) || true
+    fi
+
     systemctl is-active --quiet nvidia-dcgm 2>/dev/null \
         && success "nvidia-dcgm: running" \
         || { warn "nvidia-dcgm: not running (expected before reboot)"; (( warnings++ )) || true; }
@@ -972,6 +1025,7 @@ uninstall_node() {
     echo "  • CUDA apt keyring, repo sources"
     echo "  • graphics-drivers PPA"
     echo "  • /etc/profile.d/cuda.sh PATH entry"
+    echo "  • /etc/profile.d/infra-python.sh benchmark Python entry"
     echo "  • /etc/ld.so.conf.d/ CUDA library path entries"
     echo "  • GPU fallback recovery systemd/sysctl settings"
     echo "  • GCC update-alternatives entries"
@@ -1127,7 +1181,24 @@ uninstall_node() {
     export PATH=$(echo "${PATH}" | tr ':' '\n' | grep -v cuda | tr '\n' ':' | sed 's/:$//')
     export LD_LIBRARY_PATH=$(echo "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v cuda | tr '\n' ':' | sed 's/:$//')
 
-    # ── 9.1. Remove GPU fallback recovery policy ──────────────
+    # ── 9.1. Remove benchmark Python profile.d entry ───────────
+    section "Removing Benchmark Python Configuration"
+    if [[ -f /etc/profile.d/infra-python.sh ]]; then
+        sudo rm -f /etc/profile.d/infra-python.sh
+        success "Removed /etc/profile.d/infra-python.sh"
+    else
+        info "/etc/profile.d/infra-python.sh not found — already clean"
+    fi
+    if [[ -d /opt/infra/python ]]; then
+        sudo rm -rf /opt/infra/python
+        success "Removed /opt/infra/python"
+    else
+        info "/opt/infra/python not found — already clean"
+    fi
+    export PATH=$(echo "${PATH}" | tr ':' '\n' | grep -v '/opt/infra/python' | tr '\n' ':' | sed 's/:$//')
+    unset INFRA_PYTHON_BENCH INFRA_PYTHON_BENCH_DIR INFRA_PYTHON_BENCH_VERSION
+
+    # ── 9.2. Remove GPU fallback recovery policy ──────────────
     remove_gpu_fallback_recovery
 
     # ── 9.5. Remove shell aliases ─────────────────────────────
@@ -1368,9 +1439,10 @@ main() {
         fi
 
         install_base_packages
+        install_python_tooling
+        install_benchmark_python_runtime
         install_cli_tool_compat_symlinks
         install_yq_tool
-        install_python_tooling
         configure_gpu_fallback_recovery
         install_user_access
         install_shell_aliases

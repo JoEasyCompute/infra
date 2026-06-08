@@ -84,6 +84,8 @@ PIP_EXTRA=""
 UBUNTU_MAJOR=""
 RESULTS_STRESS_LABEL="Sustained Compute Stress"
 PYTORCH_RUNTIME_WARNED=false
+PYTORCH_PYTHON=""
+PYTORCH_VENV="$BUILD_DIR/pytorch-venv"
 STRESS_ACTIVITY_START_TS=""
 CUDA_CODE_SECONDS="${CUDA_CODE_SECONDS:-15}"
 
@@ -103,17 +105,69 @@ in_dir() {
     (cd "$dir" && "$@")
 }
 
+find_benchmark_python() {
+    local candidate
+
+    if [ -n "${INFRA_PYTHON_BENCH:-}" ] && [ -x "${INFRA_PYTHON_BENCH}" ]; then
+        if "${INFRA_PYTHON_BENCH}" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' \
+            >/dev/null 2>&1; then
+            echo "${INFRA_PYTHON_BENCH}"
+            return 0
+        fi
+    fi
+
+    for candidate in /opt/infra/python/3.11/bin/python /usr/bin/python3.11; do
+        if [ -x "${candidate}" ] && "${candidate}" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' \
+            >/dev/null 2>&1; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 -c 'import sys; raise SystemExit(0 if sys.version_info[:2] in ((3, 10), (3, 11)) else 1)' \
+            >/dev/null 2>&1; then
+            command -v python3
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+ensure_pytorch_venv() {
+    local py_bin="$1"
+    local venv_dir="$2"
+
+    if [ ! -x "${venv_dir}/bin/python" ]; then
+        "${py_bin}" -m venv "${venv_dir}" || return 1
+    fi
+
+    "${venv_dir}/bin/python" -m pip install --upgrade pip --quiet \
+        $PIP_EXTRA 2>&1 | tee -a "$LOG_FILE" || return 1
+}
+
 warn_pytorch_python_runtime() {
     $PYTORCH_RUNTIME_WARNED && return 0
 
-    local py_version py_path
+    local py_version py_path benchmark_python=""
     py_version=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")' 2>/dev/null || echo "unknown")
     py_path=$(command -v python3 2>/dev/null || echo "python3")
-    log "  PyTorch runtime    : python3 $py_version ($py_path)"
+    log "  System python3     : python3 $py_version ($py_path)"
+
+    if benchmark_python=$(find_benchmark_python 2>/dev/null); then
+        log "  Benchmark python   : $benchmark_python"
+    else
+        log "  Benchmark python   : missing (PyTorch DDP lane will be NOT BEING RUN)"
+    fi
 
     if python3 -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 12) else 1)' 2>/dev/null; then
-        log "  WARNING: Python 3.12+ has known torch.distributed / torchrun segfault history."
-        log "           If the pytorch test fails during DDP init, prefer Python 3.10/3.11 for this benchmark."
+        if [ -z "${benchmark_python}" ]; then
+            log "  WARNING: Python 3.12+ has known torch.distributed / torchrun segfault history."
+            log "           If the pytorch test fails during DDP init, prefer the benchmark Python 3.11 runtime."
+        else
+            log "  NOTE: system python3 is 3.12+, but PyTorch will use the benchmark Python runtime above."
+        fi
     fi
 
     PYTORCH_RUNTIME_WARNED=true
@@ -1090,15 +1144,20 @@ test_dcgm() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 install_pytorch() {
-    warn_pytorch_python_runtime
-    pip3 install --upgrade pip --quiet $PIP_EXTRA 2>&1 | tee -a "$LOG_FILE"
-    pip3 install torch torchvision torchaudio \
+    [ -n "${PYTORCH_PYTHON:-}" ] || return 1
+    ensure_pytorch_venv "$PYTORCH_PYTHON" "$PYTORCH_VENV" || return 1
+    "${PYTORCH_VENV}/bin/python" -m pip install torch torchvision torchaudio \
         --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}" \
         --quiet $PIP_EXTRA 2>&1 | tee -a "$LOG_FILE"
-    pip3 install accelerate --quiet $PIP_EXTRA 2>&1 | tee -a "$LOG_FILE"
+    "${PYTORCH_VENV}/bin/python" -m pip install accelerate --quiet $PIP_EXTRA 2>&1 | tee -a "$LOG_FILE"
 }
 
 find_torchrun() {
+    if [ -x "$PYTORCH_VENV/bin/torchrun" ]; then
+        echo "$PYTORCH_VENV/bin/torchrun"
+        return 0
+    fi
+
     find "$HOME/.local/bin" /usr/local/bin /usr/bin \
         -name torchrun 2>/dev/null | head -1
 }
@@ -1142,6 +1201,14 @@ summarize_pytorch_failure() {
 }
 
 test_pytorch() {
+    warn_pytorch_python_runtime
+
+    if ! PYTORCH_PYTHON=$(find_benchmark_python); then
+        record_not_run "PyTorch Multi-GPU Benchmark" \
+            "benchmark Python 3.11 runtime missing — install base-install.sh first (it provisions uv-managed Python 3.11)"
+        return 0
+    fi
+
     install_pytorch
 
     local torchrun

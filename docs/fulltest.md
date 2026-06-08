@@ -350,9 +350,11 @@ Runs 100 forward passes of a 10,000×10,000 linear layer across all GPUs in scop
 
 **Fails if:** PyTorch install fails, `torchrun` not found, NCCL process group init fails, or any forward pass errors.
 
+**Runtime contract:** The lane uses the benchmark Python 3.11 runtime provisioned by `base-install.sh` (via `uv`). If only the host's default Python 3.12 runtime is available, the lane is treated as `NOT BEING RUN` instead of attempting a DDP run on an unsupported interpreter.
+
 **Failure diagnostics:** On failure, the script now keeps the generated DDP repro script in `/tmp`, emits a condensed summary of the failing `local_rank` / child exit code, and prints a direct `torchrun` repro command plus a suggested debug rerun with `NCCL_DEBUG=INFO` and `TORCH_DISTRIBUTED_DEBUG=DETAIL`.
 
-**Python runtime warning:** The script now logs the active `python3` runtime before installing/running PyTorch. If it detects Python 3.12 or newer, it warns that `torch.distributed` / `torchrun` has known segfault history there and recommends Python 3.10/3.11 if DDP initialization crashes.
+**Python runtime warning:** The script logs the active system `python3` runtime plus the benchmark runtime it will actually use. If no benchmark runtime is available, PyTorch is skipped rather than running on the host default interpreter.
 
 **PyTorch wheel selection:**
 
@@ -493,6 +495,8 @@ behavior.
 - The burn tool exits only because a GPU reports `SW_Thermal` / soft thermal throttling, with no hard-crash indicators
 - A 12V-2x6 / 12VHPWR connector early-warning pattern is detected; see the methodology above (remark-only by default)
 
+In other words: thermal or fan-limit findings are recorded as remarks, while the test only fails on an actual GPU crash or other hard failure signal.
+
 When either of those warning-only cases happens, the final summary adds a `REMARKS` section rather than marking the test as failed. If a backend cannot be built and the script falls back to another engine, the summary also adds a `NOT BEING RUN` entry for the unavailable backend.
 
 ### `node-stress` — Node-Wide Stress
@@ -522,6 +526,8 @@ can make marginal power delivery issues easier to reproduce.
 - The GPU backend emits a performance-health warning but thermals remain clean
 - The GPU backend exits only because of `SW_Thermal` / soft thermal throttling, with no hard-crash indicators
 - A 12V-2x6 / 12VHPWR connector early-warning pattern is detected; see the methodology above (remark-only by default)
+
+In other words: thermal or fan-limit findings are recorded as remarks, while the test only fails on an actual GPU crash or other hard failure signal.
 
 If `stress-ng`, `gpu-fryer`, or `gpu-burn` is unavailable, the summary records that component as `NOT BEING RUN` rather than treating the whole run as a failure.
 
