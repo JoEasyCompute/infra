@@ -103,6 +103,8 @@ GPU_POLICY_REQUIRE_PERSISTENCE=1 ./test/gpu-fulltest-v2.sh gpu-policy
 - `gpu-policy` is an optional advisory test by default; set `GPU_POLICY_STRICT=1` and the `GPU_POLICY_*` thresholds to enforce fleet policy.
 - CUDA samples source-layout/build mismatches are recorded as `NOT BEING RUN` instead of failing the run. The lookup checks both the current `cpp/` tree and the legacy `Samples/` tree.
 
+If you are trying to decide whether a failure looks like software, hardware, power, thermal, or configuration drift, see [docs/test-triage.md](docs/test-triage.md) for a generic decision path.
+
 ### 12V-2x6 / 12VHPWR Early-Warning Methodology
 
 The sustained power-anomaly detector used by `stress` and `node-stress` is the
