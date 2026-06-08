@@ -2345,6 +2345,112 @@ test_gpu_policy() {
 # Summary
 # ─────────────────────────────────────────────────────────────────────────────
 
+print_diagnostic_hints() {
+    local prep_fail_count=${#PREP_FAIL[@]}
+    local fail_count=${#RESULTS_FAIL[@]}
+    local not_run_count=${#RESULTS_NOT_RUN[@]}
+    local remark_count=${#RESULTS_REMARK[@]}
+    local code_failed=0
+    local memtest_failed=0
+    local stress_failed=0
+    local stress_warn=0
+    local nccl_failed=0
+    local pytorch_failed=0
+    local cuda_samples_failed=0
+    local nvbandwidth_failed=0
+    local dcgm_failed=0
+    local gpu_policy_failed=0
+    local post_stress_failed=0
+    local r
+
+    for r in "${RESULTS_FAIL[@]}"; do
+        case "$r" in
+            *"CUDA Int32 Compute Stress (code.cu)"*) code_failed=1 ;;
+            *"cuda_memtest (GPU Memory Stress)"*) memtest_failed=1 ;;
+            *"Sustained Compute Stress"*) stress_failed=1 ;;
+            *"NCCL All-Reduce Test"*) nccl_failed=1 ;;
+            *"PyTorch Multi-GPU Benchmark"*) pytorch_failed=1 ;;
+            *"CUDA Samples (deviceQuery / p2pBandwidthLatencyTest)"*) cuda_samples_failed=1 ;;
+            *"NVBandwidth (GPU Memory Bandwidth)"*) nvbandwidth_failed=1 ;;
+            *"DCGM Diagnostics"*) dcgm_failed=1 ;;
+            *"GPU Policy"*) gpu_policy_failed=1 ;;
+            *"Post-Stress Recovery"*) post_stress_failed=1 ;;
+        esac
+    done
+
+    for r in "${RESULTS_REMARK[@]}"; do
+        case "$r" in
+            *"Sustained Compute Stress:"*"thermal"*|*"Sustained Compute Stress:"*"power anomaly"*|*"connector-self-throttle signature"*)
+                stress_warn=1
+                ;;
+        esac
+    done
+
+    if [ "$prep_fail_count" -eq 0 ] && [ "$fail_count" -eq 0 ] && [ "$remark_count" -eq 0 ] && [ "$not_run_count" -eq 0 ]; then
+        return 0
+    fi
+
+    log ""
+    log "  DIAGNOSTIC HINTS:"
+
+    if [ "$prep_fail_count" -gt 0 ]; then
+        log "    - preparation failed: initial suspect is a missing build dependency, toolchain issue, or host setup problem."
+        log "      Next checks: review PREP FAILED entries above, install the missing prerequisite, and rerun the prepare step."
+    fi
+
+    if [ "$code_failed" -eq 1 ] && [ "$memtest_failed" -eq 1 ]; then
+        log "    - code + memtest both failed: initial suspect is GPU hardware or board-level instability (VRAM, memory controller, power, thermals)."
+        log "      Next checks: isolate a single GPU, inspect NVRM/Xid logs, verify power cabling, and compare against a lower-clock rerun."
+    elif [ "$code_failed" -eq 1 ]; then
+        log "    - code failed: initial suspect is CUDA runtime / driver / compute-path instability."
+        log "      Next checks: confirm nvidia-smi works, check nvcc --version, inspect kernel logs, and rerun code on one GPU."
+    fi
+
+    if [ "$memtest_failed" -eq 1 ] && [ "$code_failed" -ne 1 ]; then
+        log "    - memtest failed: initial suspect is VRAM / memory-controller / memory-clock instability."
+        log "      Next checks: rerun on a single GPU, inspect temperatures and clocks, and remove any memory overclock."
+    fi
+
+    if [ "$stress_failed" -eq 1 ] || [ "$stress_warn" -eq 1 ]; then
+        log "    - stress failed or only raised thermal/power remarks: initial suspect is thermals, PSU/cabling, or boost instability under sustained load."
+        log "      Next checks: review temperature/fan telemetry, inspect the 12V-2x6 / 12VHPWR path, and compare with code + memtest."
+    fi
+
+    if [ "$nccl_failed" -eq 1 ] || [ "$pytorch_failed" -eq 1 ]; then
+        if [ "$code_failed" -eq 0 ]; then
+            log "    - nccl/pytorch failed while code passed: initial suspect is the software stack or multi-GPU communication path."
+            log "      Next checks: Python environment, PyTorch wheel/CUDA compatibility, NCCL config, and PCIe/NVLink topology."
+        else
+            log "    - nccl/pytorch also failed: software stack issues are still possible, but hardware or comms instability remains on the table."
+            log "      Next checks: rerun on fewer GPUs, compare single-GPU code vs multi-GPU behavior, and inspect NCCL logs."
+        fi
+    fi
+
+    if [ "$cuda_samples_failed" -eq 1 ] || [ "$nvbandwidth_failed" -eq 1 ]; then
+        log "    - cuda-samples or nvbandwidth failed: initial suspect is the CUDA runtime/driver path or PCIe/device-memory transfer path."
+        log "      Next checks: confirm driver/toolkit versions, rerun code, and compare link speed / topology across GPUs."
+    fi
+
+    if [ "$dcgm_failed" -eq 1 ]; then
+        log "    - DCGM failed: initial suspect is the monitoring/diagnostic stack rather than raw GPU hardware."
+        log "      Next checks: confirm dcgmi is installed, verify driver compatibility, and retry the telemetry query."
+    fi
+
+    if [ "$gpu_policy_failed" -eq 1 ] || [ "$post_stress_failed" -eq 1 ]; then
+        log "    - policy or recovery checks failed: initial suspect is a config/persistence/power-management issue or a GPU that did not recover cleanly after load."
+        log "      Next checks: review persistence mode, power limits, idle thermals, and the post-stress GPU logs."
+    fi
+
+    if [ "$not_run_count" -gt 0 ] && [ "$fail_count" -eq 0 ] && [ "$remark_count" -eq 0 ] && [ "$prep_fail_count" -eq 0 ]; then
+        log "    - some tests were NOT BEING RUN: initial suspect is a missing toolchain or unsupported host path, not a hardware failure."
+        log "      Next checks: review the NOT BEING RUN entries above and install the missing dependency if needed."
+    fi
+
+    if [ "$fail_count" -eq 0 ] && [ "$remark_count" -gt 0 ] && [ "$prep_fail_count" -eq 0 ]; then
+        log "    - no hard failures were recorded: review the remarks above first; they usually point to the next most likely follow-up."
+    fi
+}
+
 print_summary() {
     log ""
     log "========================================"
@@ -2366,6 +2472,7 @@ print_summary() {
     local prep_pass_count=${#PREP_PASS[@]}
     local prep_fail_count=${#PREP_FAIL[@]}
     local prep_skip_count=${#PREP_SKIP[@]}
+    local summary_rc=0
 
     if [ "$prep_pass_count" -gt 0 ]; then
         log "  PREPARED ($prep_pass_count):"
@@ -2408,7 +2515,7 @@ print_summary() {
         log "========================================"
         log "  RESULT: prepare/test phase failed"
         log "========================================"
-        return 1
+        summary_rc=1
     elif [ "$not_run_count" -gt 0 ]; then
         log "========================================"
         log "  RESULT: ALL RUN TESTS PASSED; $not_run_count test(s) NOT BEING RUN"
@@ -2424,6 +2531,10 @@ print_summary() {
         log "  REMARKS ($remark_count):"
         for r in "${RESULTS_REMARK[@]}"; do log "    -  $r"; done
     fi
+
+    print_diagnostic_hints
+
+    return "$summary_rc"
 }
 
 run_selected_tests() {
