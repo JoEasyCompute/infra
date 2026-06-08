@@ -371,6 +371,8 @@ Runs 100 forward passes of a 10,000×10,000 linear layer across all GPUs in scop
 
 Runs the tiny `test/code.sh` wrapper, which compiles `test/code.cu` with `nvcc` if needed and then executes it on each visible GPU in turn.
 
+The wrapper now targets the visible GPUs' compute capabilities directly with SASS-only `-gencode` flags when possible, so the test avoids PTX JIT compatibility problems on newer toolkits/drivers.
+
 The suite invokes it sequentially across all GPUs in scope using logical device IDs `0..N-1`, so it respects `--gpu` remapping via `CUDA_VISIBLE_DEVICES`.
 
 The per-GPU runtime is controlled by `CUDA_CODE_SECONDS` and defaults to `15` seconds inside the suite. The standalone wrapper defaults to `30` seconds when run directly.
