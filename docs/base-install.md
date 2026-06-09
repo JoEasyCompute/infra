@@ -213,8 +213,9 @@ must be done manually afterwards.
 `uv` is installed by `base-install.sh` via Astral's standalone installer and
 placed in `/usr/local/bin` so it is available on the system PATH without
 modifying shell profiles.
-`base-install.sh` also uses `uv` to provision a benchmark-safe Python 3.11
-runtime for the PyTorch lane, keeping the distro's default `python3` unchanged.
+`base-install.sh` also uses `uv` to provision and refresh a benchmark-safe
+Python 3.11 runtime for the PyTorch lane, keeping the distro's default
+`python3` unchanged.
 `fd` and `bat` compatibility symlinks are created when the Ubuntu packages
 expose the commands as `fdfind` and `batcat`.
 

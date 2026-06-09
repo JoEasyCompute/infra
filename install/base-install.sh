@@ -501,20 +501,21 @@ install_benchmark_python_runtime() {
     uv_path="$(command -v uv 2>/dev/null || true)"
     [ -n "${uv_path}" ] || error "uv not found — install_python_tooling must run first"
 
-    if [ -n "${INFRA_PYTHON_BENCH:-}" ] && [ -x "${INFRA_PYTHON_BENCH}" ]; then
-        if "${INFRA_PYTHON_BENCH}" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' \
-            >/dev/null 2>&1; then
-            success "Benchmark Python already present: $(${INFRA_PYTHON_BENCH} --version 2>/dev/null || echo unknown)"
-            return 0
-        fi
+    if [ -n "${INFRA_PYTHON_BENCH:-}" ] && [ -x "${INFRA_PYTHON_BENCH}" ] \
+        && [[ "${INFRA_PYTHON_BENCH}" == "${benchmark_root}/"* ]]; then
+        info "Refreshing benchmark Python ${benchmark_version} via uv (managed install: ${INFRA_PYTHON_BENCH})..."
+    else
+        info "Installing benchmark Python ${benchmark_version} via uv..."
     fi
-
-    info "Installing benchmark Python ${benchmark_version} via uv..."
     sudo install -d -m 0755 "${benchmark_root}"
     sudo env UV_PYTHON_INSTALL_DIR="${benchmark_root}" "${uv_path}" python install "${benchmark_version}" --managed-python \
+        --reinstall \
         || error "Failed to install benchmark Python ${benchmark_version}"
 
-    py_bin="$(sudo env UV_PYTHON_INSTALL_DIR="${benchmark_root}" "${uv_path}" python find "${benchmark_version}" 2>/dev/null | tail -n 1)"
+    py_bin="$(find "${benchmark_root}" -type f -name 'python3.11' -perm -111 2>/dev/null | sort | tail -n 1)"
+    if [ -z "${py_bin}" ]; then
+        py_bin="$(find "${benchmark_root}" -type f -name 'python' -perm -111 2>/dev/null | sort | tail -n 1)"
+    fi
     if [ -z "${py_bin}" ] || [ ! -x "${py_bin}" ]; then
         error "Benchmark Python ${benchmark_version} install completed but the executable could not be found"
     fi
