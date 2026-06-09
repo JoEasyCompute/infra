@@ -1792,11 +1792,20 @@ readonly POWER_ANOMALY_AS_REMARK="${POWER_ANOMALY_AS_REMARK:-1}"  # 1 = record a
 BURN_POWER_ANOMALY_RC=0
 BURN_POWER_ANOMALY_FLAGGED_GPUS=""
 BURN_TELEMETRY_FILE=""
+STRESS_FAILURE_SCAN_START_LINE=1
 
 stress_hard_failure_detected() {
-    grep -qiE \
+    local start_line="${STRESS_FAILURE_SCAN_START_LINE:-1}"
+    sed -n "${start_line},\$p" "$LOG_FILE" | grep -qiE \
         'Throttling HW: true|Thermal HW: true|HW_Slowdown|HW_PowerBrake|CUDA error|illegal memory access|device-side assert|segmentation fault|SIGSEGV|Xid|panic|core dumped|fatal error' \
-        "$LOG_FILE"
+        || return 1
+    return 0
+}
+
+begin_stress_failure_scan() {
+    local current_lines
+    current_lines=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+    STRESS_FAILURE_SCAN_START_LINE=$((current_lines + 1))
 }
 
 # run_burn_monitor <burn_pid>
@@ -2121,6 +2130,7 @@ test_stress() {
     local duration_min burn_rc=0
     duration_min=$(echo "scale=1; $BURN_DURATION / 60" | bc)
     record_stress_activity_start
+    begin_stress_failure_scan
 
     # Launch the burn tool in the background, monitor thermals alongside it,
     # then wait for it to finish and collect both the compute RC and thermal RC.
@@ -2173,6 +2183,7 @@ test_node_stress() {
     duration_min="$NODE_STRESS_MINUTES"
     duration_s=$(( duration_min * 60 ))
     record_stress_activity_start
+    begin_stress_failure_scan
 
     log "  Running full-node stress for ${duration_min} minute(s)"
     log_sensor_snapshot "Initial sensors snapshot (if available):"
