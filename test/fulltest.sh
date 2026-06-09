@@ -116,7 +116,11 @@ find_benchmark_python() {
         fi
     fi
 
-    for candidate in /opt/infra/python/3.11/bin/python /usr/bin/python3.11; do
+    for candidate in \
+        /opt/infra/python/*/bin/python3.11 \
+        /opt/infra/python/*/bin/python \
+        /opt/infra/python/3.11/bin/python \
+        /usr/bin/python3.11; do
         if [ -x "${candidate}" ] && "${candidate}" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' \
             >/dev/null 2>&1; then
             echo "${candidate}"
@@ -518,6 +522,7 @@ detect_system() {
             else TORCH_CUDA="cu128"
             fi
             ;;
+        13) TORCH_CUDA="cu130" ;;
         *)  TORCH_CUDA="cu128" ;;
     esac
     log "  PyTorch wheel       : https://download.pytorch.org/whl/$TORCH_CUDA"
@@ -1148,8 +1153,9 @@ install_pytorch() {
     ensure_pytorch_venv "$PYTORCH_PYTHON" "$PYTORCH_VENV" || return 1
     "${PYTORCH_VENV}/bin/python" -m pip install torch torchvision torchaudio \
         --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}" \
-        --quiet $PIP_EXTRA 2>&1 | tee -a "$LOG_FILE"
-    "${PYTORCH_VENV}/bin/python" -m pip install accelerate --quiet $PIP_EXTRA 2>&1 | tee -a "$LOG_FILE"
+        --upgrade --force-reinstall --no-cache-dir --quiet $PIP_EXTRA 2>&1 | tee -a "$LOG_FILE"
+    "${PYTORCH_VENV}/bin/python" -m pip install accelerate \
+        --upgrade --force-reinstall --no-cache-dir --quiet $PIP_EXTRA 2>&1 | tee -a "$LOG_FILE"
 }
 
 find_torchrun() {

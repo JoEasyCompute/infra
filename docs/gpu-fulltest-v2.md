@@ -96,7 +96,8 @@ GPU_POLICY_REQUIRE_PERSISTENCE=1 ./test/gpu-fulltest-v2.sh gpu-policy
 - `code` runs the standalone CUDA int32 stress wrapper sequentially across every visible GPU, using logical device IDs `0..N-1` so it respects `--gpu` remapping.
 - `code.sh` now compiles with visible-GPU SASS targets when possible, so the lane avoids PTX JIT compatibility issues on newer CUDA/toolkit combinations.
 - The PyTorch benchmark now keeps its generated DDP repro script on failure and prints a condensed failure summary plus a suggested debug rerun command.
-- The PyTorch prepare/run path now uses the benchmark Python 3.11 runtime from `base-install.sh` (via `uv`) and treats its absence as `NOT BEING RUN` rather than trying to execute DDP on the host default interpreter.
+- The PyTorch prepare/run path now uses the benchmark Python 3.11 runtime from `base-install.sh` (via `uv` or the installed `/opt/infra/python` tree) and treats its absence as `NOT BEING RUN` rather than trying to execute DDP on the host default interpreter.
+- CUDA 13 now maps to the `cu130` wheel family; `torch` / `torchvision` / `torchaudio` installs are force-refreshed so stale venv contents do not keep an old wheel family alive between runs.
 - Sustained stress and node-stress now treat thermal/performance-only outcomes as summary remarks, and unavailable backends are listed under `NOT BEING RUN` instead of failing the overall run.
 - `SW_Thermal`-only exits are treated as remarks in the stress summary, provided there are no hard-crash indicators.
 - `stress` and `node-stress` also detect sustained 12V-2x6 / 12VHPWR connector power anomalies; these are remark-only by default unless `POWER_ANOMALY_AS_REMARK=0` is set.
