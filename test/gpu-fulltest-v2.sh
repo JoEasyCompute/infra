@@ -1229,15 +1229,34 @@ test_nccl() {
         NCCL_NVLS_ENABLE=0
     )
 
+    local nccl_diag
+    nccl_diag=$(mktemp "${TMPDIR:-/tmp}/gpu-fulltest-v2-nccl.XXXXXX")
+    cleanup_nccl_diag() {
+        rm -f "$nccl_diag"
+    }
+    trap cleanup_nccl_diag RETURN
+
     if env "${nccl_env[@]}" "$perf" -b 8 -e 1G -f 2 -g "$NUM_GPUS" 2>&1 | tee -a "$LOG_FILE"; then
         return 0
     fi
 
+    nccl_peer_mapping_hint() {
+        local diag_file="$1"
+        if grep -qF "peer mapping resources exhausted" "$diag_file"; then
+            log "  NCCL hint: the NVIDIA driver ran out of peer-mapping resources."
+            log "  Reboot the host first to clear peer-ID / mapping state, then rerun NCCL."
+            log "  If it returns immediately after reboot, treat it as a driver or PCIe topology resource-exhaustion issue."
+            return 0
+        fi
+        return 1
+    }
+
     # Re-run with debug output to capture the actual NCCL error
     log ""
     log "  NCCL failed — re-running with NCCL_DEBUG=INFO for diagnostics:"
-    env "${nccl_env[@]}" NCCL_DEBUG=INFO "$perf" -b 8 -e 32M -f 2 -g "$NUM_GPUS" 2>&1 \
-        | grep -E "NCCL|WARN|error|Error|fatal" | head -60 | tee -a "$LOG_FILE"
+    env "${nccl_env[@]}" NCCL_DEBUG=INFO "$perf" -b 8 -e 32M -f 2 -g "$NUM_GPUS" 2>&1 >"$nccl_diag" || true
+    nccl_peer_mapping_hint "$nccl_diag" || true
+    grep -E "NCCL|WARN|error|Error|fatal" "$nccl_diag" | head -60 | tee -a "$LOG_FILE"
     return 1
 }
 
