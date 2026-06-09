@@ -5,6 +5,7 @@
 # Default outputs
 csv_file=""
 json_file=""
+DEBUG=0
 
 # --- Argument Parsing ---
 while [[ $# -gt 0 ]]; do
@@ -17,8 +18,12 @@ while [[ $# -gt 0 ]]; do
             json_file="$2"
             shift 2
             ;;
+        --debug)
+            DEBUG=1
+            shift
+            ;;
         -h|--help)
-            echo "Usage: $0 [--csv output.csv] [--json output.json]"
+            echo "Usage: $0 [--csv output.csv] [--json output.json] [--debug]"
             exit 0
             ;;
         *)
@@ -39,6 +44,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m' # No Color
+logd() { [[ "$DEBUG" -eq 1 ]] && echo "[DEBUG] $*" >&2 || true; }
 
 # Check for required commands
 for cmd in dmidecode nvidia-smi lspci jq; do
@@ -113,6 +119,7 @@ build_smbios_slotmap() {
     while IFS=$'\t' read -r addr slot; do
         [[ -n "$addr" && -n "$slot" ]] || continue
         SLOT_BY_UPSTREAM["$addr"]="$slot"
+        logd "SMBIOS slot map: $addr -> $slot"
     done < <(
         dmidecode -t slot 2>/dev/null | awk '
             BEGIN { RS="\n\n"; FS="\n" }
@@ -158,6 +165,22 @@ nearest_slot_for_bdf() {
 
 get_physical_slot_via_lspci() {
     lspci -s "$1" -vv 2>/dev/null | sed -n 's/.*Physical Slot:[[:space:]]*//p' | head -n1
+}
+
+find_upstream_bridge_bdf() {
+    local bdf="$1" path p next
+    path="$(readlink -f "/sys/bus/pci/devices/$bdf")" || { echo ""; return; }
+    while :; do
+        next="$(readlink -f "$path/..")" || break
+        [[ "$next" == "$path" ]] && break
+        p="$(basename "$next")"
+        if [[ "$p" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]]; then
+            echo "$p"
+            return
+        fi
+        path="$next"
+    done
+    echo ""
 }
 
 find_upstream_physical_slot() {
@@ -313,7 +336,14 @@ while IFS='|' read -r gpu_idx pci gpu_name fan temp power_draw power_limit; do
     if [[ -z "$slot_name" ]]; then
         slot_name=$(find_upstream_physical_slot "$pci_norm")
     fi
-    [[ -z "$slot_name" ]] && slot_name="(Unknown)"
+    if [[ -z "$slot_name" ]]; then
+        upstream_bridge=$(find_upstream_bridge_bdf "$pci_norm")
+        if [[ -n "$upstream_bridge" ]]; then
+            slot_name="UPSTREAM ${upstream_bridge#0000:}"
+        else
+            slot_name="(Unknown)"
+        fi
+    fi
 
     # Read LnkSta/LnkCap and NUMA via lspci
     link_speed="N/A"
