@@ -84,8 +84,13 @@ while IFS= read -r line; do
         current_slot="${BASH_REMATCH[1]}"
     elif [[ $line =~ Bus\ Address:\ (.+) ]]; then
         pci_addr="${BASH_REMATCH[1]}"
-        # Format: 0000:65:00.0 -> 65:00.0
-        pci_trimmed=$(echo "$pci_addr" | cut -d':' -f2- | tr '[:upper:]' '[:lower:]')
+        pci_addr=$(echo "$pci_addr" | tr '[:upper:]' '[:lower:]')
+        # Normalize SMBIOS bus addresses such as ffff:20:1f.7 to 0000:20:1f.7.
+        if [[ "$pci_addr" =~ ^[0-9a-f]{4}:([0-9a-f]{2}:[0-9a-f]{2}\.[0-7])$ ]]; then
+            pci_addr="0000:${BASH_REMATCH[1]}"
+        fi
+        # Store the full canonical BDF so upstream bridge lookups can match it.
+        pci_trimmed="$pci_addr"
         echo "$pci_trimmed|$current_slot" >> "$slot_file"
     fi
 done < <(dmidecode -t slot)
@@ -124,7 +129,11 @@ build_smbios_slotmap() {
                 }
                 gsub(/[[:space:]]/, "", bus)
                 if (bus != "" && slot != "") {
-                    if (bus !~ /^0000:/) bus="0000:" bus
+                    if (bus ~ /^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$/) {
+                        sub(/^[0-9a-f]{4}:/, "0000:", bus)
+                    } else if (bus !~ /^0000:/) {
+                        bus="0000:" bus
+                    }
                     printf "%s\t%s\n", tolower(bus), slot
                 }
             }'
@@ -283,8 +292,8 @@ while IFS='|' read -r gpu_idx pci gpu_name fan temp power_draw power_limit; do
 
     pci_lower=$(echo "$pci" | tr '[:upper:]' '[:lower:]')
     pci_norm=$(normalize_pci_addr "$pci_lower")
-    pci_trimmed=$(echo "$pci_norm" | cut -d':' -f2-)
     [[ -z "$pci_norm" ]] && continue
+    pci_trimmed=$(echo "$pci_norm" | cut -d':' -f2-)
 
     # Match slot, preferring the upstream SMBIOS slot designation so boards
     # with SLIMSAS/backplane wiring still resolve to the physical bay label.
@@ -293,7 +302,10 @@ while IFS='|' read -r gpu_idx pci gpu_name fan temp power_draw power_limit; do
         slot_name=$(nearest_slot_for_bdf "$pci_norm")
     fi
     if [[ -z "$slot_name" ]]; then
-        match=$(awk -F'|' -v key="$pci_trimmed" '$1 == key { print $2; exit }' "$slot_file")
+        match=$(awk -F'|' -v key="$pci_norm" '$1 == key { print $2; exit }' "$slot_file")
+        if [[ -z "$match" ]]; then
+            match=$(awk -F'|' -v key="$pci_trimmed" '$1 == key { print $2; exit }' "$slot_file")
+        fi
         if [[ -n "$match" ]]; then
             slot_name="$match"
         fi
