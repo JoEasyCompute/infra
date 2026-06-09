@@ -1155,10 +1155,10 @@ echo -e "${BOLD}Storage layout:${RESET}"
 if mountpoint -q "${CONTAINER_RUNTIME_MOUNT}" 2>/dev/null; then
     df -h "${CONTAINER_RUNTIME_MOUNT}" | awk 'NR==1{print "  "$0} NR==2{print "  "$0}'
     # Show whether this is a loopback or block device mount
-    local rt_source
+    rt_source=""
     rt_source=$(findmnt -n -o SOURCE "${CONTAINER_RUNTIME_MOUNT}" 2>/dev/null || echo "?")
     if [[ -f "${LOOPBACK_IMG}" ]]; then
-        local img_size
+        img_size=""
         img_size=$(du -sh "${LOOPBACK_IMG}" 2>/dev/null | cut -f1 || echo "?")
         echo -e "  Source: loopback image ${LOOPBACK_IMG} (${img_size}, via ${rt_source})"
         echo -e "  Boot persistence: fstab loop mount + bind mounts"
@@ -1167,7 +1167,7 @@ if mountpoint -q "${CONTAINER_RUNTIME_MOUNT}" 2>/dev/null; then
     fi
     for tgt in "${DOCKER_MOUNTPOINT}" "${CONTAINERD_MOUNTPOINT}"; do
         if mountpoint -q "${tgt}" 2>/dev/null; then
-            local src
+            src=""
             src=$(findmnt -n -o SOURCE "${tgt}" 2>/dev/null || echo "?")
             echo -e "    ${tgt} → bind mount from ${src}"
         else
