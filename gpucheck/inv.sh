@@ -68,6 +68,8 @@ smi_err_file=$(mktemp)
 gpu_raw_file=$(mktemp)
 trap 'rm -f "$slot_file" "$lines_file" "$remark_file" "$smi_out_file" "$smi_err_file" "$gpu_raw_file"' EXIT
 
+declare -A SLOT_BY_UPSTREAM
+
 echo -e "=== PCIe Slot ↔ GPU Mapping ==="
 echo ""
 # Header for console
@@ -87,6 +89,69 @@ while IFS= read -r line; do
         echo "$pci_trimmed|$current_slot" >> "$slot_file"
     fi
 done < <(dmidecode -t slot)
+
+normalize_pci_addr() {
+    local addr="${1,,}"
+    if [[ "$addr" =~ ^[0-9a-f]{8}:([0-9a-f]{2}:[0-9a-f]{2}\.[0-7])$ ]]; then
+        echo "0000:${BASH_REMATCH[1]}"
+    elif [[ "$addr" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]]; then
+        echo "$addr"
+    elif [[ "$addr" =~ ^[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]]; then
+        echo "0000:$addr"
+    else
+        echo "$addr"
+    fi
+}
+
+build_smbios_slotmap() {
+    local addr slot
+    while IFS=$'\t' read -r addr slot; do
+        [[ -n "$addr" && -n "$slot" ]] || continue
+        SLOT_BY_UPSTREAM["$addr"]="$slot"
+    done < <(
+        dmidecode -t slot 2>/dev/null | awk '
+            BEGIN { RS="\n\n"; FS="\n" }
+            /System Slot Information/ {
+                slot=""; bus="";
+                for (i = 1; i <= NF; i++) {
+                    if ($i ~ /Designation:/) {
+                        sub(/^[[:space:]]*Designation:[[:space:]]*/, "", $i)
+                        slot=$i
+                    } else if ($i ~ /Bus Address:/) {
+                        sub(/^[[:space:]]*Bus Address:[[:space:]]*/, "", $i)
+                        bus=$i
+                    }
+                }
+                gsub(/[[:space:]]/, "", bus)
+                if (bus != "" && slot != "") {
+                    if (bus !~ /^0000:/) bus="0000:" bus
+                    printf "%s\t%s\n", tolower(bus), slot
+                }
+            }'
+    )
+}
+
+nearest_slot_for_bdf() {
+    local bdf="$1" path p next
+    path="$(readlink -f "/sys/bus/pci/devices/$bdf")" || { echo ""; return; }
+    while :; do
+        p="$(basename "$path")"
+        if [[ "$p" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]] && [[ -n "${SLOT_BY_UPSTREAM[$p]:-}" ]]; then
+            echo "${SLOT_BY_UPSTREAM[$p]}"
+            return
+        fi
+        next="$(readlink -f "$path/..")" || break
+        [[ "$next" == "$path" ]] && break
+        path="$next"
+    done
+    echo ""
+}
+
+get_physical_slot_via_lspci() {
+    lspci -s "$1" -vv 2>/dev/null | sed -n 's/.*Physical Slot:[[:space:]]*//p' | head -n1
+}
+
+build_smbios_slotmap
 
 speed_to_gen() {
     case "$1" in
@@ -198,15 +263,26 @@ while IFS='|' read -r gpu_idx pci gpu_name fan temp power_draw power_limit; do
     power_limit=$(echo "$power_limit" | xargs)
 
     pci_lower=$(echo "$pci" | tr '[:upper:]' '[:lower:]')
-    pci_trimmed=$(echo "$pci_lower" | cut -d':' -f2-)
-    [[ -z "$pci_lower" ]] && continue
+    pci_norm=$(normalize_pci_addr "$pci_lower")
+    pci_trimmed=$(echo "$pci_norm" | cut -d':' -f2-)
+    [[ -z "$pci_norm" ]] && continue
 
-    # Match slot
-    slot_name="(Unknown)"
-    match=$(grep "^$pci_trimmed|" "$slot_file")
-    if [[ -n "$match" ]]; then
-        slot_name=$(echo "$match" | cut -d'|' -f2)
+    # Match slot, preferring the upstream SMBIOS slot designation so boards
+    # with SLIMSAS/backplane wiring still resolve to the physical bay label.
+    slot_name=""
+    if [[ ${#SLOT_BY_UPSTREAM[@]} -gt 0 ]]; then
+        slot_name=$(nearest_slot_for_bdf "$pci_norm")
     fi
+    if [[ -z "$slot_name" ]]; then
+        match=$(awk -F'|' -v key="$pci_trimmed" '$1 == key { print $2; exit }' "$slot_file")
+        if [[ -n "$match" ]]; then
+            slot_name="$match"
+        fi
+    fi
+    if [[ -z "$slot_name" ]]; then
+        slot_name=$(get_physical_slot_via_lspci "$pci_norm")
+    fi
+    [[ -z "$slot_name" ]] && slot_name="(Unknown)"
 
     # Read LnkSta/LnkCap and NUMA via lspci
     link_speed="N/A"
@@ -217,7 +293,7 @@ while IFS='|' read -r gpu_idx pci gpu_name fan temp power_draw power_limit; do
     negotiated_below_max=0
     bus_lost=0
 
-    lspci_output=$(lspci -s "$pci_lower" -vv 2>/dev/null)
+    lspci_output=$(lspci -s "$pci_norm" -vv 2>/dev/null)
     if [[ -n "$lspci_output" ]]; then
         cap_line=$(echo "$lspci_output" | grep -i "LnkCap:" | head -n1)
         link_line=$(echo "$lspci_output" | grep -i "LnkSta:" | head -n1)
@@ -234,8 +310,8 @@ while IFS='|' read -r gpu_idx pci gpu_name fan temp power_draw power_limit; do
         if [[ -n "$numa_line" ]]; then
             numa_node=$(echo "$numa_line" | awk '{print $NF}')
         else
-            if [[ -r "/sys/bus/pci/devices/$pci_lower/numa_node" ]]; then
-                numa_node=$(cat "/sys/bus/pci/devices/$pci_lower/numa_node")
+            if [[ -r "/sys/bus/pci/devices/$pci_norm/numa_node" ]]; then
+                numa_node=$(cat "/sys/bus/pci/devices/$pci_norm/numa_node")
                 [[ "$numa_node" == "-1" ]] && numa_node="0"
             fi
         fi
