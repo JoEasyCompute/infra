@@ -202,6 +202,25 @@ find_upstream_physical_slot() {
     echo ""
 }
 
+get_slim_candidates_for_root() {
+    local bdf="$1" root_seg
+    root_seg="${bdf#????:}"
+    root_seg="${root_seg%%:*}"
+    awk -F'|' -v root="$root_seg" '
+        $1 ~ "^0000:" root ":" && $2 ~ /^SLIM/ {
+            print $2
+        }
+    ' "$slot_file" | sort -u | awk '
+        BEGIN { first=1 }
+        {
+            if (!first) printf ", "
+            printf "%s", $0
+            first=0
+        }
+        END { if (!first) printf "\n" }
+    '
+}
+
 build_smbios_slotmap
 
 speed_to_gen() {
@@ -340,6 +359,11 @@ while IFS='|' read -r gpu_idx pci gpu_name fan temp power_draw power_limit; do
         upstream_bridge=$(find_upstream_bridge_bdf "$pci_norm")
         if [[ -n "$upstream_bridge" ]]; then
             slot_name="UPSTREAM ${upstream_bridge#0000:}"
+            slim_candidates=$(get_slim_candidates_for_root "$upstream_bridge")
+            if [[ -n "$slim_candidates" ]]; then
+                printf "GPU %s upstream bridge %s; SLIM candidates: %s\n" \
+                    "$gpu_idx" "${upstream_bridge#0000:}" "$slim_candidates" >> "$remark_file"
+            fi
         else
             slot_name="(Unknown)"
         fi
