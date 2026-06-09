@@ -350,7 +350,7 @@ Runs 100 forward passes of a 10,000×10,000 linear layer across all GPUs in scop
 
 **Fails if:** PyTorch install fails, `torchrun` not found, NCCL process group init fails, or any forward pass errors.
 
-**Runtime contract:** The lane uses the benchmark Python 3.11 runtime provisioned by `base-install.sh` (via `uv`). If only the host's default Python 3.12 runtime is available, the lane is treated as `NOT BEING RUN` instead of attempting a DDP run on an unsupported interpreter.
+**Runtime contract:** The lane uses the benchmark Python 3.11 runtime provisioned by `base-install.sh` (via `uv` or the installed `/opt/infra/python` tree). If only the host's default Python 3.12 runtime is available, the lane is treated as `NOT BEING RUN` instead of attempting a DDP run on an unsupported interpreter. PyTorch installs are force-refreshed so reruns do not keep stale wheel families alive in an existing venv.
 
 **Failure diagnostics:** On failure, the script now keeps the generated DDP repro script in `/tmp`, emits a condensed summary of the failing `local_rank` / child exit code, and prints a direct `torchrun` repro command plus a suggested debug rerun with `NCCL_DEBUG=INFO` and `TORCH_DISTRIBUTED_DEBUG=DETAIL`.
 
@@ -363,7 +363,8 @@ Runs 100 forward passes of a 10,000×10,000 linear layer across all GPUs in scop
 | 11.x | `cu118` |
 | 12.0–12.1 | `cu121` |
 | 12.2–12.4 | `cu124` |
-| 12.5+ | `cu128` |
+| 12.5–12.9 | `cu128` |
+| 13.0+ | `cu130` |
 
 **Notes:** On Ubuntu 24.04+, `--break-system-packages` is added to pip installs automatically (PEP 668 compliance).
 
