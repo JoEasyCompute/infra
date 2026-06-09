@@ -151,6 +151,25 @@ get_physical_slot_via_lspci() {
     lspci -s "$1" -vv 2>/dev/null | sed -n 's/.*Physical Slot:[[:space:]]*//p' | head -n1
 }
 
+find_upstream_physical_slot() {
+    local bdf="$1" path p next slot
+    path="$(readlink -f "/sys/bus/pci/devices/$bdf")" || { echo ""; return; }
+    while :; do
+        p="$(basename "$path")"
+        if [[ "$p" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]]; then
+            slot="$(get_physical_slot_via_lspci "$p")"
+            if [[ -n "$slot" ]]; then
+                echo "$slot"
+                return
+            fi
+        fi
+        next="$(readlink -f "$path/..")" || break
+        [[ "$next" == "$path" ]] && break
+        path="$next"
+    done
+    echo ""
+}
+
 build_smbios_slotmap
 
 speed_to_gen() {
@@ -280,7 +299,7 @@ while IFS='|' read -r gpu_idx pci gpu_name fan temp power_draw power_limit; do
         fi
     fi
     if [[ -z "$slot_name" ]]; then
-        slot_name=$(get_physical_slot_via_lspci "$pci_norm")
+        slot_name=$(find_upstream_physical_slot "$pci_norm")
     fi
     [[ -z "$slot_name" ]] && slot_name="(Unknown)"
 
