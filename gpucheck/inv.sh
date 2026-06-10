@@ -282,7 +282,7 @@ BEGIN {
         split($0, a, "|")
         left = trim(a[2])
         right = trim(a[3])
-        if (match(left, /^([0-9]+)[[:space:]]+(.+)[[:space:]]+On$/, m)) {
+        if (match(left, /^([0-9]+)[[:space:]]+(.+)[[:space:]]+(On|Off)$/, m)) {
             idx = m[1]
             name = trim(m[2])
         } else {
