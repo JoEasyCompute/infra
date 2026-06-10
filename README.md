@@ -402,6 +402,7 @@ Important scripts under [gpucheck/](gpucheck):
 
 Important recovery helpers under [install/](install):
 
+- [install/force-reboot.sh](install/force-reboot.sh): last-resort in-band SysRq reboot helper from the host console
 - [install/ipmi-power-cycle.sh](install/ipmi-power-cycle.sh): out-of-band BMC/IPMI chassis power-cycle helper for hosts that cannot complete an in-band reboot
 
 ### Monitoring
