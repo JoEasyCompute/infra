@@ -32,17 +32,42 @@ sudo grep -q "^ezc ALL=(ALL) NOPASSWD:ALL" /etc/sudoers.d/ezc || \
     echo "ezc ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/ezc > /dev/null || \
     { echo "Failed to add sudoers entry"; exit 1; }
 
+sudo tee /usr/local/sbin/nvidia-runtime-policy.sh > /dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+NVIDIA_SMI="/usr/bin/nvidia-smi"
+POWER_LIMIT="540"
+WAIT_SECONDS=300
+POLL_INTERVAL=2
+
+for ((elapsed=0; elapsed<WAIT_SECONDS; elapsed+=POLL_INTERVAL)); do
+  if [[ -e /dev/nvidiactl ]] && "$NVIDIA_SMI" -L >/dev/null 2>&1; then
+    break
+  fi
+  sleep "$POLL_INTERVAL"
+done
+
+if ! [[ -e /dev/nvidiactl ]] || ! "$NVIDIA_SMI" -L >/dev/null 2>&1; then
+  echo "[ERROR] NVIDIA devices were not ready within ${WAIT_SECONDS}s; power limit not applied." >&2
+  exit 1
+fi
+
+"$NVIDIA_SMI" -pm 1
+"$NVIDIA_SMI" -pl "$POWER_LIMIT"
+EOF
+sudo chmod 0755 /usr/local/sbin/nvidia-runtime-policy.sh
+
 sudo tee /etc/systemd/system/nvidia-runtime-policy.service > /dev/null <<'EOF'
 [Unit]
 Description=NVIDIA runtime policy (persistence + power cap)
-After=multi-user.target
-ConditionPathExists=/dev/nvidiactl
-
+After=multi-user.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/nvidia-smi -pm 1
-ExecStart=/usr/bin/nvidia-smi -pl 540
+ExecStart=/usr/local/sbin/nvidia-runtime-policy.sh
+TimeoutStartSec=360
 RemainAfterExit=yes
 
 

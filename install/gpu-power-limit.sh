@@ -22,6 +22,7 @@ DEFAULT_FALLBACK_WATTS=300   # used if no preset matches and no --override given
 # ─── Config ───────────────────────────────────────────────────────────────────
 SERVICE_NAME="nvidia-runtime-policy"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+HELPER_FILE="/usr/local/sbin/${SERVICE_NAME}.sh"
 NVIDIA_SMI="/usr/bin/nvidia-smi"
 DRY_RUN=false
 OVERRIDE_WATTS=""
@@ -147,15 +148,39 @@ if [[ "$VALIDATION_FAILED" == true ]]; then
 fi
 
 # ─── Build service file content ───────────────────────────────────────────────
+HELPER_CONTENT="#!/usr/bin/env bash
+set -euo pipefail
+
+NVIDIA_SMI=\"${NVIDIA_SMI}\"
+POWER_LIMIT=\"${POWER_LIMIT}\"
+WAIT_SECONDS=300
+POLL_INTERVAL=2
+
+for ((elapsed=0; elapsed<WAIT_SECONDS; elapsed+=POLL_INTERVAL)); do
+    if [[ -e /dev/nvidiactl ]] && \"\$NVIDIA_SMI\" -L >/dev/null 2>&1; then
+        break
+    fi
+    sleep \"\$POLL_INTERVAL\"
+done
+
+if ! [[ -e /dev/nvidiactl ]] || ! \"\$NVIDIA_SMI\" -L >/dev/null 2>&1; then
+    echo \"[ERROR] NVIDIA devices were not ready within \${WAIT_SECONDS}s; power limit not applied.\" >&2
+    exit 1
+fi
+
+\"\$NVIDIA_SMI\" -pm 1
+\"\$NVIDIA_SMI\" -pl \"\$POWER_LIMIT\"
+"
+
 SERVICE_CONTENT="[Unit]
 Description=NVIDIA runtime policy (persistence + power cap @ ${POWER_LIMIT}W)
-After=multi-user.target
-ConditionPathExists=/dev/nvidiactl
+After=multi-user.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
 
 [Service]
 Type=oneshot
-ExecStart=${NVIDIA_SMI} -pm 1
-ExecStart=${NVIDIA_SMI} -pl ${POWER_LIMIT}
+ExecStart=${HELPER_FILE}
+TimeoutStartSec=360
 RemainAfterExit=yes
 
 [Install]
@@ -165,6 +190,10 @@ WantedBy=multi-user.target"
 echo ""
 echo -e "${CYAN}${BOLD}── Service file: ${SERVICE_FILE} $( [[ "$DRY_RUN" == true ]] && echo "(DRY-RUN — not written)" ) ──${NC}"
 echo "$SERVICE_CONTENT"
+echo -e "${CYAN}────────────────────────────────────────────────────────────${NC}"
+echo ""
+echo -e "${CYAN}${BOLD}── Helper file: ${HELPER_FILE} $( [[ "$DRY_RUN" == true ]] && echo "(DRY-RUN — not written)" ) ──${NC}"
+echo "$HELPER_CONTENT"
 echo -e "${CYAN}────────────────────────────────────────────────────────────${NC}"
 echo ""
 
@@ -180,6 +209,11 @@ fi
 info "Writing ${SERVICE_FILE} ..."
 echo "$SERVICE_CONTENT" | tee "$SERVICE_FILE" > /dev/null
 success "Service file written."
+
+info "Writing ${HELPER_FILE} ..."
+echo "$HELPER_CONTENT" | tee "$HELPER_FILE" > /dev/null
+chmod 0755 "$HELPER_FILE"
+success "Helper script written."
 
 info "Running: systemctl daemon-reload"
 systemctl daemon-reload
