@@ -81,18 +81,20 @@ The script writes the following service file to `/etc/systemd/system/nvidia-runt
 ```ini
 [Unit]
 Description=NVIDIA runtime policy (persistence + power cap @ <WATTS>W)
-After=multi-user.target
-ConditionPathExists=/dev/nvidiactl
+After=multi-user.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/nvidia-smi -pm 1
-ExecStart=/usr/bin/nvidia-smi -pl <WATTS>
+ExecStart=/usr/local/sbin/nvidia-runtime-policy.sh
+TimeoutStartSec=360
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+The helper script waits for `/dev/nvidiactl` and `nvidia-smi -L` to become ready after boot before applying persistence mode and the requested power cap. This avoids the boot-order race where the service could otherwise be skipped if the driver is not ready yet.
 
 Then runs:
 
