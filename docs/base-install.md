@@ -118,6 +118,8 @@ This is intended for unattended GPU nodes where a wedged driver, kernel fault, o
 
 This policy is a first-layer, in-band recovery aid. It can help when a NVIDIA driver failure turns into a kernel oops, panic, hung-task detection, or a userspace shutdown timeout. It is not guaranteed to recover every `GPU has fallen off the bus` case: if the kernel reboot path itself blocks while waiting on a disappeared PCIe GPU, the OS may still be unable to complete a warm reboot. In that condition, an out-of-band BMC/IPMI power cycle is the reliable recovery path because it does not depend on the wedged host OS.
 
+For a last-resort in-band emergency reboot from the host console, use `install/force-reboot.sh --yes` as root. It syncs filesystems, remounts them read-only, then triggers a SysRq reboot. It defaults to dry-run unless `--yes` is supplied.
+
 For manual out-of-band recovery, use `install/ipmi-power-cycle.sh` from an operator machine that can reach the BMC/IPMI network:
 
 ```bash
