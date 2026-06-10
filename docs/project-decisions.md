@@ -91,6 +91,7 @@ Current behavior:
 - the policy is host-wide: a kernel oops or hung task from any subsystem can trigger panic/reboot, not only NVIDIA/GPU faults
 - this is intentional for unattended compute nodes where automatic recovery is preferred over leaving a wedged host online for live debugging
 - this is a first-layer, in-band mitigation; it does not guarantee recovery when the kernel reboot path blocks on a GPU that has fallen off the PCIe bus
+- `install/force-reboot.sh` provides the in-band emergency SysRq reboot path for an operator at the host console when a normal reboot sequence is not completing
 - `install/ipmi-power-cycle.sh` provides the out-of-band manual recovery path for that condition by asking the BMC/IPMI controller to power-cycle the chassis
 - uninstall removes the managed systemd block and the sysctl drop-in
 
