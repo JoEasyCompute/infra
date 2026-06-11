@@ -69,10 +69,11 @@ fi
 slot_file=$(mktemp)
 lines_file=$(mktemp)
 remark_file=$(mktemp)
+note_file=$(mktemp)
 smi_out_file=$(mktemp)
 smi_err_file=$(mktemp)
 gpu_raw_file=$(mktemp)
-trap 'rm -f "$slot_file" "$lines_file" "$remark_file" "$smi_out_file" "$smi_err_file" "$gpu_raw_file"' EXIT
+trap 'rm -f "$slot_file" "$lines_file" "$remark_file" "$note_file" "$smi_out_file" "$smi_err_file" "$gpu_raw_file"' EXIT
 
 declare -A SLOT_BY_UPSTREAM
 
@@ -364,7 +365,7 @@ while IFS='|' read -r gpu_idx pci gpu_name fan temp power_draw power_limit; do
             if [[ -n "$slim_group" ]]; then
                 slot_name="$slim_group"
                 printf "GPU %s upstream bridge %s; SLIM group: %s\n" \
-                    "$gpu_idx" "${upstream_bridge#0000:}" "$slim_group" >> "$remark_file"
+                    "$gpu_idx" "${upstream_bridge#0000:}" "$slim_group" >> "$note_file"
             else
                 slot_name="UPSTREAM ${upstream_bridge#0000:}"
             fi
@@ -492,6 +493,18 @@ for pci_lower in "${!bus_lost_by_pci[@]}"; do
     printf "PCI %s in slot %s (%s): BusLost (nvidia-smi reported device handle error)\n" "$pci_lower" "$slot_name" "$model" >> "$remark_file"
 done
 
+if [[ -s "$remark_file" ]]; then
+    echo
+    echo "=== Remark: GPUs that appear to have fallen off the bus ==="
+    cat "$remark_file"
+fi
+
+if [[ -s "$note_file" ]]; then
+    echo
+    echo "=== Slot Mapping Notes ==="
+    cat "$note_file"
+fi
+
 # 2. CSV Output
 if [[ -n "$csv_file" ]]; then
     echo "Idx,Slot,PCI,Name,Serial,GenCurrent,GenMax,WidthCurrent,WidthMax,LinkSpeed,LinkWidth,TempC,PowerDrawW,PowerLimitW,NUMA,Driver,Status" > "$csv_file"
@@ -525,10 +538,4 @@ if [[ -n "$json_file" ]]; then
         ] | to_entries | map(.value + {index: .key})
     ' "$lines_file" > "$json_file"
     echo "JSON written to $json_file"
-fi
-
-if [[ -s "$remark_file" ]]; then
-    echo ""
-    echo "=== Remark: GPUs that appear to have fallen off the bus ==="
-    cat "$remark_file"
 fi
