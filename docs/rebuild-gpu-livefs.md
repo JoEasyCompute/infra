@@ -51,6 +51,8 @@ The script writes:
 
 It also prints an example iPXE stanza that boots the generated image.
 
+If you want a bootable ISO from the same prepared tree, run `install/build-gpu-liveiso.sh` next.
+
 ## Operational Notes
 
 - The generated live image installs `casper`, `live-boot`, `live-config`, `initramfs-tools`, `network-manager`, and `openssh-server` inside the chroot before rebuilding initramfs.
