@@ -94,7 +94,7 @@ Current behavior:
 - `install/force-reboot.sh` provides the in-band emergency SysRq reboot path for an operator at the host console when a normal reboot sequence is not completing
 - `install/ipmi-power-cycle.sh` provides the out-of-band manual recovery path for that condition by asking the BMC/IPMI controller to power-cycle the chassis
 - `install/rebuild-gpu-livefs.sh` is the host-side live-image rebuild helper for regenerating the `gpu-test` netboot image from a mounted USB root filesystem
-- `install/build-gpu-liveiso.sh` is the standalone helper that turns a mounted USB root filesystem into a bootable `gpu-test` ISO
+- `install/build-gpu-liveiso.sh` is the standalone helper that turns a mounted USB root filesystem into a bootable `gpu-test` ISO without requiring the intermediate `rebuild-gpu-livefs.sh` step
 - uninstall removes the managed systemd block and the sysctl drop-in
 
 ### 7. Sustained stress detects 12V-2x6 / 12VHPWR power anomalies as remarks by default
