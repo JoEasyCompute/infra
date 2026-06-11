@@ -8,7 +8,7 @@
 
 ## Overview
 
-`amd-base-install.sh` provisions a bare Ubuntu server with the full AMD GPU software stack needed for compute and AI/ML workloads. It installs the AMDGPU DKMS kernel driver, the ROCm software stack, auto-detects the installed GPU architecture to configure the PyTorch environment, and clones the `joeasycompute/infra` repo.
+`amd-base-install.sh` provisions a bare Ubuntu server with the full AMD GPU software stack needed for compute and AI/ML workloads. It installs the AMDGPU DKMS kernel driver, the ROCm software stack, auto-detects the installed GPU architecture to configure the PyTorch environment, and clones the `joeasycompute/infra` repo. It also mirrors the NVIDIA base-install operator-tool baseline so day-to-day inventory, storage, and network checks use the same local CLI toolkit.
 
 The script is GPU-agnostic — it works for any ROCm-supported AMD GPU including consumer Radeon (RX 7000/9000 series), professional Radeon PRO/AI PRO, and Instinct data centre cards. Common examples:
 
