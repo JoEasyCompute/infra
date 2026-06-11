@@ -393,8 +393,9 @@ It writes timestamped logs in the same directory where `fulltest.sh` is run.
 
 Important scripts under [gpucheck/](gpucheck):
 
-- [gpucheck/inv.sh](gpucheck/inv.sh): GPU to PCIe slot mapping, link details, power, temperature, NUMA, CSV/JSON output
-- `srv-inv.sh`, `srv-inv-lite.sh`, `modinv.sh`, `dimm-inv.sh`, `bare-inv.sh`: broader host inventory helpers
+- [gpucheck/inv.sh](gpucheck/inv.sh): GPU to PCIe slot mapping, link details, power, temperature, NUMA, IOMMU group, CSV/JSON output
+- [gpucheck/bare-inv.sh](gpucheck/bare-inv.sh): NVIDIA-only inventory helper with the same slot, NUMA, and IOMMU grouping, plus bus-loss remarks
+- `srv-inv.sh`, `srv-inv-lite.sh`, `modinv.sh`, `dimm-inv.sh`: broader host inventory helpers
 - `gpucheck/inv.sh` and `gpucheck/bare-inv.sh` print a final remark section naming any GPU that appears to have fallen off the bus and its associated slot; ordinary below-max or degraded link states are not remarked
 - `gpu-watchdog.sh` plus matching `.service` and `.timer`: watchdog support
 

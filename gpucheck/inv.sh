@@ -80,8 +80,8 @@ declare -A SLOT_BY_UPSTREAM
 echo -e "=== PCIe Slot ↔ GPU Mapping ==="
 echo ""
 # Header for console
-printf "%-4s %-20s %-14s %-25s %-16s %-10s %-10s %-10s %-12s %-10s %-8s %-10s %-8s\n" \
-    "Idx" "Slot" "PCI Addr" "GPU Name" "Serial" "Gen(C/M)" "Wdth(C/M)" "Lnk(Sp/W)" "Temp" "Pwr(Draw/Lim)" "NUMA" "Driver" "Status"
+printf "%-4s %-20s %-14s %-25s %-16s %-10s %-10s %-10s %-12s %-10s %-8s %-8s %-10s %-8s\n" \
+    "Idx" "Slot" "PCI Addr" "GPU Name" "Serial" "Gen(C/M)" "Wdth(C/M)" "Lnk(Sp/W)" "Temp" "Pwr(Draw/Lim)" "NUMA" "IOMMU" "Driver" "Status"
 echo "-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
 
 # Build slot-to-address map
@@ -201,6 +201,14 @@ find_upstream_physical_slot() {
         path="$next"
     done
     echo ""
+}
+
+get_iommu_group() {
+    local bdf="$1" group_path
+    [[ -e "/sys/bus/pci/devices/$bdf/iommu_group" ]] || { echo "-"; return; }
+    group_path="$(readlink -f "/sys/bus/pci/devices/$bdf/iommu_group" 2>/dev/null || true)"
+    [[ -n "$group_path" ]] || { echo "-"; return; }
+    basename "$group_path"
 }
 
 format_slim_pair_label() {
@@ -447,6 +455,7 @@ while IFS='|' read -r gpu_idx pci gpu_name fan temp power_draw power_limit; do
     width_fmt="${width_cur}/${width_max}"
     link_fmt="${link_speed}/${link_width}"
     power_fmt="${power_draw}/${power_limit}W"
+    iommu_group=$(get_iommu_group "$pci_norm")
     serial="N/A"
 
     if [[ "$bus_lost" -eq 1 ]]; then
@@ -460,7 +469,7 @@ while IFS='|' read -r gpu_idx pci gpu_name fan temp power_draw power_limit; do
         status_color="${GREEN}OK${NC}"
     fi
 
-    echo "$gpu_idx|$slot_name|$pci|$gpu_name|$serial|$gen_cur|$gen_max|$width_cur|$width_max|$link_speed|$link_width|$temp|$power_draw|$power_limit|$numa_node|$driver_version|$status_text|$status_color" >> "$lines_file"
+    echo "$gpu_idx|$slot_name|$pci|$gpu_name|$serial|$gen_cur|$gen_max|$width_cur|$width_max|$link_speed|$link_width|$temp|$power_draw|$power_limit|$numa_node|$iommu_group|$driver_version|$status_text|$status_color" >> "$lines_file"
 done < "$gpu_raw_file"
 
 # Sort by SLOT (best effort)
@@ -469,7 +478,7 @@ sort -t'|' -k2,2V "$lines_file" -o "$lines_file"
 # --- Output Generation ---
 
 # 1. Console Output
-while IFS='|' read -r gpu_idx slot pci name serial gc gm wc wm ls lw temp pd pl numa drv st_txt st_col; do
+while IFS='|' read -r gpu_idx slot pci name serial gc gm wc wm ls lw temp pd pl numa iommu drv st_txt st_col; do
     gen_fmt="${gc}/${gm}"
     width_fmt="${wc}/${wm}"
     link_speed_short="${ls%% *}"
@@ -486,11 +495,12 @@ while IFS='|' read -r gpu_idx slot pci name serial gc gm wc wm ls lw temp pd pl 
     temp_disp="$(clip "${temp}C" 12)"
     power_disp="$(clip "$power_fmt" 10)"
     numa_disp="$(clip "$numa" 8)"
+    iommu_disp="$(clip "$iommu" 8)"
     drv_disp="$(clip "$drv" 10)"
     status_disp="$(clip "$st_txt" 8)"
 
-    printf "%-4s %-20s %-14s %-25s %-16s %-10s %-10s %-10s %-12s %-10s %-8s %-10s %-8b\n" \
-        "$gpu_idx" "$slot_disp" "$pci_disp" "$name_disp" "$serial_disp" "$gen_disp" "$width_disp" "$link_disp" "$temp_disp" "$power_disp" "$numa_disp" "$drv_disp" "$status_disp"
+    printf "%-4s %-20s %-14s %-25s %-16s %-10s %-10s %-10s %-12s %-10s %-8s %-8s %-10s %-8b\n" \
+        "$gpu_idx" "$slot_disp" "$pci_disp" "$name_disp" "$serial_disp" "$gen_disp" "$width_disp" "$link_disp" "$temp_disp" "$power_disp" "$numa_disp" "$iommu_disp" "$drv_disp" "$status_disp"
 
     if [[ "$st_txt" == "BusLost" ]]; then
         printf "GPU %s in slot %s (%s): %s\n" "$gpu_idx" "$slot" "$pci" "$st_txt" >> "$remark_file"
@@ -523,9 +533,9 @@ fi
 
 # 2. CSV Output
 if [[ -n "$csv_file" ]]; then
-    echo "Idx,Slot,PCI,Name,Serial,GenCurrent,GenMax,WidthCurrent,WidthMax,LinkSpeed,LinkWidth,TempC,PowerDrawW,PowerLimitW,NUMA,Driver,Status" > "$csv_file"
-    while IFS='|' read -r gpu_idx slot pci name serial gc gm wc wm ls lw temp pd pl numa drv st_txt st_col; do
-        echo "$gpu_idx,\"$slot\",\"$pci\",\"$name\",\"$serial\",$gc,$gm,$wc,$wm,\"$ls\",\"$lw\",$temp,$pd,$pl,$numa,\"$drv\",\"$st_txt\"" >> "$csv_file"
+    echo "Idx,Slot,PCI,Name,Serial,GenCurrent,GenMax,WidthCurrent,WidthMax,LinkSpeed,LinkWidth,TempC,PowerDrawW,PowerLimitW,NUMA,IOMMU,Driver,Status" > "$csv_file"
+    while IFS='|' read -r gpu_idx slot pci name serial gc gm wc wm ls lw temp pd pl numa iommu drv st_txt st_col; do
+        echo "$gpu_idx,\"$slot\",\"$pci\",\"$name\",\"$serial\",$gc,$gm,$wc,$wm,\"$ls\",\"$lw\",$temp,$pd,$pl,$numa,\"$iommu\",\"$drv\",\"$st_txt\"" >> "$csv_file"
     done < "$lines_file"
     echo "CSV written to $csv_file"
 fi
@@ -548,8 +558,8 @@ if [[ -n "$json_file" ]]; then
             },
             thermals: {temp_c: .[11]},
             power: {draw_w: .[12], limit_w: .[13]},
-            system: {numa_node: .[14], driver: .[15]},
-            status: .[16]
+            system: {numa_node: .[14], iommu_group: .[15], driver: .[16]},
+            status: .[17]
           }
         ] | to_entries | map(.value + {index: .key})
     ' "$lines_file" > "$json_file"

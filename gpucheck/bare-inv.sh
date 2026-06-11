@@ -51,6 +51,14 @@ get_numa(){
   echo "-"
 }
 
+get_iommu_group(){
+  local addr="$1" grp
+  [[ -e "/sys/bus/pci/devices/$addr/iommu_group" ]] || { echo "-"; return; }
+  grp="$(readlink -f "/sys/bus/pci/devices/$addr/iommu_group" 2>/dev/null || true)"
+  [[ -n "$grp" ]] || { echo "-"; return; }
+  basename "$grp"
+}
+
 # --- Link info (handles "16GT/s" and "16.0 GT/s PCIe") ---
 extract_gts(){ echo "${1:-}" | sed -n 's/.*Speed[[:space:]]*\([0-9.][0-9.]*\)[[:space:]]*GT\/s.*/\1/p'; }
 normalize_speed(){ local n="$1"; [[ -n "$n" ]] && echo "${n} GT/s" || echo ""; }
@@ -144,11 +152,11 @@ done
 
 # --- Output (fixed widths; model clipped) ---
 if [[ -n "$csv_file" && "$csv_file" != "--debug" ]]; then
-    echo "Idx,Slot,PCI Address,Model,PCI IDs,Class,Gen(Current),Width(Current),Gen(Max),Width(Max),Speed,Numa,Status" > "$csv_file"
+    echo "Idx,Slot,PCI Address,Model,PCI IDs,Class,Gen(Current),Width(Current),Gen(Max),Width(Max),Speed,Numa,IOMMU,Status" > "$csv_file"
 fi
 
-printf "%-5s %-12s %-30s %-46s %-14s %-6s %-9s %-9s %-10s %-4s\n" \
-  "IDX" "PCI-ADDR" "SLOT" "MODEL" "PCI-IDS" "CLASS" "CUR_GEN/x" "MAX_GEN/x" "CUR_SPEED" "NUMA"
+printf "%-5s %-12s %-30s %-46s %-14s %-6s %-9s %-9s %-10s %-4s %-6s\n" \
+  "IDX" "PCI-ADDR" "SLOT" "MODEL" "PCI-IDS" "CLASS" "CUR_GEN/x" "MAX_GEN/x" "CUR_SPEED" "NUMA" "IOMMU"
 printf "%s\n" "--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
 
 # Buffer rows as tab-separated for robust sorting/rehydration
@@ -159,6 +167,7 @@ for addr in "${gpu_addrs[@]}"; do
   ids="$(get_ids "$addr")"
   read -r cur_gen cur_w max_gen max_w speed_gts <<<"$(get_link_info "$addr")"
   numa="$(get_numa "$addr")"
+  iommu="$(get_iommu_group "$addr")"
 
   slot=""; [[ "${#SLOT_BY_UPSTREAM[@]}" -gt 0 ]] && slot="$(nearest_slot_for "$addr" || true)"
   [[ -z "$slot" ]] && slot="$(get_physical_slot_via_lspci "$addr")"
@@ -173,8 +182,8 @@ for addr in "${gpu_addrs[@]}"; do
   if [[ "$cur_w" =~ ^[0-9]+$ && "$max_w" =~ ^[0-9]+$ && "$cur_w" -lt "$max_w" ]]; then degrade="(WIDTH↓)"; status="Degraded"; fi
   if [[ "$cur_gen" =~ ^Gen([0-9]+)$ && "$max_gen" =~ ^Gen([0-9]+)$ && "${BASH_REMATCH[1]}" -lt "${max_gen#Gen}" ]]; then degrade="${degrade:+$degrade }(GEN↓)"; status="Degraded"; fi
 
-  # Store as TSV: SLOT, ADDR, MODEL, IDS, CLASS, CUR_GEN, CUR_W, MAX_GEN, MAX_W, SPEED, NUMA, DEGRADE_MARKER, STATUS
-  rows+=("$slot"$'\t'"$addr"$'\t'"$(clip "$model" 46)"$'\t'"$ids"$'\t'"$class"$'\t'"${cur_gen:-?}"$'\t'"${cur_w:-?}"$'\t'"${max_gen:-?}"$'\t'"${max_w:-?}"$'\t'"${speed_gts:-?}"$'\t'"${numa:-?}"$'\t'"$degrade"$'\t'"$status")
+  # Store as TSV: SLOT, ADDR, MODEL, IDS, CLASS, CUR_GEN, CUR_W, MAX_GEN, MAX_W, SPEED, NUMA, IOMMU, DEGRADE_MARKER, STATUS
+  rows+=("$slot"$'\t'"$addr"$'\t'"$(clip "$model" 46)"$'\t'"$ids"$'\t'"$class"$'\t'"${cur_gen:-?}"$'\t'"${cur_w:-?}"$'\t'"${max_gen:-?}"$'\t'"${max_w:-?}"$'\t'"${speed_gts:-?}"$'\t'"${numa:-?}"$'\t'"${iommu:-?}"$'\t'"$degrade"$'\t'"$status")
 done
 
 # Sort by first integer found in SLOT label; unknown/no-integer slots go last
@@ -190,21 +199,21 @@ if ((${#rows[@]} > 0)); then
       { 
         idx++; 
         # Table Output
-        # Fields: 1=SLOT 2=ADDR 3=MODEL 4=IDS 5=CLASS 6=CGEN 7=CW 8=MGEN 9=MW 10=SPEED 11=NUMA 12=DEGRADE 13=STATUS
-        cur_field=$6 "/" $7 $12
+        # Fields: 1=SLOT 2=ADDR 3=MODEL 4=IDS 5=CLASS 6=CGEN 7=CW 8=MGEN 9=MW 10=SPEED 11=NUMA 12=IOMMU 13=DEGRADE 14=STATUS
+        cur_field=$6 "/" $7 $13
         max_field=$8 "/" $9
-        printf "%-5s %-12s %-30s %-46s %-14s %-6s %-9s %-9s %-10s %-4s\n", \
-          idx, $2, $1, $3, $4, $5, cur_field, max_field, $10, $11
+        printf "%-5s %-12s %-30s %-46s %-14s %-6s %-9s %-9s %-10s %-4s %-6s\n", \
+          idx, $2, $1, $3, $4, $5, cur_field, max_field, $10, $11, $12
         
         # CSV Output
         if (csv != "" && csv != "--debug") {
-             # Idx,Slot,PCI Address,Model,PCI IDs,Class,Gen(Current),Width(Current),Gen(Max),Width(Max),Speed,Numa,Status
-             printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n", \
-             idx, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $13 >> csv
+             # Idx,Slot,PCI Address,Model,PCI IDs,Class,Gen(Current),Width(Current),Gen(Max),Width(Max),Speed,Numa,IOMMU,Status
+             printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n", \
+             idx, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $14 >> csv
         }
 
-        if ($13 == "BusLost") {
-             printf "GPU %s in slot %s (%s, %s): %s %s\n", idx, $1, $2, $3, $13, ($12 != "" ? $12 : "") >> remark_file
+        if ($14 == "BusLost") {
+             printf "GPU %s in slot %s (%s, %s): %s %s\n", idx, $1, $2, $3, $14, ($13 != "" ? $13 : "") >> remark_file
         }
       }'
 fi
