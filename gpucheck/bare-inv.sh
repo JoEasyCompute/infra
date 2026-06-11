@@ -6,7 +6,8 @@ set -euo pipefail
 # Optional CSV output file
 csv_file="${1:-}"
 remark_file=$(mktemp)
-trap 'rm -f "$remark_file"' EXIT
+slot_file=$(mktemp)
+trap 'rm -f "$remark_file" "$slot_file"' EXIT
 
 have(){ command -v "$1" >/dev/null 2>&1; }
 require(){ for c in "$@"; do have "$c" || { echo "ERROR: missing dependency: $c" >&2; exit 1; }; done; }
@@ -108,6 +109,58 @@ get_link_info(){
 # --- Physical Slot fallback ---
 get_physical_slot_via_lspci(){ lspci -s "$1" -vv 2>/dev/null | sed -n 's/.*Physical Slot:[[:space:]]*//p' | head -n1; }
 
+find_upstream_bridge_bdf(){
+  local bdf="$1" path p next
+  path="$(readlink -f "/sys/bus/pci/devices/$bdf")" || { echo ""; return; }
+  while :; do
+    next="$(readlink -f "$path/..")" || break
+    [[ "$next" == "$path" ]] && break
+    p="$(basename "$next")"
+    if [[ "$p" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]]; then
+      echo "$p"
+      return
+    fi
+    path="$next"
+  done
+  echo ""
+}
+
+format_slim_pair_label(){
+  local label="$1"
+  if [[ "$label" =~ ^(SLIM[0-9]+)_([0-9]+)$ ]]; then
+    local prefix="${BASH_REMATCH[1]}"
+    local port="${BASH_REMATCH[2]}"
+    echo "${prefix}_${port} + ${prefix}_$((port + 1))"
+  else
+    echo "$label"
+  fi
+}
+
+get_slim_pair_for_root(){
+  local bdf="$1" root_seg
+  root_seg="${bdf#????:}"
+  root_seg="${root_seg%%:*}"
+  local pair_labels=()
+  while IFS= read -r group; do
+    [[ -n "$group" ]] || continue
+    pair_labels+=("$(format_slim_pair_label "$group")")
+  done < <(
+    awk -F'|' -v root="$root_seg" '
+    $1 ~ "^0000:" root ":" && $2 ~ /^SLIM/ {
+      group=$2
+      sub(/-[^-]+$/, "", group)
+      print group
+    }
+    ' "$slot_file" | sort -u
+  )
+  local joined="" pair
+  for pair in "${pair_labels[@]}"; do
+    [[ -n "$joined" ]] && joined+=", "
+    joined+="$pair"
+  done
+  echo "$joined"
+}
+
 # --- SMBIOS upstream map (addr → slot) ---
 declare -A SLOT_BY_UPSTREAM
 if have dmidecode; then
@@ -116,7 +169,11 @@ if have dmidecode; then
   else
       while IFS= read -r line; do
         addr="${line%% *}"; slot="${line#* }"; addr="$(echo "$addr" | tr 'A-Z' 'a-z')"
-        [[ "$addr" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ && -n "$slot" ]] && { SLOT_BY_UPSTREAM["$addr"]="$slot"; logd "SMBIOS map: $addr -> $slot"; }
+        if [[ "$addr" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ && -n "$slot" ]]; then
+          SLOT_BY_UPSTREAM["$addr"]="$slot"
+          printf "%s|%s\n" "$addr" "$slot" >> "$slot_file"
+          logd "SMBIOS map: $addr -> $slot"
+        fi
       done < <( dmidecode -t slot 2>/dev/null | awk '
           BEGIN{ slot=""; addr="" }
           function emit(){ if(slot!="" && addr!=""){ printf "%s %s\n", tolower(addr), slot } slot=""; addr="" }
@@ -155,8 +212,8 @@ if [[ -n "$csv_file" && "$csv_file" != "--debug" ]]; then
     echo "Idx,Slot,PCI Address,Model,PCI IDs,Class,Gen(Current),Width(Current),Gen(Max),Width(Max),Speed,Numa,IOMMU,Status" > "$csv_file"
 fi
 
-printf "%-5s %-12s %-30s %-46s %-14s %-6s %-9s %-9s %-10s %-4s %-6s\n" \
-  "IDX" "PCI-ADDR" "SLOT" "MODEL" "PCI-IDS" "CLASS" "CUR_GEN/x" "MAX_GEN/x" "CUR_SPEED" "NUMA" "IOMMU"
+printf "%-5s %-20s %-12s %-46s %-14s %-6s %-9s %-9s %-10s %-4s %-6s\n" \
+  "IDX" "SLOT" "PCI-ADDR" "MODEL" "PCI-IDS" "CLASS" "CUR_GEN/x" "MAX_GEN/x" "CUR_SPEED" "NUMA" "IOMMU"
 printf "%s\n" "--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------"
 
 # Buffer rows as tab-separated for robust sorting/rehydration
@@ -171,6 +228,13 @@ for addr in "${gpu_addrs[@]}"; do
 
   slot=""; [[ "${#SLOT_BY_UPSTREAM[@]}" -gt 0 ]] && slot="$(nearest_slot_for "$addr" || true)"
   [[ -z "$slot" ]] && slot="$(get_physical_slot_via_lspci "$addr")"
+  if [[ -z "$slot" || "$slot" == "-" ]]; then
+    upstream_bridge="$(find_upstream_bridge_bdf "$addr")"
+    if [[ -n "$upstream_bridge" ]]; then
+      slim_pair="$(get_slim_pair_for_root "$upstream_bridge")"
+      [[ -n "$slim_pair" ]] && slot="$slim_pair"
+    fi
+  fi
   [[ -z "$slot" ]] && slot="-"
 
   degrade=""
@@ -202,8 +266,8 @@ if ((${#rows[@]} > 0)); then
         # Fields: 1=SLOT 2=ADDR 3=MODEL 4=IDS 5=CLASS 6=CGEN 7=CW 8=MGEN 9=MW 10=SPEED 11=NUMA 12=IOMMU 13=DEGRADE 14=STATUS
         cur_field=$6 "/" $7 $13
         max_field=$8 "/" $9
-        printf "%-5s %-12s %-30s %-46s %-14s %-6s %-9s %-9s %-10s %-4s %-6s\n", \
-          idx, $2, $1, $3, $4, $5, cur_field, max_field, $10, $11, $12
+        printf "%-5s %-20s %-12s %-46s %-14s %-6s %-9s %-9s %-10s %-4s %-6s\n", \
+          idx, $1, $2, $3, $4, $5, cur_field, max_field, $10, $11, $12
         
         # CSV Output
         if (csv != "" && csv != "--debug") {
