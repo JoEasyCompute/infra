@@ -522,7 +522,12 @@ detect_system() {
             else TORCH_CUDA="cu128"
             fi
             ;;
-        13) TORCH_CUDA="cu130" ;;
+        13)
+            # PyTorch publishes cu132 as the latest CUDA 13 wheel family.
+            if [ "$CUDA_MINOR" -ge 2 ]; then TORCH_CUDA="cu132"
+            else TORCH_CUDA="cu130"
+            fi
+            ;;
         *)  TORCH_CUDA="cu128" ;;
     esac
     log "  PyTorch wheel       : https://download.pytorch.org/whl/$TORCH_CUDA"
