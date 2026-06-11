@@ -364,7 +364,8 @@ Runs 100 forward passes of a 10,000×10,000 linear layer across all GPUs in scop
 | 12.0–12.1 | `cu121` |
 | 12.2–12.4 | `cu124` |
 | 12.5–12.9 | `cu128` |
-| 13.0+ | `cu130` |
+| 13.0–13.1 | `cu130` |
+| 13.2–13.3 | `cu132` |
 
 **Notes:** On Ubuntu 24.04+, `--break-system-packages` is added to pip installs automatically (PEP 668 compliance).
 
