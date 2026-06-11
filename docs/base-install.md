@@ -1,8 +1,11 @@
 # base-install.sh
 
 GPU node base installation script for vast.ai and production deployments.
-Installs the full NVIDIA/CUDA stack on a fresh Ubuntu node, with a matching
-uninstall path that restores the system to a clean OS state for reprovisioning.
+Installs the full NVIDIA/CUDA stack on a fresh Ubuntu node by default, with an
+optional `--no-gpu-stack` mode that skips the NVIDIA driver, CUDA toolkit,
+DCGM, and gpu-burn install path while still setting up the general host tools.
+The matching uninstall path restores the system to a clean OS state for
+reprovisioning.
 
 **Version:** 1.9  
 **Supports:** Ubuntu 22.04 / 24.04 / 26.04 (x86_64)
@@ -16,8 +19,8 @@ uninstall path that restores the system to a clean OS state for reprovisioning.
 | OS | Ubuntu 22.04 (Jammy), 24.04 (Noble), or 26.04 (Resolute), x86_64 only |
 | Disk space | 15 GB free on `/usr` |
 | Access | User with passwordless `sudo` |
-| Network | Reachable: `developer.download.nvidia.com`, `github.com` |
-| Secure Boot | Must be **disabled** in BIOS (DKMS modules won't load otherwise) |
+| Network | Reachable: `developer.download.nvidia.com`, `github.com` (NVIDIA repo only required when installing the GPU stack) |
+| Secure Boot | Must be **disabled** in BIOS for the NVIDIA GPU stack path (DKMS modules won't load otherwise) |
 
 ---
 
@@ -51,6 +54,7 @@ Options:
   --driver  <575|580|595|610>        NVIDIA driver version (default: interactive prompt)
   --cuda    <12-9|13|13.3>           CUDA toolkit version  (default: interactive prompt)
   --yes                      Non-interactive mode, skip all prompts, use defaults
+  --no-gpu-stack             Skip NVIDIA driver / CUDA toolkit / DCGM / gpu-burn install
   --freeze-gpu-stack         Hold the validated NVIDIA/CUDA packages after install
   --unfreeze-gpu-stack       Temporarily unhold NVIDIA/CUDA packages before install, then re-hold after validation
   --uninstall                Full clean removal — restores system to post-OS-install state
@@ -74,6 +78,9 @@ before touching the system.
 ./base-install.sh --driver 595 --cuda 13.3
 ./base-install.sh --driver 610 --cuda 13.3
 ./base-install.sh --driver 575 --cuda 12-9
+
+# Base host tooling only, skip NVIDIA driver/CUDA/DCGM/gpu-burn
+./base-install.sh --no-gpu-stack
 ```
 
 ### Non-interactive / CI / automation
@@ -88,6 +95,7 @@ Useful for Ansible playbooks, Terraform provisioners, or scripted deployments
 across a fleet of nodes.
 
 Ubuntu 26.04 is supported too; the script automatically maps it to the `ubuntu2604` NVIDIA repo codename.
+If you use `--no-gpu-stack`, the NVIDIA repo / Secure Boot checks are skipped and the installer stops after the host tooling and general recovery setup.
 
 ### GPU fallback recovery policy
 
