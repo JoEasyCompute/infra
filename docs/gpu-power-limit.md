@@ -159,5 +159,5 @@ sudo systemctl daemon-reload
 
 | Platform | Driver | GPUs |
 |----------|--------|------|
-| Ubuntu 22.04 | 575 / 580 / 590 | RTX 4090, RTX 5090, A100, H100, A4000 |
-| Ubuntu 24.04 | 575 / 580 / 590 | RTX 4090, RTX 5090, A100, H100, A4000 |
+| Ubuntu 22.04 | 575 / 580 / 595 / 610 | RTX 4090, RTX 5090, A100, H100, A4000 |
+| Ubuntu 24.04 | 575 / 580 / 595 / 610 | RTX 4090, RTX 5090, A100, H100, A4000 |

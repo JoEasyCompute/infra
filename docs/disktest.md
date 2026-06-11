@@ -431,4 +431,4 @@ Prerequisites → Device Discovery → Topology → Safety Checks → Scheduler 
 | Arch Linux | ✅ (via `pacman`) |
 | openSUSE / SLES | ✅ (via `zypper`) |
 
-Tested with NVIDIA driver stacks (575/580/590 series) on multi-GPU nodes with NVMe, SATA SSD, and HDD configurations.
+Tested with NVIDIA driver stacks (575/580/595/610 series) on multi-GPU nodes with NVMe, SATA SSD, and HDD configurations.
