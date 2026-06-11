@@ -188,6 +188,7 @@ This installs the AMDGPU DKMS driver, ROCm stack, and post-install environment s
 ## Quick Start
 
 The NVIDIA and AMD base-install scripts also install a small operator tool bundle for day-to-day shell work: `fzf`, `jq`, `ripgrep`, `yq`, `fd`, `bat`, `usbutils`, `ethtool`, and `iperf3` (with compatibility symlinks where Ubuntu packages expose `fdfind` / `batcat`; `yq` is installed from the official GitHub release binary, not apt).
+On the NVIDIA path, `base-install.sh` currently supports driver 575, 580, 590, 595, and 610, with CUDA toolkit options 12.9, 13.0, and 13.3.
 
 ### NVIDIA Orchestrated: Automated
 
