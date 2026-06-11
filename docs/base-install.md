@@ -48,8 +48,8 @@ chmod +x base-install.sh nvidia-stack-hold.sh
 ./base-install.sh [OPTIONS]
 
 Options:
-  --driver  <575|580|590>    NVIDIA driver version (default: interactive prompt)
-  --cuda    <12-9|13>        CUDA toolkit version  (default: interactive prompt)
+  --driver  <575|580|590|595|610>    NVIDIA driver version (default: interactive prompt)
+  --cuda    <12-9|13|13.3>           CUDA toolkit version  (default: interactive prompt)
   --yes                      Non-interactive mode, skip all prompts, use defaults
   --freeze-gpu-stack         Hold the validated NVIDIA/CUDA packages after install
   --unfreeze-gpu-stack       Temporarily unhold NVIDIA/CUDA packages before install, then re-hold after validation
@@ -71,7 +71,8 @@ before touching the system.
 ### Specify versions explicitly
 ```bash
 ./base-install.sh --driver 580 --cuda 12-9
-./base-install.sh --driver 590 --cuda 13
+./base-install.sh --driver 595 --cuda 13.3
+./base-install.sh --driver 610 --cuda 13.3
 ./base-install.sh --driver 575 --cuda 12-9
 ```
 
@@ -169,15 +170,15 @@ must be done manually afterwards.
 |--------|------|-------|--------|
 | 575 | 12-9 | cudnn9-cuda-12 | Stable |
 | 580 | 12-9 | cudnn9-cuda-12 | **Recommended** |
-| 580 | 13 | cudnn9-cuda-13 | Latest |
-| 590 | 12-9 | cudnn9-cuda-12 | Beta |
-| 590 | 13 | cudnn9-cuda-13 | Beta / Latest |
+| 590 | 13.0 | cudnn9-cuda-13 | Legacy latest |
+| 595 | 13.3 | cudnn9-cuda-13-3 | Current |
+| 610 | 13.3 | cudnn9-cuda-13-3 | Latest |
 
-> **Note:** Driver 575 + CUDA 13 is a known incompatible combination.
+> **Note:** Driver 575 + CUDA 13.x is a known incompatible combination.
 > The script will warn and prompt before continuing if this is selected.
 >
 > **Note:** `nvidia-utils-575` is installed explicitly for driver 575 to provide
-> `nvidia-smi` and related tools. Drivers 580 and 590 include these automatically
+> `nvidia-smi` and related tools. Drivers 580+ include these automatically
 > through their metapackage and do not need it.
 
 ---

@@ -36,6 +36,9 @@ section() { echo -e "\n${BOLD}${CYAN}── $* ──${NC}"; }
 # ─── CLI argument parsing ──────────────────────────────────────
 DRIVER_VERSION=""
 CUDA_VERSION=""
+CUDA_TOOLKIT_VERSION=""
+CUDA_DISPLAY_VERSION=""
+CUDA_CUDNN_SUFFIX=""
 NON_INTERACTIVE=false
 UNINSTALL=false
 FREEZE_GPU_STACK=false
@@ -50,8 +53,8 @@ usage() {
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-  --driver  <575|580|590>    NVIDIA driver version (default: interactive)
-  --cuda    <12-9|13>        CUDA toolkit version  (default: interactive)
+  --driver  <575|580|590|595|610>    NVIDIA driver version (default: interactive)
+  --cuda    <12-9|13|13.3>           CUDA toolkit version  (default: interactive)
   --yes                      Non-interactive mode, use defaults (580 + 12-9)
   --freeze-gpu-stack         Hold the validated NVIDIA/CUDA stack after install
   --unfreeze-gpu-stack       Temporarily unhold NVIDIA/CUDA packages before install, then re-hold after validation
@@ -61,6 +64,7 @@ Options:
 Examples:
   $(basename "$0")                           # Interactive install
   $(basename "$0") --driver 580 --cuda 12-9  # Explicit versions
+  $(basename "$0") --driver 610 --cuda 13.3  # Latest supported stack
   $(basename "$0") --freeze-gpu-stack        # Freeze the validated stack after install
   $(basename "$0") --unfreeze-gpu-stack      # Unhold, upgrade, then re-freeze
   $(basename "$0") --yes                     # Non-interactive with defaults
@@ -283,8 +287,8 @@ hold_gpu_stack_packages() {
 select_driver_version() {
     if [[ -n "${DRIVER_VERSION}" ]]; then
         case "${DRIVER_VERSION}" in
-            575|580|590) success "Driver version (--driver arg): ${DRIVER_VERSION}" ; return ;;
-            *) error "Invalid --driver: ${DRIVER_VERSION}. Valid: 575, 580, 590" ;;
+            575|580|590|595|610) success "Driver version (--driver arg): ${DRIVER_VERSION}" ; return ;;
+            *) error "Invalid --driver: ${DRIVER_VERSION}. Valid: 575, 580, 590, 595, 610" ;;
         esac
     fi
     if [[ "${NON_INTERACTIVE}" == true ]]; then
@@ -295,11 +299,15 @@ select_driver_version() {
     echo "  1) 575  — stable, widely tested"
     echo "  2) 580  — recommended [default]"
     echo "  3) 590  — latest/beta"
+    echo "  4) 595  — current"
+    echo "  5) 610  — latest"
     echo ""
-    read -rp "Enter choice [1-3, default=2]: " driver_choice
+    read -rp "Enter choice [1-5, default=2]: " driver_choice
     case "${driver_choice}" in
         1) DRIVER_VERSION="575" ;;
         3) DRIVER_VERSION="590" ;;
+        4) DRIVER_VERSION="595" ;;
+        5) DRIVER_VERSION="610" ;;
         *) DRIVER_VERSION="580" ;;
     esac
     success "Driver version: ${DRIVER_VERSION}"
@@ -308,38 +316,72 @@ select_driver_version() {
 select_cuda_version() {
     if [[ -n "${CUDA_VERSION}" ]]; then
         case "${CUDA_VERSION}" in
-            "12-9") CUDA_TOOLKIT_VERSION="12-9"; CUDA_MAJOR="12" ;;
-            "13")   CUDA_TOOLKIT_VERSION="13";   CUDA_MAJOR="13" ;;
-            *) error "Invalid --cuda: ${CUDA_VERSION}. Valid: 12-9, 13" ;;
+            "12-9"|"12.9")
+                CUDA_TOOLKIT_VERSION="12-9"
+                CUDA_DISPLAY_VERSION="12.9"
+                CUDA_MAJOR="12"
+                CUDA_CUDNN_SUFFIX="12"
+                ;;
+            "13"|"13.0")
+                CUDA_TOOLKIT_VERSION="13"
+                CUDA_DISPLAY_VERSION="13.0"
+                CUDA_MAJOR="13"
+                CUDA_CUDNN_SUFFIX="13"
+                ;;
+            "13-3"|"13.3")
+                CUDA_TOOLKIT_VERSION="13-3"
+                CUDA_DISPLAY_VERSION="13.3"
+                CUDA_MAJOR="13"
+                CUDA_CUDNN_SUFFIX="13-3"
+                ;;
+            *) error "Invalid --cuda: ${CUDA_VERSION}. Valid: 12-9, 13, 13.3" ;;
         esac
-        success "CUDA version (--cuda arg): ${CUDA_TOOLKIT_VERSION}"; return
+        success "CUDA version (--cuda arg): ${CUDA_DISPLAY_VERSION}"; return
     fi
     if [[ "${NON_INTERACTIVE}" == true ]]; then
         CUDA_TOOLKIT_VERSION="12-9"; CUDA_MAJOR="12"
-        success "CUDA version (default): ${CUDA_TOOLKIT_VERSION}"; return
+        CUDA_DISPLAY_VERSION="12.9"; CUDA_CUDNN_SUFFIX="12"
+        success "CUDA version (default): ${CUDA_DISPLAY_VERSION}"; return
     fi
     echo ""
     echo -e "${BOLD}Select CUDA Toolkit Version:${NC}"
-    echo "  1) 12-9  — stable [default]"
-    echo "  2) 13    — latest"
+    echo "  1) 12.9  — stable [default]"
+    echo "  2) 13.3  — latest"
+    echo "  3) 13.0  — legacy 13.x"
     echo ""
-    read -rp "Enter choice [1-2, default=1]: " cuda_choice
+    read -rp "Enter choice [1-3, default=1]: " cuda_choice
     case "${cuda_choice}" in
-        2) CUDA_TOOLKIT_VERSION="13"; CUDA_MAJOR="13" ;;
-        *) CUDA_TOOLKIT_VERSION="12-9"; CUDA_MAJOR="12" ;;
+        2)
+            CUDA_TOOLKIT_VERSION="13-3"
+            CUDA_DISPLAY_VERSION="13.3"
+            CUDA_MAJOR="13"
+            CUDA_CUDNN_SUFFIX="13-3"
+            ;;
+        3)
+            CUDA_TOOLKIT_VERSION="13"
+            CUDA_DISPLAY_VERSION="13.0"
+            CUDA_MAJOR="13"
+            CUDA_CUDNN_SUFFIX="13"
+            ;;
+        *)
+            CUDA_TOOLKIT_VERSION="12-9"
+            CUDA_DISPLAY_VERSION="12.9"
+            CUDA_MAJOR="12"
+            CUDA_CUDNN_SUFFIX="12"
+            ;;
     esac
-    success "CUDA version: ${CUDA_TOOLKIT_VERSION}"
+    success "CUDA version: ${CUDA_DISPLAY_VERSION}"
 }
 
 validate_combination() {
     if [[ "${CUDA_MAJOR}" == "13" && "${DRIVER_VERSION}" == "575" ]]; then
-        warn "Driver 575 + CUDA 13 may have compatibility issues. Recommended: 580 or 590."
+        warn "Driver 575 + CUDA 13.x may have compatibility issues. Recommended: 580, 595, or 610."
         if [[ "${NON_INTERACTIVE}" == false ]]; then
             read -rp "  Continue anyway? [y/N]: " yn
             [[ "${yn,,}" == "y" ]] || error "Aborted."
         fi
     fi
-    success "Combination: Driver ${DRIVER_VERSION} + CUDA ${CUDA_TOOLKIT_VERSION}"
+    success "Combination: Driver ${DRIVER_VERSION} + CUDA ${CUDA_DISPLAY_VERSION}"
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -350,8 +392,8 @@ confirm_install() {
     echo -e "${BOLD}════════════════════════════════════════${NC}"
     echo -e "  Ubuntu:        ${UBUNTU_VERSION_ID} (${UBUNTU_CODENAME})"
     echo -e "  NVIDIA Driver: ${DRIVER_VERSION}-open (DKMS)"
-    echo -e "  CUDA Toolkit:  ${CUDA_TOOLKIT_VERSION}"
-    echo -e "  cuDNN:         cudnn9-cuda-${CUDA_MAJOR}"
+    echo -e "  CUDA Toolkit:  ${CUDA_DISPLAY_VERSION}"
+    echo -e "  cuDNN:         cudnn9-cuda-${CUDA_CUDNN_SUFFIX}"
     echo -e "  Log file:      ${LOG_FILE}"
     if [[ "${FREEZE_GPU_STACK}" == true || "${UNFREEZE_GPU_STACK}" == true ]]; then
         echo -e "  GPU stack:     will be held after validation"
@@ -825,7 +867,7 @@ install_cuda_keyring() {
 # ═══════════════════════════════════════════════════════════════
 install_nvidia_stack() {
     section "NVIDIA Driver + CUDA Stack"
-    info "Installing driver=${DRIVER_VERSION}, cuda=${CUDA_TOOLKIT_VERSION}, cudnn=cudnn9-cuda-${CUDA_MAJOR}"
+    info "Installing driver=${DRIVER_VERSION}, cuda=${CUDA_DISPLAY_VERSION}, cudnn=cudnn9-cuda-${CUDA_CUDNN_SUFFIX}"
 
     # nvidia-utils-575 is required explicitly for driver 575 to get nvidia-smi
     # and other userspace tools. Drivers 580+ include them via their metapackage.
@@ -840,7 +882,7 @@ install_nvidia_stack() {
         "libnvidia-compute-${DRIVER_VERSION}" \
         "nvidia-dkms-${DRIVER_VERSION}-open" \
         ${extra_pkgs} \
-        "cudnn9-cuda-${CUDA_MAJOR}" \
+        "cudnn9-cuda-${CUDA_CUDNN_SUFFIX}" \
         nvtop \
         || error "NVIDIA stack install failed — check apt output above"
     success "NVIDIA stack installed"
@@ -978,7 +1020,7 @@ offer_reboot() {
     echo ""
     echo -e "${BOLD}════════════════════════════════════════${NC}"
     echo -e "${GREEN}${BOLD} Installation complete!${NC}"
-    echo -e "  Driver: ${DRIVER_VERSION}-open  |  CUDA: ${CUDA_TOOLKIT_VERSION}  |  Ubuntu: ${UBUNTU_VERSION_ID}"
+    echo -e "  Driver: ${DRIVER_VERSION}-open  |  CUDA: ${CUDA_DISPLAY_VERSION}  |  Ubuntu: ${UBUNTU_VERSION_ID}"
     echo -e "  Full log: ${LOG_FILE}"
     echo -e "${BOLD}════════════════════════════════════════${NC}"
     echo ""
