@@ -41,6 +41,7 @@ CUDA_DISPLAY_VERSION=""
 CUDA_CUDNN_SUFFIX=""
 NON_INTERACTIVE=false
 UNINSTALL=false
+SKIP_GPU_STACK=false
 FREEZE_GPU_STACK=false
 UNFREEZE_GPU_STACK=false
 GPU_STACK_HOLD_DETECTED=false
@@ -56,6 +57,7 @@ Options:
   --driver  <575|580|595|610>        NVIDIA driver version (default: interactive)
   --cuda    <12-9|13|13.3>           CUDA toolkit version  (default: interactive)
   --yes                      Non-interactive mode, use defaults (580 + 12-9)
+  --no-gpu-stack             Skip NVIDIA driver / CUDA toolkit / DCGM / gpu-burn install
   --freeze-gpu-stack         Hold the validated NVIDIA/CUDA stack after install
   --unfreeze-gpu-stack       Temporarily unhold NVIDIA/CUDA packages before install, then re-hold after validation
   --uninstall                Full clean removal — restores system to post-OS-install state
@@ -65,6 +67,7 @@ Examples:
   $(basename "$0")                           # Interactive install
   $(basename "$0") --driver 580 --cuda 12-9  # Explicit versions
   $(basename "$0") --driver 610 --cuda 13.3  # Latest supported stack
+  $(basename "$0") --no-gpu-stack           # Base host tooling only
   $(basename "$0") --freeze-gpu-stack        # Freeze the validated stack after install
   $(basename "$0") --unfreeze-gpu-stack      # Unhold, upgrade, then re-freeze
   $(basename "$0") --yes                     # Non-interactive with defaults
@@ -79,6 +82,7 @@ while [[ $# -gt 0 ]]; do
         --driver)    DRIVER_VERSION="$2"; shift 2 ;;
         --cuda)      CUDA_VERSION="$2";   shift 2 ;;
         --yes)       NON_INTERACTIVE=true; shift ;;
+        --no-gpu-stack) SKIP_GPU_STACK=true; shift ;;
         --freeze-gpu-stack) FREEZE_GPU_STACK=true; shift ;;
         --unfreeze-gpu-stack) UNFREEZE_GPU_STACK=true; shift ;;
         --uninstall) UNINSTALL=true; shift ;;
@@ -154,39 +158,55 @@ preflight_checks() {
                 || warn "Cannot reach ${host} — some steps may fail"
         fi
     }
-    check_host "developer.download.nvidia.com" "NVIDIA repo" "hard"
+    if [[ "${SKIP_GPU_STACK}" == false ]]; then
+        check_host "developer.download.nvidia.com" "NVIDIA repo" "hard"
+    else
+        success "NVIDIA repo network check: skipped (--no-gpu-stack)"
+    fi
     check_host "github.com" "GitHub" "soft"
 
     # Secure Boot
-    if command -v mokutil &>/dev/null && mokutil --sb-state 2>/dev/null | grep -q "enabled"; then
-        warn "Secure Boot ENABLED — DKMS modules may fail to load. Disable in BIOS."
-        if [[ "${NON_INTERACTIVE}" == false ]]; then
-            read -rp "  Continue anyway? [y/N]: " sb_confirm
-            [[ "${sb_confirm,,}" == "y" ]] || error "Aborted."
+    if [[ "${SKIP_GPU_STACK}" == false ]]; then
+        if command -v mokutil &>/dev/null && mokutil --sb-state 2>/dev/null | grep -q "enabled"; then
+            warn "Secure Boot ENABLED — DKMS modules may fail to load. Disable in BIOS."
+            if [[ "${NON_INTERACTIVE}" == false ]]; then
+                read -rp "  Continue anyway? [y/N]: " sb_confirm
+                [[ "${sb_confirm,,}" == "y" ]] || error "Aborted."
+            fi
+        else
+            success "Secure Boot: disabled (OK)"
         fi
     else
-        success "Secure Boot: disabled (OK)"
+        success "Secure Boot check: skipped (--no-gpu-stack)"
     fi
 
     # Existing NVIDIA
-    if dpkg -l 2>/dev/null | grep -qP '^ii\s+(nvidia-driver|libnvidia-compute|cuda-)'; then
-        warn "Existing NVIDIA/CUDA packages found — may conflict:"
-        dpkg -l 2>/dev/null | grep -P '^ii\s+(nvidia|cuda|cudnn)' | awk '{printf "    %s %s\n", $2, $3}' || true
-        if [[ "${NON_INTERACTIVE}" == false ]]; then
-            read -rp "  Continue anyway? [y/N]: " purge_confirm
-            [[ "${purge_confirm,,}" == "y" ]] || error "Aborted."
+    if [[ "${SKIP_GPU_STACK}" == false ]]; then
+        if dpkg -l 2>/dev/null | grep -qP '^ii\s+(nvidia-driver|libnvidia-compute|cuda-)'; then
+            warn "Existing NVIDIA/CUDA packages found — may conflict:"
+            dpkg -l 2>/dev/null | grep -P '^ii\s+(nvidia|cuda|cudnn)' | awk '{printf "    %s %s\n", $2, $3}' || true
+            if [[ "${NON_INTERACTIVE}" == false ]]; then
+                read -rp "  Continue anyway? [y/N]: " purge_confirm
+                [[ "${purge_confirm,,}" == "y" ]] || error "Aborted."
+            fi
+        else
+            success "No conflicting NVIDIA/CUDA packages"
         fi
     else
-        success "No conflicting NVIDIA/CUDA packages"
+        success "Existing NVIDIA/CUDA package conflict check: skipped (--no-gpu-stack)"
     fi
 
     # Kernel headers — check AND warn clearly since we install them in base packages
-    local kver; kver=$(uname -r)
-    if apt-cache show "linux-headers-${kver}" &>/dev/null; then
-        success "Kernel headers: available for ${kver}"
+    if [[ "${SKIP_GPU_STACK}" == false ]]; then
+        local kver; kver=$(uname -r)
+        if apt-cache show "linux-headers-${kver}" &>/dev/null; then
+            success "Kernel headers: available for ${kver}"
+        else
+            warn "linux-headers-${kver} not in apt cache — will attempt install anyway"
+            (( warnings++ )) || true
+        fi
     else
-        warn "linux-headers-${kver} not in apt cache — will attempt install anyway"
-        (( warnings++ )) || true
+        success "Kernel headers check: skipped (--no-gpu-stack)"
     fi
 
     (( warnings > 0 )) && warn "${warnings} warning(s) above" || success "All pre-flight checks passed"
@@ -389,9 +409,13 @@ confirm_install() {
     echo ""
     echo -e "${BOLD}════════════════════════════════════════${NC}"
     echo -e "  Ubuntu:        ${UBUNTU_VERSION_ID} (${UBUNTU_CODENAME})"
-    echo -e "  NVIDIA Driver: ${DRIVER_VERSION}-open (DKMS)"
-    echo -e "  CUDA Toolkit:  ${CUDA_DISPLAY_VERSION}"
-    echo -e "  cuDNN:         cudnn9-cuda-${CUDA_CUDNN_SUFFIX}"
+    if [[ "${SKIP_GPU_STACK}" == true ]]; then
+        echo -e "  GPU stack:     skipped (--no-gpu-stack)"
+    else
+        echo -e "  NVIDIA Driver: ${DRIVER_VERSION}-open (DKMS)"
+        echo -e "  CUDA Toolkit:  ${CUDA_DISPLAY_VERSION}"
+        echo -e "  cuDNN:         cudnn9-cuda-${CUDA_CUDNN_SUFFIX}"
+    fi
     echo -e "  Log file:      ${LOG_FILE}"
     if [[ "${FREEZE_GPU_STACK}" == true || "${UNFREEZE_GPU_STACK}" == true ]]; then
         echo -e "  GPU stack:     will be held after validation"
@@ -420,20 +444,24 @@ install_base_packages() {
         software-properties-common apt-transport-https ca-certificates curl gnupg \
         || error "Bootstrap package install failed"
 
-    info "Adding graphics-drivers PPA..."
-    sudo add-apt-repository -y ppa:graphics-drivers/ppa \
-        || error "Failed to add graphics-drivers PPA"
-    sudo apt-get update -q \
-        || error "apt-get update after PPA failed"
+    if [[ "${SKIP_GPU_STACK}" == false ]]; then
+        info "Adding graphics-drivers PPA..."
+        sudo add-apt-repository -y ppa:graphics-drivers/ppa \
+            || error "Failed to add graphics-drivers PPA"
+        sudo apt-get update -q \
+            || error "apt-get update after PPA failed"
 
-    # Install kernel headers explicitly — required for DKMS to build nvidia module.
-    # Without this, DKMS silently fails and nvidia.ko is never built.
-    local kver; kver=$(uname -r)
-    info "Installing kernel headers for: ${kver}"
-    sudo apt-get install -y \
-        "linux-headers-${kver}" \
-        linux-headers-generic \
-        || warn "Kernel headers install had warnings — DKMS build may fail"
+        # Install kernel headers explicitly — required for DKMS to build nvidia module.
+        # Without this, DKMS silently fails and nvidia.ko is never built.
+        local kver; kver=$(uname -r)
+        info "Installing kernel headers for: ${kver}"
+        sudo apt-get install -y \
+            "linux-headers-${kver}" \
+            linux-headers-generic \
+            || warn "Kernel headers install had warnings — DKMS build may fail"
+    else
+        info "Skipping graphics-drivers PPA and kernel headers (--no-gpu-stack)"
+    fi
 
     info "Installing base packages..."
     sudo apt-get install -y \
@@ -942,21 +970,25 @@ setup_repos() {
         success "Cloned infra → ${infra_dir}"
     fi
 
-    if [[ -d "${gpuburn_dir}" ]]; then
-        info "gpu-burn repo exists — pulling latest"
-        git -C "${gpuburn_dir}" pull --ff-only || warn "git pull gpu-burn failed"
-    else
-        git clone https://github.com/wilicc/gpu-burn.git "${gpuburn_dir}" \
-            || error "Failed to clone gpu-burn repo"
-        success "Cloned gpu-burn → ${gpuburn_dir}"
-    fi
+    if [[ "${SKIP_GPU_STACK}" == false ]]; then
+        if [[ -d "${gpuburn_dir}" ]]; then
+            info "gpu-burn repo exists — pulling latest"
+            git -C "${gpuburn_dir}" pull --ff-only || warn "git pull gpu-burn failed"
+        else
+            git clone https://github.com/wilicc/gpu-burn.git "${gpuburn_dir}" \
+                || error "Failed to clone gpu-burn repo"
+            success "Cloned gpu-burn → ${gpuburn_dir}"
+        fi
 
-    if command -v nvcc &>/dev/null; then
-        info "Building gpu-burn..."
-        (cd "${gpuburn_dir}" && make) || warn "gpu-burn build failed"
-        success "gpu-burn built: ${gpuburn_dir}/gpu_burn"
+        if command -v nvcc &>/dev/null; then
+            info "Building gpu-burn..."
+            (cd "${gpuburn_dir}" && make) || warn "gpu-burn build failed"
+            success "gpu-burn built: ${gpuburn_dir}/gpu_burn"
+        else
+            warn "nvcc not in PATH — gpu-burn build deferred (reboot first, then re-run)"
+        fi
     else
-        warn "nvcc not in PATH — gpu-burn build deferred (reboot first, then re-run)"
+        info "Skipping gpu-burn repo/build (--no-gpu-stack)"
     fi
 }
 
@@ -967,19 +999,23 @@ validate_install() {
     section "Post-install Validation"
     local warnings=0
 
-    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
-        local gpu_name gpu_count
-        gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
-        gpu_count=$(nvidia-smi --query-gpu=count --format=csv,noheader | head -1)
-        success "nvidia-smi: ${gpu_count}x ${gpu_name}"
-    else
-        warn "nvidia-smi not operational (reboot required)"; (( warnings++ )) || true
-    fi
+    if [[ "${SKIP_GPU_STACK}" == false ]]; then
+        if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+            local gpu_name gpu_count
+            gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
+            gpu_count=$(nvidia-smi --query-gpu=count --format=csv,noheader | head -1)
+            success "nvidia-smi: ${gpu_count}x ${gpu_name}"
+        else
+            warn "nvidia-smi not operational (reboot required)"; (( warnings++ )) || true
+        fi
 
-    if command -v nvcc &>/dev/null; then
-        success "nvcc: $(nvcc --version | grep -oP 'release \K[0-9.]+')"
+        if command -v nvcc &>/dev/null; then
+            success "nvcc: $(nvcc --version | grep -oP 'release \K[0-9.]+')"
+        else
+            warn "nvcc not in PATH (reboot or re-source /etc/profile.d/cuda.sh)"; (( warnings++ )) || true
+        fi
     else
-        warn "nvcc not in PATH (reboot or re-source /etc/profile.d/cuda.sh)"; (( warnings++ )) || true
+        success "GPU stack skipped: nvidia-smi/nvcc checks not run"
     fi
 
     if [[ -n "${INFRA_PYTHON_BENCH:-}" ]] && [[ -x "${INFRA_PYTHON_BENCH}" ]]; then
@@ -990,32 +1026,55 @@ validate_install() {
         warn "benchmark Python 3.11 not found (PyTorch DDP lane may be skipped)"; (( warnings++ )) || true
     fi
 
-    systemctl is-active --quiet nvidia-dcgm 2>/dev/null \
-        && success "nvidia-dcgm: running" \
-        || { warn "nvidia-dcgm: not running (expected before reboot)"; (( warnings++ )) || true; }
+    if [[ "${SKIP_GPU_STACK}" == false ]]; then
+        systemctl is-active --quiet nvidia-dcgm 2>/dev/null \
+            && success "nvidia-dcgm: running" \
+            || { warn "nvidia-dcgm: not running (expected before reboot)"; (( warnings++ )) || true; }
+    else
+        success "GPU stack skipped: nvidia-dcgm check not run"
+    fi
 
     systemctl is-active --quiet chrony \
         && success "chrony: running" \
         || { warn "chrony not running"; (( warnings++ )) || true; }
 
-    [[ -f "${HOME}/gpu-burn/gpu_burn" ]] \
-        && success "gpu-burn: ready" \
-        || { warn "gpu-burn: not built (reboot first, then re-run)"; (( warnings++ )) || true; }
+    if [[ "${SKIP_GPU_STACK}" == false ]]; then
+        [[ -f "${HOME}/gpu-burn/gpu_burn" ]] \
+            && success "gpu-burn: ready" \
+            || { warn "gpu-burn: not built (reboot first, then re-run)"; (( warnings++ )) || true; }
+    else
+        success "GPU stack skipped: gpu-burn check not run"
+    fi
 
     [[ -d "${HOME}/infra" ]] \
         && success "infra repo: present" \
         || { warn "infra repo: missing"; (( warnings++ )) || true; }
 
     echo ""
-    (( warnings > 0 )) \
-        && warn "${warnings} item(s) pending — most resolve after reboot" \
-        || success "All checks passed — node is ready"
+    if [[ "${SKIP_GPU_STACK}" == true ]]; then
+        success "Base install complete — GPU stack was intentionally skipped"
+    elif (( warnings > 0 )); then
+        warn "${warnings} item(s) pending — most resolve after reboot"
+    else
+        success "All checks passed — node is ready"
+    fi
 }
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 13 — Reboot prompt (install)
 # ═══════════════════════════════════════════════════════════════
 offer_reboot() {
+    if [[ "${SKIP_GPU_STACK}" == true ]]; then
+        echo ""
+        echo -e "${BOLD}════════════════════════════════════════${NC}"
+        echo -e "${GREEN}${BOLD} Base installation complete!${NC}"
+        echo -e "  GPU stack: skipped (--no-gpu-stack)"
+        echo -e "  Log file:  ${LOG_FILE}"
+        echo -e "${BOLD}════════════════════════════════════════${NC}"
+        echo ""
+        return 0
+    fi
+
     echo ""
     echo -e "${BOLD}════════════════════════════════════════${NC}"
     echo -e "${GREEN}${BOLD} Installation complete!${NC}"
@@ -1465,19 +1524,30 @@ main() {
         uninstall_node
     else
         preflight_checks
-        warn_about_gpu_stack_holds
+        if [[ "${SKIP_GPU_STACK}" == true ]]; then
+            info "--no-gpu-stack selected — NVIDIA driver, CUDA toolkit, cuDNN, DCGM, and gpu-burn steps will be skipped"
+            if [[ -n "${DRIVER_VERSION}" || -n "${CUDA_VERSION}" || "${FREEZE_GPU_STACK}" == true || "${UNFREEZE_GPU_STACK}" == true ]]; then
+                warn "--no-gpu-stack ignores --driver, --cuda, --freeze-gpu-stack, and --unfreeze-gpu-stack"
+            fi
+            FREEZE_GPU_STACK=false
+            UNFREEZE_GPU_STACK=false
+        else
+            warn_about_gpu_stack_holds
 
-        section "Version Selection"
-        select_driver_version
-        select_cuda_version
-        validate_combination
+            section "Version Selection"
+            select_driver_version
+            select_cuda_version
+            validate_combination
+        fi
         confirm_install
 
-        if [[ "${UNFREEZE_GPU_STACK}" == true ]]; then
-            unhold_gpu_stack_packages
-            GPU_STACK_HOLD_AFTER_INSTALL=true
-        elif [[ "${FREEZE_GPU_STACK}" == true ]]; then
-            GPU_STACK_HOLD_AFTER_INSTALL=true
+        if [[ "${SKIP_GPU_STACK}" == false ]]; then
+            if [[ "${UNFREEZE_GPU_STACK}" == true ]]; then
+                unhold_gpu_stack_packages
+                GPU_STACK_HOLD_AFTER_INSTALL=true
+            elif [[ "${FREEZE_GPU_STACK}" == true ]]; then
+                GPU_STACK_HOLD_AFTER_INSTALL=true
+            fi
         fi
 
         install_base_packages
@@ -1489,14 +1559,18 @@ main() {
         install_user_access
         install_shell_aliases
         configure_gcc_alternatives
-        install_cuda_keyring
-        install_nvidia_stack
-        configure_cuda_path
-        install_dcgm
+        if [[ "${SKIP_GPU_STACK}" == false ]]; then
+            install_cuda_keyring
+            install_nvidia_stack
+            configure_cuda_path
+            install_dcgm
+        fi
         setup_repos
         validate_install
-        if [[ "${GPU_STACK_HOLD_AFTER_INSTALL}" == true ]]; then
-            hold_gpu_stack_packages
+        if [[ "${SKIP_GPU_STACK}" == false ]]; then
+            if [[ "${GPU_STACK_HOLD_AFTER_INSTALL}" == true ]]; then
+                hold_gpu_stack_packages
+            fi
         fi
         offer_reboot
     fi
