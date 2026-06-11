@@ -53,7 +53,7 @@ usage() {
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-  --driver  <575|580|590|595|610>    NVIDIA driver version (default: interactive)
+  --driver  <575|580|595|610>        NVIDIA driver version (default: interactive)
   --cuda    <12-9|13|13.3>           CUDA toolkit version  (default: interactive)
   --yes                      Non-interactive mode, use defaults (580 + 12-9)
   --freeze-gpu-stack         Hold the validated NVIDIA/CUDA stack after install
@@ -287,8 +287,8 @@ hold_gpu_stack_packages() {
 select_driver_version() {
     if [[ -n "${DRIVER_VERSION}" ]]; then
         case "${DRIVER_VERSION}" in
-            575|580|590|595|610) success "Driver version (--driver arg): ${DRIVER_VERSION}" ; return ;;
-            *) error "Invalid --driver: ${DRIVER_VERSION}. Valid: 575, 580, 590, 595, 610" ;;
+            575|580|595|610) success "Driver version (--driver arg): ${DRIVER_VERSION}" ; return ;;
+            *) error "Invalid --driver: ${DRIVER_VERSION}. Valid: 575, 580, 595, 610" ;;
         esac
     fi
     if [[ "${NON_INTERACTIVE}" == true ]]; then
@@ -298,16 +298,14 @@ select_driver_version() {
     echo -e "${BOLD}Select NVIDIA Driver Version:${NC}"
     echo "  1) 575  — stable, widely tested"
     echo "  2) 580  — recommended [default]"
-    echo "  3) 590  — latest/beta"
-    echo "  4) 595  — current"
-    echo "  5) 610  — latest"
+    echo "  3) 595  — current"
+    echo "  4) 610  — latest"
     echo ""
-    read -rp "Enter choice [1-5, default=2]: " driver_choice
+    read -rp "Enter choice [1-4, default=2]: " driver_choice
     case "${driver_choice}" in
         1) DRIVER_VERSION="575" ;;
-        3) DRIVER_VERSION="590" ;;
-        4) DRIVER_VERSION="595" ;;
-        5) DRIVER_VERSION="610" ;;
+        3) DRIVER_VERSION="595" ;;
+        4) DRIVER_VERSION="610" ;;
         *) DRIVER_VERSION="580" ;;
     esac
     success "Driver version: ${DRIVER_VERSION}"

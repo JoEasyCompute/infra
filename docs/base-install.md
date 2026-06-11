@@ -48,7 +48,7 @@ chmod +x base-install.sh nvidia-stack-hold.sh
 ./base-install.sh [OPTIONS]
 
 Options:
-  --driver  <575|580|590|595|610>    NVIDIA driver version (default: interactive prompt)
+  --driver  <575|580|595|610>        NVIDIA driver version (default: interactive prompt)
   --cuda    <12-9|13|13.3>           CUDA toolkit version  (default: interactive prompt)
   --yes                      Non-interactive mode, skip all prompts, use defaults
   --freeze-gpu-stack         Hold the validated NVIDIA/CUDA packages after install
@@ -170,7 +170,6 @@ must be done manually afterwards.
 |--------|------|-------|--------|
 | 575 | 12-9 | cudnn9-cuda-12 | Stable |
 | 580 | 12-9 | cudnn9-cuda-12 | **Recommended** |
-| 590 | 13.0 | cudnn9-cuda-13 | Legacy latest |
 | 595 | 13.3 | cudnn9-cuda-13-3 | Current |
 | 610 | 13.3 | cudnn9-cuda-13-3 | Latest |
 
@@ -231,7 +230,7 @@ expose the commands as `fdfind` and `batcat`.
 | `cuda-toolkit-<version>` | CUDA compiler (`nvcc`), libraries, and development tools |
 | `libnvidia-compute-<version>` | NVIDIA compute runtime |
 | `nvidia-dkms-<version>-open` | Open-source NVIDIA kernel module (DKMS-managed) |
-| `nvidia-utils-575` | `nvidia-smi`, `nvidia-debugdump`, and userspace tools — **driver 575 only** (580/590 include these via their metapackage) |
+| `nvidia-utils-575` | `nvidia-smi`, `nvidia-debugdump`, and userspace tools — **driver 575 only** (580+ include these via their metapackage) |
 | `cudnn9-cuda-<major>` | cuDNN deep learning primitives |
 | `nvtop` | GPU process monitor (htop for GPUs) |
 | `datacenter-gpu-manager-4-cuda<major>` | DCGM health and telemetry service |
