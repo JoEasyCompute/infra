@@ -2,7 +2,7 @@
 
 Builds a bootable live ISO directly from a mounted USB root filesystem.
 
-This helper is standalone:
+This helper is standalone and does not require `install/rebuild-gpu-livefs.sh` first:
 
 - it copies the mounted root filesystem from a USB root into `/srv/live-build/gpu-test-rootfs`
 - it generalizes host-specific state such as machine-id, SSH host keys, logs, and shell history
