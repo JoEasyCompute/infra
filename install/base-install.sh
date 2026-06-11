@@ -410,7 +410,7 @@ confirm_install() {
     echo -e "${BOLD}════════════════════════════════════════${NC}"
     echo -e "  Ubuntu:        ${UBUNTU_VERSION_ID} (${UBUNTU_CODENAME})"
     if [[ "${SKIP_GPU_STACK}" == true ]]; then
-        echo -e "  GPU stack:     skipped (--no-gpu-stack)"
+        echo -e "  Mode:          host tooling only (--no-gpu-stack)"
     else
         echo -e "  NVIDIA Driver: ${DRIVER_VERSION}-open (DKMS)"
         echo -e "  CUDA Toolkit:  ${CUDA_DISPLAY_VERSION}"
@@ -1067,9 +1067,9 @@ offer_reboot() {
     if [[ "${SKIP_GPU_STACK}" == true ]]; then
         echo ""
         echo -e "${BOLD}════════════════════════════════════════${NC}"
-        echo -e "${GREEN}${BOLD} Base installation complete!${NC}"
-        echo -e "  GPU stack: skipped (--no-gpu-stack)"
-        echo -e "  Log file:  ${LOG_FILE}"
+        echo -e "${GREEN}${BOLD} Host tooling install complete!${NC}"
+        echo -e "  Mode:     host tooling only (--no-gpu-stack)"
+        echo -e "  Log file: ${LOG_FILE}"
         echo -e "${BOLD}════════════════════════════════════════${NC}"
         echo ""
         return 0
