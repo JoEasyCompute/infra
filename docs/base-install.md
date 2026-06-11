@@ -207,6 +207,7 @@ must be done manually afterwards.
 | `iproute2`, `util-linux`, `dmidecode`, `lshw` | System hardware introspection |
 | `lvm2`, `mdadm` | LVM and software RAID management (also used by `disktest.sh`) |
 | `lsof`, `ioping` | Open file detection and disk latency checking (also used by `disktest.sh`) |
+| `rsync`, `xorriso`, `squashfs-tools`, `grub-common`, `grub-pc-bin`, `grub-efi-amd64-bin` | Host-side live-image / ISO build tooling used by `install/rebuild-gpu-livefs.sh` and `install/build-gpu-liveiso.sh` |
 | `bpytop` | Resource monitor |
 | `mokutil` | Secure Boot state inspection |
 | `stress-ng` | System stress testing and burn-in workloads |
