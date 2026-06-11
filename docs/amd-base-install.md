@@ -350,7 +350,7 @@ The `--uninstall` path performs a full clean removal and restores the system to 
 | User groups | `render`, `video` required | Not required |
 | PATH config | `/etc/profile.d/rocm.sh` | `/etc/profile.d/cuda.sh` |
 | Install root | `/opt/rocm/` | `/usr/local/cuda/` |
-| Version selector | `--rocm <7.2\|7.1>` | `--driver <575\|580\|590>` + `--cuda <12-9\|13>` |
+| Version selector | `--rocm <7.2\|7.1>` | `--driver <575\|580\|595\|610>` + `--cuda <12-9\|13\|13.3>` |
 | Repo URL scheme | Two separate schemes (ROCm version + AMDGPU build number) | Single CUDA keyring |
 | Monitoring | `rocm-smi`, `rocminfo` | `nvidia-smi`, DCGM |
 | Bandwidth test | `rocm-bandwidth-test` | `nvbandwidth` |
