@@ -170,6 +170,9 @@ if have dmidecode; then
       while IFS= read -r line; do
         addr="${line%% *}"; slot="${line#* }"; addr="$(echo "$addr" | tr 'A-Z' 'a-z')"
         if [[ "$addr" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ && -n "$slot" ]]; then
+          if [[ "$addr" =~ ^[0-9a-f]{4}:([0-9a-f]{2}:[0-9a-f]{2}\.[0-7])$ ]]; then
+            addr="0000:${BASH_REMATCH[1]}"
+          fi
           SLOT_BY_UPSTREAM["$addr"]="$slot"
           printf "%s|%s\n" "$addr" "$slot" >> "$slot_file"
           logd "SMBIOS map: $addr -> $slot"
