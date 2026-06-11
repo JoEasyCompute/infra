@@ -210,7 +210,7 @@ get_slim_group_for_root() {
     awk -F'|' -v root="$root_seg" '
         $1 ~ "^0000:" root ":" && $2 ~ /^SLIM/ {
             group=$2
-            sub(/_.*/, "", group)
+            sub(/-[^-]+$/, "", group)
             print group
         }
     ' "$slot_file" | sort -u | awk '
