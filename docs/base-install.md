@@ -203,6 +203,7 @@ must be done manually afterwards.
 | `smartmontools` | SMART disk health monitoring (also used by `disktest.sh`) |
 | `ipmitool` | IPMI/BMC hardware management |
 | `pciutils` | PCIe device inspection (`lspci`) |
+| `usbutils` | USB device inspection (`lsusb`) |
 | `iproute2`, `util-linux`, `dmidecode`, `lshw` | System hardware introspection |
 | `lvm2`, `mdadm` | LVM and software RAID management (also used by `disktest.sh`) |
 | `lsof`, `ioping` | Open file detection and disk latency checking (also used by `disktest.sh`) |
@@ -211,6 +212,8 @@ must be done manually afterwards.
 | `stress-ng` | System stress testing and burn-in workloads |
 | `fio` | Disk I/O benchmarking and validation |
 | `lm-sensors` | Hardware sensor and temperature monitoring |
+| `ethtool` | NIC feature, link, and offload inspection |
+| `iperf3` | Network bandwidth testing (also used by `network-test.sh`) |
 
 `uv` is installed by `base-install.sh` via Astral's standalone installer and
 placed in `/usr/local/bin` so it is available on the system PATH without
