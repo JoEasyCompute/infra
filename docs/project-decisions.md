@@ -93,6 +93,7 @@ Current behavior:
 - this is a first-layer, in-band mitigation; it does not guarantee recovery when the kernel reboot path blocks on a GPU that has fallen off the PCIe bus
 - `install/force-reboot.sh` provides the in-band emergency SysRq reboot path for an operator at the host console when a normal reboot sequence is not completing
 - `install/ipmi-power-cycle.sh` provides the out-of-band manual recovery path for that condition by asking the BMC/IPMI controller to power-cycle the chassis
+- `install/rebuild-gpu-livefs.sh` is the host-side live-image rebuild helper for regenerating the `gpu-test` netboot image from a mounted USB root filesystem
 - uninstall removes the managed systemd block and the sysctl drop-in
 
 ### 7. Sustained stress detects 12V-2x6 / 12VHPWR power anomalies as remarks by default
