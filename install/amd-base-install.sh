@@ -401,6 +401,7 @@ install_base_packages() {
         python3 python3-pip python3-venv \
         python3-setuptools python3-wheel \
         smartmontools stress-ng fio lm-sensors ethtool iperf3 \
+        rsync xorriso squashfs-tools grub-common grub-pc-bin grub-efi-amd64-bin \
         lvm2 mdadm lsof ioping \
         || error "Base package install failed"
 
