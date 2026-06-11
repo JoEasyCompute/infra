@@ -1,29 +1,28 @@
 # `install/build-gpu-liveiso.sh`
 
-Converts a prepared live tree into a bootable live ISO.
+Builds a bootable live ISO directly from a mounted USB root filesystem.
 
-This script is the companion to `install/rebuild-gpu-livefs.sh`:
+This helper is standalone:
 
-- `rebuild-gpu-livefs.sh` builds the `gpu-test` live tree under `/srv/netboot/gpu-test/`
-- `build-gpu-liveiso.sh` turns that tree into a bootable ISO image
+- it copies the mounted root filesystem from a USB root into `/srv/live-build/gpu-test-rootfs`
+- it generalizes host-specific state such as machine-id, SSH host keys, logs, and shell history
+- it refreshes the live boot stack inside a chroot
+- it builds a SquashFS payload and stages a GRUB live layout
+- it emits a bootable ISO under `/srv/iso/gpu-test.iso`
 
 ## Usage
 
 ```bash
-sudo ./install/build-gpu-liveiso.sh
+sudo ./install/build-gpu-liveiso.sh /mnt/usbroot
 ```
 
-By default, the script uses the live tree created by `rebuild-gpu-livefs.sh`:
+If no argument is given, the script defaults to `/mnt/usbroot`.
 
-```text
-/srv/netboot/gpu-test
-```
-
-You can override the input tree or output path:
+You can also choose the SquashFS compressor or output path:
 
 ```bash
-sudo ./install/build-gpu-liveiso.sh /srv/netboot/gpu-test
-sudo ./install/build-gpu-liveiso.sh --output /srv/iso/gpu-test.iso /srv/netboot/gpu-test
+sudo COMPRESSOR=xz ./install/build-gpu-liveiso.sh /mnt/usbroot
+sudo ./install/build-gpu-liveiso.sh --output /srv/iso/gpu-test.iso /mnt/usbroot
 ```
 
 ## Prerequisites
@@ -32,10 +31,12 @@ Run this as root on the build host.
 
 The script expects:
 
-- a prepared live tree with `casper/filesystem.squashfs`, `vmlinuz`, and `initrd`
+- a mounted source root filesystem with `etc/` and `boot/`
 - `grub-mkrescue`
 - `xorriso`
 - `rsync`
+- `mksquashfs`
+- `chroot`
 
 ## Output
 
@@ -53,6 +54,6 @@ The script also writes a small metadata file beside the ISO:
 
 ## Operational Notes
 
-- The script stages a minimal GRUB live layout under `/srv/live-build/gpu-test-iso-staging`.
-- The generated ISO boots the live image via `casper` and points GRUB at the staged kernel and initrd.
-- The resulting image is meant for bootable media, not for modifying the source live tree.
+- The generated live ISO boots via `casper`.
+- The helper stages a minimal GRUB live layout under `/srv/live-build/gpu-test-iso-staging`.
+- The resulting image is meant for bootable media, not for modifying the source USB root.

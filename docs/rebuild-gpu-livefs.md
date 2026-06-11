@@ -51,7 +51,7 @@ The script writes:
 
 It also prints an example iPXE stanza that boots the generated image.
 
-If you want a bootable ISO from the same prepared tree, run `install/build-gpu-liveiso.sh` next.
+If you want a bootable ISO from the same source rootfs, run `install/build-gpu-liveiso.sh` directly on the mounted USB root.
 
 ## Operational Notes
 

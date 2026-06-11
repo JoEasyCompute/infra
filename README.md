@@ -407,7 +407,7 @@ Important recovery helpers under [install/](install):
 - [install/force-reboot.sh](install/force-reboot.sh): last-resort in-band SysRq reboot helper from the host console
 - [install/ipmi-power-cycle.sh](install/ipmi-power-cycle.sh): out-of-band BMC/IPMI chassis power-cycle helper for hosts that cannot complete an in-band reboot
 - [install/rebuild-gpu-livefs.sh](install/rebuild-gpu-livefs.sh): rebuilds the `gpu-test` live image from a mounted USB root filesystem
-- [install/build-gpu-liveiso.sh](install/build-gpu-liveiso.sh): converts the prepared live tree into a bootable live ISO
+- [install/build-gpu-liveiso.sh](install/build-gpu-liveiso.sh): builds a bootable live ISO directly from a mounted USB root filesystem
 
 ### Monitoring
 
