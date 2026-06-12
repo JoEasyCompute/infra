@@ -37,5 +37,4 @@ Disabling autologin removes the managed snippet or file again.
 ## Notes
 
 - Changes take effect on the next graphical login or after a reboot.
-- This is separate from `install/super-ezc.sh`, which sets up TTY autologin on `tty1`.
-
+- For console autologin on `tty1`, use [console-autologin.md](console-autologin.md).
