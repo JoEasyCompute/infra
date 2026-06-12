@@ -2713,7 +2713,7 @@ Available tests (run in this order if none specified):
 
 Options:
   --gpu <index[,index...]>   Target specific GPU(s) by index — single (3) or comma-separated (2,4,5)
-  -<test>                    Exclude a named test from the run (for example: -code)
+  -<test>                    Exclude a named test from the run (for example: -code, -memtest, -stress)
   --exclude <test>           Exclude a named test from the run
   --burn-duration <seconds>  Duration for stress test (default: 300 = 5 min)
   --node-stress-minutes <m>  Duration for node-wide stress test (default: 5)
