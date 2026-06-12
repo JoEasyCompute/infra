@@ -379,7 +379,7 @@ install_base_packages() {
     apt_get update -q \
         || error "apt-get update failed"
     apt_get install -y \
-        software-properties-common apt-transport-https ca-certificates curl gnupg wget \
+        software-properties-common apt-transport-https ca-certificates curl gnupg wget debconf-utils \
         || error "Bootstrap package install failed"
 
     # Kernel headers and modules-extra -- both required for amdgpu-dkms
@@ -391,8 +391,15 @@ install_base_packages() {
         "linux-modules-extra-${kver}" \
         || warn "Kernel headers install had warnings -- DKMS build may fail"
 
+    if command -v debconf-set-selections &>/dev/null; then
+        printf 'iperf3 iperf3/start_daemon boolean true\n' | sudo debconf-set-selections
+        success "Preseeded iperf3 to start as a daemon automatically"
+    else
+        warn "debconf-set-selections not found -- iperf3 may prompt during install"
+    fi
+
     info "Installing base packages..."
-    apt_get install -y \
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout="${APT_LOCK_TIMEOUT}" install -y \
         git cmake build-essential dkms alsa-utils \
         gcc-11 g++-11 gcc-12 g++-12 lsb-release \
         ipmitool jq fzf ripgrep fd-find bat \

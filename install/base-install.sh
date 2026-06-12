@@ -441,7 +441,7 @@ install_base_packages() {
     sudo apt-get update -q \
         || error "apt-get update failed"
     sudo apt-get install -y \
-        software-properties-common apt-transport-https ca-certificates curl gnupg \
+        software-properties-common apt-transport-https ca-certificates curl gnupg debconf-utils \
         || error "Bootstrap package install failed"
 
     if [[ "${SKIP_GPU_STACK}" == false ]]; then
@@ -463,8 +463,15 @@ install_base_packages() {
         info "Skipping graphics-drivers PPA and kernel headers (--no-gpu-stack)"
     fi
 
+    if command -v debconf-set-selections &>/dev/null; then
+        printf 'iperf3 iperf3/start_daemon boolean true\n' | sudo debconf-set-selections
+        success "Preseeded iperf3 to start as a daemon automatically"
+    else
+        warn "debconf-set-selections not found — iperf3 may prompt during install"
+    fi
+
     info "Installing base packages..."
-    sudo apt-get install -y \
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
         git cmake build-essential dkms alsa-utils \
         gcc-11 g++-11 gcc-12 g++-12 lsb-release \
         ipmitool jq fzf ripgrep fd-find bat \
