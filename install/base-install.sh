@@ -903,19 +903,16 @@ install_nvidia_stack() {
     section "NVIDIA Driver + CUDA Stack"
     info "Installing driver=${DRIVER_VERSION}, cuda=${CUDA_DISPLAY_VERSION}, cudnn=cudnn9-cuda-${CUDA_CUDNN_SUFFIX}"
 
-    # nvidia-utils-575 is required explicitly for driver 575 to get nvidia-smi
-    # and other userspace tools. Drivers 580+ include them via their metapackage.
-    local extra_pkgs=""
-    if [[ "${DRIVER_VERSION}" == "575" ]]; then
-        extra_pkgs="nvidia-utils-575"
-        info "Driver 575 detected — adding nvidia-utils-575 for nvidia-smi"
-    fi
+    # Install nvidia-utils explicitly so nvidia-smi and related userspace tools
+    # are present for every supported driver version.
+    local utils_pkg="nvidia-utils-${DRIVER_VERSION}"
+    info "Adding ${utils_pkg} for nvidia-smi and related tools"
 
     sudo apt-get install -V -y \
         "cuda-toolkit-${CUDA_TOOLKIT_VERSION}" \
         "libnvidia-compute-${DRIVER_VERSION}" \
         "nvidia-dkms-${DRIVER_VERSION}-open" \
-        ${extra_pkgs} \
+        "${utils_pkg}" \
         "cudnn9-cuda-${CUDA_CUDNN_SUFFIX}" \
         nvtop \
         || error "NVIDIA stack install failed — check apt output above"

@@ -184,9 +184,8 @@ must be done manually afterwards.
 > **Note:** Driver 575 + CUDA 13.x is a known incompatible combination.
 > The script will warn and prompt before continuing if this is selected.
 >
-> **Note:** `nvidia-utils-575` is installed explicitly for driver 575 to provide
-> `nvidia-smi` and related tools. Drivers 580+ include these automatically
-> through their metapackage and do not need it.
+> **Note:** `nvidia-utils-<version>` is installed explicitly for the selected
+> driver version to provide `nvidia-smi` and related userspace tools.
 
 ---
 
@@ -241,7 +240,7 @@ expose the commands as `fdfind` and `batcat`.
 | `cuda-toolkit-<version>` | CUDA compiler (`nvcc`), libraries, and development tools |
 | `libnvidia-compute-<version>` | NVIDIA compute runtime |
 | `nvidia-dkms-<version>-open` | Open-source NVIDIA kernel module (DKMS-managed) |
-| `nvidia-utils-575` | `nvidia-smi`, `nvidia-debugdump`, and userspace tools — **driver 575 only** (580+ include these via their metapackage) |
+| `nvidia-utils-<version>` | `nvidia-smi`, `nvidia-debugdump`, and userspace tools for the selected driver version |
 | `cudnn9-cuda-<major>` | cuDNN deep learning primitives |
 | `nvtop` | GPU process monitor (htop for GPUs) |
 | `datacenter-gpu-manager-4-cuda<major>` | DCGM health and telemetry service |
