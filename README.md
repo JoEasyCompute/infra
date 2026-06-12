@@ -209,6 +209,8 @@ Use this as the shortest path from intent to script:
 | Reboot a wedged host | [install/force-reboot.sh](install/force-reboot.sh) | In-band SysRq last resort from the host console |
 | Power-cycle a dead host | [install/ipmi-power-cycle.sh](install/ipmi-power-cycle.sh) | Out-of-band BMC/IPMI recovery when the host OS cannot complete a reboot |
 
+The GPU test scripts accept repeated `-test` / `--exclude <test>` flags, so you can drop multiple lanes in one run without editing the test list.
+
 ### NVIDIA Orchestrated: Automated
 
 ```bash

@@ -79,6 +79,7 @@ sudo chown -R "$USER":"$(id -gn)" ./test/build
 ./test/fulltest.sh code                             # CUDA int32 stress across all visible GPUs
 ./test/fulltest.sh -code                            # all default tests except code.cu
 ./test/fulltest.sh -memtest                         # all default tests except memtest
+./test/fulltest.sh -code -memtest                   # exclude multiple tests in one run
 ./test/fulltest.sh nccl pytorch -code               # explicit tests without code.cu
 ./test/fulltest.sh memtest                         # VRAM integrity only
 ./test/fulltest.sh stress                          # stress test only (default 5 min)
@@ -100,7 +101,7 @@ sudo chown -R "$USER":"$(id -gn)" ./test/build
 | Option | Default | Description |
 |---|---|---|
 | `--gpu <index[,index...]>` | all GPUs | Target one or more GPUs by index — single (`3`) or comma-separated (`2,4,5`). Indices are 0-based as shown by `nvidia-smi`. |
-| `-<test>` / `--exclude <test>` | none | Exclude a named test from the run. Use `-code`, `-memtest`, or `-stress` to skip a test while keeping the rest. |
+| `-<test>` / `--exclude <test>` | none | Exclude named tests from the run. Repeat the flag or prefix for multiple exclusions, such as `-code -memtest`. |
 | `--burn-duration <seconds>` | `300` (5 min) | Duration of the sustained stress test. |
 | `--node-stress-minutes <m>` | `5` | Duration of the node-wide CPU + RAM + GPU stress test. |
 | `--clean` | — | Delete `./build/` and exit. Forces full rebuild on next run. Can be combined with tests to clean then immediately run. |
