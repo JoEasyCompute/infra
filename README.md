@@ -200,6 +200,7 @@ Use this as the shortest path from intent to script:
 | Fresh NVIDIA node | [install/provision.sh](install/provision.sh) | Orchestrated across reboots; best default for full NVIDIA provisioning |
 | Fresh AMD node | [install/provision-amd.sh](install/provision-amd.sh) | Orchestrated across reboots; best default for full AMD provisioning |
 | Host tooling only | [install/base-install.sh](install/base-install.sh) `--no-gpu-stack` | Installs the shared operator toolkit, recovery policy, aliases, and helper tooling without NVIDIA drivers or CUDA |
+| Manage graphical autologin | [install/autologin.sh](install/autologin.sh) | Enables or disables desktop autologin for the current sudo user on GDM3, LightDM, or SDDM |
 | Validate NVIDIA node | [test/fulltest.sh](test/fulltest.sh) | Stable production validation path |
 | Validate experimental NVIDIA flow | [test/gpu-fulltest-v2.sh](test/gpu-fulltest-v2.sh) | Prepare-then-run experimental lane for NVIDIA validation changes |
 | Rebuild live root | [install/rebuild-gpu-livefs.sh](install/rebuild-gpu-livefs.sh) | Copies a mounted USB root filesystem and regenerates the `gpu-test` live tree |
@@ -417,14 +418,17 @@ Important scripts under [gpucheck/](gpucheck):
 - `gpucheck/inv.sh` and `gpucheck/bare-inv.sh` print a final remark section naming any GPU that appears to have fallen off the bus and its associated slot; ordinary below-max or degraded link states are not remarked
 - `gpu-watchdog.sh` plus matching `.service` and `.timer`: watchdog support
 
-### Recovery
+### Login / Recovery
 
-Important recovery helpers under [install/](install):
+Important login and recovery helpers under [install/](install):
 
+- [install/autologin.sh](install/autologin.sh): enables or disables graphical autologin for the current sudo user on supported desktop managers
 - [install/force-reboot.sh](install/force-reboot.sh): last-resort in-band SysRq reboot helper from the host console
 - [install/ipmi-power-cycle.sh](install/ipmi-power-cycle.sh): out-of-band BMC/IPMI chassis power-cycle helper for hosts that cannot complete an in-band reboot
 - [install/rebuild-gpu-livefs.sh](install/rebuild-gpu-livefs.sh): rebuilds the `gpu-test` live image from a mounted USB root filesystem
 - [install/build-gpu-liveiso.sh](install/build-gpu-liveiso.sh): standalone helper that builds a bootable live ISO directly from a mounted USB root filesystem
+
+Graphical autologin usage details: [docs/autologin.md](docs/autologin.md)
 
 ### Monitoring
 
