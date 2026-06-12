@@ -68,7 +68,7 @@ Preparation is only done for tests the operator selected.
 ## Usage
 
 ```bash
-./test/gpu-fulltest-v2.sh [test...] [--gpu <index[,index...]>] [--burn-duration <seconds>] [--node-stress-minutes <m>] [--clean] [--list] [--help]
+./test/gpu-fulltest-v2.sh [test...] [-test...] [--gpu <index[,index...]>] [--burn-duration <seconds>] [--node-stress-minutes <m>] [--clean] [--list] [--help]
 ```
 
 Examples:
@@ -79,6 +79,8 @@ Examples:
 ./test/gpu-fulltest-v2.sh --gpu 2,4,5 memtest stress
 ./test/gpu-fulltest-v2.sh node-stress
 ./test/gpu-fulltest-v2.sh code
+./test/gpu-fulltest-v2.sh -code
+./test/gpu-fulltest-v2.sh nccl pytorch -code
 ./test/gpu-fulltest-v2.sh node-stress --node-stress-minutes 15
 ./test/gpu-fulltest-v2.sh nccl pytorch
 ./test/gpu-fulltest-v2.sh post-stress-recovery
@@ -98,6 +100,7 @@ GPU_POLICY_REQUIRE_PERSISTENCE=1 ./test/gpu-fulltest-v2.sh gpu-policy
 - The PyTorch benchmark now keeps its generated DDP repro script on failure and prints a condensed failure summary plus a suggested debug rerun command.
 - The PyTorch prepare/run path now uses the benchmark Python 3.11 runtime from `base-install.sh` (via `uv` or the installed `/opt/infra/python` tree) and treats its absence as `NOT BEING RUN` rather than trying to execute DDP on the host default interpreter.
 - CUDA 13.0–13.1 now maps to the `cu130` wheel family, while CUDA 13.2+ maps to `cu132`; `torch` / `torchvision` / `torchaudio` installs are force-refreshed so stale venv contents do not keep an old wheel family alive between runs.
+- You can exclude a named test by prefixing it with `-` (for example `-code`) or by passing `--exclude code`; exclusions are applied after normal test selection.
 - Sustained stress and node-stress now treat thermal/performance-only outcomes as summary remarks, and unavailable backends are listed under `NOT BEING RUN` instead of failing the overall run.
 - `SW_Thermal`-only exits are treated as remarks in the stress summary, provided there are no hard-crash indicators.
 - `stress` and `node-stress` also detect sustained 12V-2x6 / 12VHPWR connector power anomalies; these are remark-only by default unless `POWER_ANOMALY_AS_REMARK=0` is set.

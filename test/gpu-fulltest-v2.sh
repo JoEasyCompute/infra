@@ -2689,7 +2689,7 @@ run_selected_tests() {
 
 usage() {
     cat << EOF
-Usage: $(basename "$0") [test...] [--gpu <index[,index...]>] [--burn-duration <s>] [--node-stress-minutes <m>] [--clean] [--list] [--help]
+Usage: $(basename "$0") [test...] [-test...] [--gpu <index[,index...]>] [--burn-duration <s>] [--node-stress-minutes <m>] [--clean] [--list] [--help]
 
 Experimental prepare-then-run variant of fulltest.sh.
 Selected tests are prepared up front, then executed after preparation succeeds.
@@ -2713,6 +2713,8 @@ Available tests (run in this order if none specified):
 
 Options:
   --gpu <index[,index...]>   Target specific GPU(s) by index — single (3) or comma-separated (2,4,5)
+  -<test>                    Exclude a named test from the run (for example: -code)
+  --exclude <test>           Exclude a named test from the run
   --burn-duration <seconds>  Duration for stress test (default: 300 = 5 min)
   --node-stress-minutes <m>  Duration for node-wide stress test (default: 5)
   --clean                    Delete all build artifacts and exit
@@ -2726,6 +2728,8 @@ Examples:
   ./gpu-fulltest-v2.sh --gpu 2,4,5 memtest stress   # memtest + stress on GPUs 2, 4, 5
   ./gpu-fulltest-v2.sh --gpu 3 memtest stress       # memtest + stress on GPU 3 only
   ./gpu-fulltest-v2.sh code                         # CUDA int32 stress across all visible GPUs
+  ./gpu-fulltest-v2.sh -code                        # All default tests except code.cu
+  ./gpu-fulltest-v2.sh nccl pytorch -code           # Explicit tests without code.cu
   ./gpu-fulltest-v2.sh node-stress                  # CPU + RAM + GPU stress, default 5 min
   ./gpu-fulltest-v2.sh node-stress --node-stress-minutes 15
   ./gpu-fulltest-v2.sh preflight ecc pcie clocks    # hardware health checks only
@@ -2741,6 +2745,34 @@ EOF
 ALL_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch code memtest stress node-stress post-stress-recovery gpu-policy)
 DEFAULT_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch code memtest stress node-stress post-stress-recovery)
 SELECTED_TESTS=()
+EXCLUDED_TESTS=()
+
+is_valid_test_name() {
+    local candidate="$1"
+    local test_name
+    for test_name in "${ALL_TESTS[@]}"; do
+        [ "$test_name" = "$candidate" ] && return 0
+    done
+    return 1
+}
+
+apply_exclusions() {
+    local filtered=()
+    local test_name excluded_name skip
+
+    for test_name in "${SELECTED_TESTS[@]}"; do
+        skip=false
+        for excluded_name in "${EXCLUDED_TESTS[@]}"; do
+            if [ "$test_name" = "$excluded_name" ]; then
+                skip=true
+                break
+            fi
+        done
+        [ "$skip" = true ] || filtered+=("$test_name")
+    done
+
+    SELECTED_TESTS=("${filtered[@]}")
+}
 
 # Two-pass parse: first pass handles --help/--list which exit immediately,
 # second pass (index-based) handles --burn-duration which needs a lookahead value.
@@ -2771,6 +2803,19 @@ while [ "$i" -lt "${#args[@]}" ]; do
             fi
             GPU_TARGET="$val"
             ;;
+        --exclude)
+            i=$((i + 1))
+            val="${args[$i]:-}"
+            if [ -z "$val" ]; then
+                echo "ERROR: --exclude requires a test name" >&2
+                exit 1
+            fi
+            if ! is_valid_test_name "$val"; then
+                echo "ERROR: --exclude unknown test: $val" >&2
+                exit 1
+            fi
+            EXCLUDED_TESTS+=("$val")
+            ;;
         --burn-duration)
             i=$((i + 1))
             val="${args[$i]:-}"
@@ -2791,6 +2836,16 @@ while [ "$i" -lt "${#args[@]}" ]; do
             ;;
         preflight|ecc|pcie|clocks|nccl|cuda-samples|nvbandwidth|dcgm|pytorch|code|memtest|stress|node-stress|post-stress-recovery|gpu-policy)
             SELECTED_TESTS+=("$arg") ;;
+        -*)
+            excluded="${arg#-}"
+            if [ -z "$excluded" ]; then
+                echo "Unknown argument: $arg" >&2; usage >&2; exit 1
+            fi
+            if ! is_valid_test_name "$excluded"; then
+                echo "Unknown argument: $arg" >&2; usage >&2; exit 1
+            fi
+            EXCLUDED_TESTS+=("$excluded")
+            ;;
         *)
             echo "Unknown argument: $arg" >&2; usage >&2; exit 1 ;;
     esac
@@ -2810,6 +2865,16 @@ if [ "$CLEAN_BUILD" = true ]; then
 fi
 
 [ "${#SELECTED_TESTS[@]}" -eq 0 ] && SELECTED_TESTS=("${DEFAULT_TESTS[@]}")
+if [ "${#EXCLUDED_TESTS[@]}" -gt 0 ]; then
+    apply_exclusions
+    echo "Excluding tests: ${EXCLUDED_TESTS[*]}"
+    echo ""
+fi
+
+if [ "${#SELECTED_TESTS[@]}" -eq 0 ]; then
+    echo "No tests remain after applying exclusions."
+    exit 0
+fi
 
 detect_system
 prepare_selected_tests || {
