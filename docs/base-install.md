@@ -222,7 +222,9 @@ must be done manually afterwards.
 | `fio` | Disk I/O benchmarking and validation |
 | `lm-sensors` | Hardware sensor and temperature monitoring |
 | `ethtool` | NIC feature, link, and offload inspection |
-| `iperf3` | Network bandwidth testing (also used by `network-test.sh`) |
+| `iperf3` | Network bandwidth testing (also used by `network-test.sh`); the installer preseeds the package to start its daemon automatically so apt does not prompt during install |
+
+The bootstrap phase also installs `debconf-utils` so `iperf3` can be preseeded before apt reaches the package's post-install prompt.
 
 `uv` is installed by `base-install.sh` via Astral's standalone installer and
 placed in `/usr/local/bin` so it is available on the system PATH without
