@@ -191,6 +191,22 @@ The NVIDIA and AMD base-install scripts also install a small operator tool bundl
 On the NVIDIA path, `base-install.sh` currently supports driver 575, 580, 595, and 610, with CUDA toolkit options 12.9, 13.0, and 13.3.
 If you only want the host tooling and not the NVIDIA stack yet, `base-install.sh --no-gpu-stack` skips the driver, CUDA toolkit, DCGM, and gpu-burn steps.
 
+## Operator Entry Matrix
+
+Use this as the shortest path from intent to script:
+
+| Intent | Primary script(s) | Notes |
+|---|---|---|
+| Fresh NVIDIA node | [install/provision.sh](install/provision.sh) | Orchestrated across reboots; best default for full NVIDIA provisioning |
+| Fresh AMD node | [install/provision-amd.sh](install/provision-amd.sh) | Orchestrated across reboots; best default for full AMD provisioning |
+| Host tooling only | [install/base-install.sh](install/base-install.sh) `--no-gpu-stack` | Installs the shared operator toolkit, recovery policy, aliases, and helper tooling without NVIDIA drivers or CUDA |
+| Validate NVIDIA node | [test/fulltest.sh](test/fulltest.sh) | Stable production validation path |
+| Validate experimental NVIDIA flow | [test/gpu-fulltest-v2.sh](test/gpu-fulltest-v2.sh) | Prepare-then-run experimental lane for NVIDIA validation changes |
+| Rebuild live root | [install/rebuild-gpu-livefs.sh](install/rebuild-gpu-livefs.sh) | Copies a mounted USB root filesystem and regenerates the `gpu-test` live tree |
+| Build bootable live ISO | [install/build-gpu-liveiso.sh](install/build-gpu-liveiso.sh) | Standalone helper that builds a bootable ISO directly from a mounted USB root filesystem |
+| Reboot a wedged host | [install/force-reboot.sh](install/force-reboot.sh) | In-band SysRq last resort from the host console |
+| Power-cycle a dead host | [install/ipmi-power-cycle.sh](install/ipmi-power-cycle.sh) | Out-of-band BMC/IPMI recovery when the host OS cannot complete a reboot |
+
 ### NVIDIA Orchestrated: Automated
 
 ```bash
