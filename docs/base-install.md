@@ -258,7 +258,7 @@ expose the commands as `fdfind` and `batcat`.
 | CUDA keyring | `cuda-keyring_1.1-1_all.deb` installed to authenticate NVIDIA apt repo |
 | CUDA PATH | `/etc/profile.d/cuda.sh` written — adds `/usr/local/cuda/bin` and `lib64` for all users |
 | Shell aliases | `~/.aliases` is installed from repo root; `~/.bashrc`, `~/.zshrc`, and `~/.config/fish/config.fish` are updated to source the managed alias files |
-| SSH / sudo access | `~/.ssh/authorized_keys` updated with the repo key; `/etc/sudoers.d/99-infra-<user>` grants passwordless sudo if the user did not already have it |
+| SSH / sudo access | `~/.ssh/authorized_keys` updated with the repo key; `/etc/sudoers.d/99-infra-<user>` grants passwordless sudo if the user did not already have it; `install/user-bootstrap.sh` provides the same access bootstrap as a standalone helper |
 | DCGM service | `nvidia-dcgm` enabled and started |
 | Chrony service | `chrony` enabled and started for NTP sync |
 

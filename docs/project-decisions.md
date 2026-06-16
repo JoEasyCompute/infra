@@ -97,7 +97,16 @@ Current behavior:
 - `install/build-gpu-liveiso.sh` is the standalone helper that turns a mounted USB root filesystem into a bootable `gpu-test` ISO without requiring the intermediate `rebuild-gpu-livefs.sh` step
 - uninstall removes the managed systemd block and the sysctl drop-in
 
-### 7. Sustained stress detects 12V-2x6 / 12VHPWR power anomalies as remarks by default
+### 7. User bootstrap is available as a standalone helper
+
+Current behavior:
+
+- `install/base-install.sh` still performs the normal SSH authorized-key and passwordless sudo setup for the target user during provisioning
+- `install/user-bootstrap.sh` exists as a standalone helper for operators who want to create or update a user account, install the repo SSH key or a custom key file, and grant passwordless sudo without rerunning the full base install
+- the helper is intended for the current sudo user by default only when you pass that user explicitly
+- `root` remains unsupported as a bootstrap target
+
+### 8. Sustained stress detects 12V-2x6 / 12VHPWR power anomalies as remarks by default
 
 Current behavior:
 
@@ -107,7 +116,7 @@ Current behavior:
 - the warning is treated as a connector early-warning, not a generic thermal failure, because it is intended to catch likely 12V-2x6 / 12VHPWR contact resistance issues before the GPU falls off the bus
 - the same detector and default behavior are documented in both `docs/fulltest.md` and `docs/gpu-fulltest-v2.md`
 
-### 8. Future improvement plans for the power-anomaly detector
+### 9. Future improvement plans for the power-anomaly detector
 
 Planned follow-up work:
 
@@ -117,7 +126,7 @@ Planned follow-up work:
 
 These are tracked as future improvements, not current behavior.
 
-### 9. `code.sh` is a lightweight per-GPU CUDA stress lane
+### 10. `code.sh` is a lightweight per-GPU CUDA stress lane
 
 Current behavior:
 
