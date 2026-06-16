@@ -102,7 +102,7 @@ Current behavior:
 Current behavior:
 
 - `install/base-install.sh` still performs the normal SSH authorized-key and passwordless sudo setup for the target user during provisioning
-- `install/user-bootstrap.sh` exists as a standalone helper for operators who want to create or update a user account, install the repo SSH key or a custom key file, and grant passwordless sudo without rerunning the full base install
+- `install/user-bootstrap.sh` exists as a standalone helper for operators who want to create or update a user account, install the repo SSH key, a custom key file, or pasted key text, and grant passwordless sudo without rerunning the full base install
 - the helper is intended for the current sudo user by default only when you pass that user explicitly
 - `root` remains unsupported as a bootstrap target
 

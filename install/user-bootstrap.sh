@@ -21,6 +21,7 @@ TARGET_USER=""
 TARGET_SHELL="/bin/bash"
 TARGET_COMMENT=""
 KEY_FILE=""
+KEY_TEXT=""
 
 usage() {
     cat <<EOF
@@ -31,6 +32,7 @@ Options:
   --shell <path>         Login shell for new users (default: /bin/bash)
   --comment <text>       GECOS/comment field for new users (default: username)
   --key-file <path>      SSH public key file to install (default: repo key)
+  --key-text <text>      SSH public key text to install (default: repo key)
   --status               Show the current user access state without changing it
   -h, --help             Show this help
 
@@ -38,6 +40,7 @@ Examples:
   sudo $(basename "$0") --user ezc
   sudo $(basename "$0") --user alice --shell /bin/zsh
   sudo $(basename "$0") --user ezc --key-file /path/to/id_ed25519.pub
+  sudo $(basename "$0") --user ezc --key-text "ssh-ed25519 AAAA... comment"
   sudo $(basename "$0") --user ezc --status
 EOF
     exit 0
@@ -65,6 +68,11 @@ while [[ $# -gt 0 ]]; do
             [[ -n "${KEY_FILE}" ]] || error "--key-file requires a value"
             shift 2
             ;;
+        --key-text)
+            KEY_TEXT="${2:-}"
+            [[ -n "${KEY_TEXT}" ]] || error "--key-text requires a value"
+            shift 2
+            ;;
         --status)
             ACTION="status"
             shift
@@ -80,6 +88,9 @@ done
 
 [[ -n "${TARGET_USER}" ]] || error "--user is required"
 [[ "${TARGET_USER}" != "root" ]] || error "Refusing to manage root via this helper"
+if [[ -n "${KEY_FILE}" && -n "${KEY_TEXT}" ]]; then
+    error "--key-file and --key-text are mutually exclusive"
+fi
 
 if [[ "${ACTION}" == "bootstrap" && -z "${TARGET_COMMENT}" ]]; then
     TARGET_COMMENT="${TARGET_USER}"
@@ -93,7 +104,9 @@ trap cleanup EXIT
 
 prepare_ssh_key_source() {
     SSH_KEY_SOURCE_TMP="$(mktemp)"
-    if [[ -n "${KEY_FILE}" ]]; then
+    if [[ -n "${KEY_TEXT}" ]]; then
+        printf '%s\n' "${KEY_TEXT}" | grep -vE '^[[:space:]]*#' | sed '/^[[:space:]]*$/d' > "${SSH_KEY_SOURCE_TMP}"
+    elif [[ -n "${KEY_FILE}" ]]; then
         [[ -f "${KEY_FILE}" ]] || error "SSH key file not found: ${KEY_FILE}"
         grep -vE '^[[:space:]]*#' "${KEY_FILE}" | sed '/^[[:space:]]*$/d' > "${SSH_KEY_SOURCE_TMP}"
     else

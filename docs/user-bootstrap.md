@@ -10,6 +10,7 @@ It is intended for initial account setup on a host where you want the new user t
 sudo ./install/user-bootstrap.sh --user ezc
 sudo ./install/user-bootstrap.sh --user alice --shell /bin/zsh
 sudo ./install/user-bootstrap.sh --user ezc --key-file /path/to/id_ed25519.pub
+sudo ./install/user-bootstrap.sh --user ezc --key-text "ssh-ed25519 AAAA... comment"
 sudo ./install/user-bootstrap.sh --user ezc --status
 ```
 
@@ -19,9 +20,12 @@ sudo ./install/user-bootstrap.sh --user ezc --status
 - `--shell <path>`: login shell for newly created users, default `/bin/bash`
 - `--comment <text>`: GECOS/comment field for new users, default to the username
 - `--key-file <path>`: public key file to install instead of the repo default key
+- `--key-text <text>`: public key text to install instead of the repo default key
 - `--status`: inspect whether the user, sudo access, SSH key, and sudoers drop-in are present
 
 `root` is intentionally not supported.
+
+`--key-file` and `--key-text` are mutually exclusive.
 
 ## What It Changes
 
