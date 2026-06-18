@@ -2,7 +2,17 @@
 
 set -euo pipefail
 
-if [[ "${EUID}" -ne 0 ]]; then
+ROOTLESS_ACTION=0
+for arg in "$@"; do
+    case "${arg}" in
+        -h|--help|--list-keys)
+            ROOTLESS_ACTION=1
+            break
+            ;;
+    esac
+done
+
+if [[ "${EUID}" -ne 0 && "${ROOTLESS_ACTION}" -eq 0 ]]; then
     exec sudo -E "$0" "$@"
 fi
 
@@ -14,31 +24,36 @@ warn()    { echo -e "${YELLOW}[WARN]${NC}    $*"; }
 error()   { echo -e "${RED}[ERROR]${NC}   $*"; exit 1; }
 section() { echo -e "\n${BOLD}${CYAN}-- $* --${NC}"; }
 
-DEFAULT_REPO_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG3WsgbyzKCqXrdZJyWiRA/SHPC1nGAfs6bvnj7K/PZ9 ezc@local'
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BOOTSTRAP_KEY_DIR="${REPO_ROOT}/keys/bootstrap"
 
 ACTION="bootstrap"
 TARGET_USER=""
 TARGET_SHELL="/bin/bash"
 TARGET_COMMENT=""
+KEY_NAME=""
 KEY_FILE=""
 KEY_TEXT=""
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") --user <name> [OPTIONS]
+Usage: $(basename "$0") [--list-keys] | $(basename "$0") --user <name> [OPTIONS]
 
 Options:
-  --user <name>          User to create or update (required)
+  --list-keys            List repo-managed bootstrap keys and exit
+  --user <name>          User to create or update (required unless listing keys)
   --shell <path>         Login shell for new users (default: /bin/bash)
   --comment <text>       GECOS/comment field for new users (default: username)
-  --key-file <path>      SSH public key file to install (default: repo key)
-  --key-text <text>      SSH public key text to install (default: repo key)
+  --key-name <name>      Repo bootstrap key name under keys/bootstrap/<name>.pub
+  --key-file <path>      SSH public key file to install
+  --key-text <text>      SSH public key text to install
   --status               Show the current user access state without changing it
   -h, --help             Show this help
 
 Examples:
-  sudo $(basename "$0") --user ezc
-  sudo $(basename "$0") --user alice --shell /bin/zsh
+  sudo $(basename "$0") --list-keys
+  sudo $(basename "$0") --user ezc --key-name ezc
+  sudo $(basename "$0") --user alice --shell /bin/zsh --key-name alice
   sudo $(basename "$0") --user ezc --key-file /path/to/id_ed25519.pub
   sudo $(basename "$0") --user ezc --key-text "ssh-ed25519 AAAA... comment"
   sudo $(basename "$0") --user ezc --status
@@ -63,6 +78,11 @@ while [[ $# -gt 0 ]]; do
             [[ -n "${TARGET_COMMENT}" ]] || error "--comment requires a value"
             shift 2
             ;;
+        --key-name)
+            KEY_NAME="${2:-}"
+            [[ -n "${KEY_NAME}" ]] || error "--key-name requires a value"
+            shift 2
+            ;;
         --key-file)
             KEY_FILE="${2:-}"
             [[ -n "${KEY_FILE}" ]] || error "--key-file requires a value"
@@ -77,6 +97,10 @@ while [[ $# -gt 0 ]]; do
             ACTION="status"
             shift
             ;;
+        --list-keys)
+            ACTION="list-keys"
+            shift
+            ;;
         -h|--help)
             usage
             ;;
@@ -86,10 +110,23 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -n "${TARGET_USER}" ]] || error "--user is required"
-[[ "${TARGET_USER}" != "root" ]] || error "Refusing to manage root via this helper"
-if [[ -n "${KEY_FILE}" && -n "${KEY_TEXT}" ]]; then
-    error "--key-file and --key-text are mutually exclusive"
+if [[ "${ACTION}" == "list-keys" ]]; then
+    if [[ -n "${TARGET_USER}" || -n "${KEY_NAME}" || -n "${KEY_FILE}" || -n "${KEY_TEXT}" || -n "${TARGET_COMMENT}" ]]; then
+        error "--list-keys cannot be combined with user or key selection options"
+    fi
+else
+    [[ -n "${TARGET_USER}" ]] || error "--user is required"
+    [[ "${TARGET_USER}" != "root" ]] || error "Refusing to manage root via this helper"
+    if [[ -n "${KEY_NAME}" && -n "${KEY_FILE}" ]] || [[ -n "${KEY_NAME}" && -n "${KEY_TEXT}" ]] || [[ -n "${KEY_FILE}" && -n "${KEY_TEXT}" ]]; then
+        error "--key-name, --key-file, and --key-text are mutually exclusive"
+    fi
+    if [[ -n "${KEY_NAME}" ]]; then
+        case "${KEY_NAME}" in
+            (*[!A-Za-z0-9._-]*)
+                error "--key-name may only contain letters, numbers, dot, underscore, and hyphen"
+                ;;
+        esac
+    fi
 fi
 
 if [[ "${ACTION}" == "bootstrap" && -z "${TARGET_COMMENT}" ]]; then
@@ -97,20 +134,58 @@ if [[ "${ACTION}" == "bootstrap" && -z "${TARGET_COMMENT}" ]]; then
 fi
 
 SSH_KEY_SOURCE_TMP=""
+SSH_KEY_SOURCE_DESC=""
 cleanup() {
-    [[ -n "${SSH_KEY_SOURCE_TMP}" && -f "${SSH_KEY_SOURCE_TMP}" ]] && rm -f "${SSH_KEY_SOURCE_TMP}"
+    if [[ -n "${SSH_KEY_SOURCE_TMP}" && -f "${SSH_KEY_SOURCE_TMP}" ]]; then
+        rm -f "${SSH_KEY_SOURCE_TMP}"
+    fi
 }
 trap cleanup EXIT
 
+list_bootstrap_keys() {
+    local key_file key_name key_comment
+    local -a key_rows=()
+
+    shopt -s nullglob
+    local -a key_files=("${BOOTSTRAP_KEY_DIR}"/*.pub)
+    shopt -u nullglob
+
+    section "Bootstrap Keys"
+    if [[ "${#key_files[@]}" -eq 0 ]]; then
+        warn "No repo-managed bootstrap keys found in ${BOOTSTRAP_KEY_DIR}"
+        return
+    fi
+
+    for key_file in "${key_files[@]}"; do
+        key_name="$(basename "${key_file}" .pub)"
+        key_comment="$(awk 'NF { $1=""; $2=""; sub(/^  */, ""); print; exit }' "${key_file}")"
+        key_rows+=( "${key_name}"$'\t'"${key_comment}" )
+    done
+
+    printf '%-20s %s\n' "Name" "Comment"
+    printf '%-20s %s\n' "----" "-------"
+    while IFS=$'\t' read -r key_name key_comment; do
+        printf '%-20s %s\n' "${key_name}" "${key_comment}"
+    done < <(printf '%s\n' "${key_rows[@]}" | sort)
+
+    return 0
+}
+
 prepare_ssh_key_source() {
     SSH_KEY_SOURCE_TMP="$(mktemp)"
-    if [[ -n "${KEY_TEXT}" ]]; then
+    if [[ -n "${KEY_NAME}" ]]; then
+        local key_path
+        key_path="${BOOTSTRAP_KEY_DIR}/${KEY_NAME}.pub"
+        [[ -f "${key_path}" ]] || error "Bootstrap key not found: ${key_path}"
+        SSH_KEY_SOURCE_DESC="repo key '${KEY_NAME}'"
+        grep -vE '^[[:space:]]*#' "${key_path}" | sed '/^[[:space:]]*$/d' > "${SSH_KEY_SOURCE_TMP}"
+    elif [[ -n "${KEY_TEXT}" ]]; then
+        SSH_KEY_SOURCE_DESC="pasted key text"
         printf '%s\n' "${KEY_TEXT}" | grep -vE '^[[:space:]]*#' | sed '/^[[:space:]]*$/d' > "${SSH_KEY_SOURCE_TMP}"
     elif [[ -n "${KEY_FILE}" ]]; then
+        SSH_KEY_SOURCE_DESC="key file '${KEY_FILE}'"
         [[ -f "${KEY_FILE}" ]] || error "SSH key file not found: ${KEY_FILE}"
         grep -vE '^[[:space:]]*#' "${KEY_FILE}" | sed '/^[[:space:]]*$/d' > "${SSH_KEY_SOURCE_TMP}"
-    else
-        printf '%s\n' "${DEFAULT_REPO_KEY}" > "${SSH_KEY_SOURCE_TMP}"
     fi
     [[ -s "${SSH_KEY_SOURCE_TMP}" ]] || error "SSH key source is empty"
 }
@@ -143,7 +218,9 @@ status_report() {
         warn "User is not in sudo group"
     fi
 
-    if [[ -n "${home_dir}" && -f "${authorized_keys}" ]]; then
+    if [[ -z "${SSH_KEY_SOURCE_TMP}" ]]; then
+        warn "No key selector provided; skipping SSH key presence check"
+    elif [[ -n "${home_dir}" && -f "${authorized_keys}" ]]; then
         local key_count=0 key_missing=0 key
         while IFS= read -r key; do
             [[ -n "${key}" ]] || continue
@@ -236,19 +313,31 @@ install_passwordless_sudo() {
     success "Added passwordless sudoers drop-in for ${TARGET_USER}"
 }
 
-section "User Bootstrap"
-info "Target user: ${TARGET_USER}"
-
-prepare_ssh_key_source
-
 case "${ACTION}" in
+    list-keys)
+        list_bootstrap_keys
+        ;;
     status)
+        section "User Bootstrap"
+        info "Target user: ${TARGET_USER}"
+        if [[ -n "${KEY_NAME}" || -n "${KEY_FILE}" || -n "${KEY_TEXT}" ]]; then
+            prepare_ssh_key_source
+            info "SSH key source: ${SSH_KEY_SOURCE_DESC}"
+        fi
         status_report
         ;;
     bootstrap)
+        section "User Bootstrap"
+        info "Target user: ${TARGET_USER}"
+        [[ -n "${KEY_NAME}" || -n "${KEY_FILE}" || -n "${KEY_TEXT}" ]] || error "One of --key-name, --key-file, or --key-text is required"
+        prepare_ssh_key_source
+        info "SSH key source: ${SSH_KEY_SOURCE_DESC}"
         ensure_user
         install_authorized_keys
         install_passwordless_sudo
         success "User bootstrap complete for ${TARGET_USER}"
+        ;;
+    *)
+        error "Unknown action: ${ACTION}"
         ;;
 esac
