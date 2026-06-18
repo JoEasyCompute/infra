@@ -102,8 +102,9 @@ Current behavior:
 Current behavior:
 
 - `install/base-install.sh` still performs the normal SSH authorized-key and passwordless sudo setup for the target user during provisioning
-- `install/user-bootstrap.sh` exists as a standalone helper for operators who want to create or update a user account, install the repo SSH key, a custom key file, or pasted key text, and grant passwordless sudo without rerunning the full base install
-- the helper is intended for the current sudo user by default only when you pass that user explicitly
+- `install/user-bootstrap.sh` exists as a standalone helper for operators who want to create or update a user account, install a named repo bootstrap key from `keys/bootstrap/`, a custom key file, or pasted key text, and grant passwordless sudo without rerunning the full base install
+- `install/user-bootstrap.sh --list-keys` shows available repo-managed bootstrap key names without requiring root
+- the helper requires an explicit key selector for bootstrap mode and does not fall back to a hidden default key
 - `root` remains unsupported as a bootstrap target
 
 ### 8. Sustained stress detects 12V-2x6 / 12VHPWR power anomalies as remarks by default

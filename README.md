@@ -200,7 +200,7 @@ Use this as the shortest path from intent to script:
 | Fresh NVIDIA node | [install/provision.sh](install/provision.sh) | Orchestrated across reboots; best default for full NVIDIA provisioning |
 | Fresh AMD node | [install/provision-amd.sh](install/provision-amd.sh) | Orchestrated across reboots; best default for full AMD provisioning |
 | Host tooling only | [install/base-install.sh](install/base-install.sh) `--no-gpu-stack` | Installs the shared operator toolkit, recovery policy, aliases, and helper tooling without NVIDIA drivers or CUDA |
-| Bootstrap a local user | [install/user-bootstrap.sh](install/user-bootstrap.sh) | Creates or updates a user, adds sudo-group access, installs SSH authorized keys from a file or inline text, and writes a passwordless sudoers drop-in |
+| Bootstrap a local user | [install/user-bootstrap.sh](install/user-bootstrap.sh) | Creates or updates a user, adds sudo-group access, installs SSH authorized keys from a named repo key, file, or inline text, and writes a passwordless sudoers drop-in |
 | Manage graphical autologin | [install/autologin.sh](install/autologin.sh) | Enables or disables desktop autologin for the current sudo user on GDM3, LightDM, or SDDM |
 | Manage console autologin | [install/console-autologin.sh](install/console-autologin.sh) | Enables or disables tty1 autologin for the current sudo user |
 | Validate NVIDIA node | [test/fulltest.sh](test/fulltest.sh) | Stable production validation path |
@@ -428,7 +428,7 @@ Important login, access, and recovery helpers under [install/](install):
 
 - [install/autologin.sh](install/autologin.sh): enables or disables graphical autologin for the current sudo user on supported desktop managers
 - [install/console-autologin.sh](install/console-autologin.sh): enables or disables tty1 console autologin for the current sudo user
-- [install/user-bootstrap.sh](install/user-bootstrap.sh): creates or updates a user, installs the repo SSH key, and grants passwordless sudo
+- [install/user-bootstrap.sh](install/user-bootstrap.sh): creates or updates a user, installs a named repo SSH key from `keys/bootstrap/`, or accepts a file / pasted key, then grants passwordless sudo
 - [install/force-reboot.sh](install/force-reboot.sh): last-resort in-band SysRq reboot helper from the host console
 - [install/ipmi-power-cycle.sh](install/ipmi-power-cycle.sh): out-of-band BMC/IPMI chassis power-cycle helper for hosts that cannot complete an in-band reboot
 - [install/rebuild-gpu-livefs.sh](install/rebuild-gpu-livefs.sh): rebuilds the `gpu-test` live image from a mounted USB root filesystem
