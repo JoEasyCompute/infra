@@ -664,6 +664,31 @@ EOF
         || warn "systemd daemon-reexec failed; timeout changes will apply after reboot"
 }
 
+configure_pcie_aspm() {
+    section "PCIe ASPM Policy"
+
+    local grub_d="/etc/default/grub.d/99-infra-pcie-aspm.cfg"
+
+    sudo install -d -m 0755 /etc/default/grub.d
+    sudo tee "${grub_d}" >/dev/null <<'EOF'
+# PCIe ASPM policy — added by base-install.sh
+case " ${GRUB_CMDLINE_LINUX_DEFAULT:-} " in
+    *" pcie_aspm=off "*) ;;
+    *) GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:+${GRUB_CMDLINE_LINUX_DEFAULT} }pcie_aspm=off" ;;
+esac
+EOF
+    sudo chown root:root "${grub_d}"
+    sudo chmod 0644 "${grub_d}"
+
+    if command -v update-grub &>/dev/null; then
+        sudo update-grub >/dev/null \
+            && success "Applied PCIe ASPM policy from ${grub_d}" \
+            || warn "update-grub reported warnings while applying ${grub_d}"
+    else
+        warn "update-grub not found — reboot will not pick up ${grub_d} until grub config is regenerated"
+    fi
+}
+
 remove_gpu_fallback_recovery() {
     section "Removing GPU Fallback Recovery Policy"
 
@@ -701,6 +726,23 @@ remove_gpu_fallback_recovery() {
     sudo systemctl daemon-reexec 2>/dev/null \
         && success "systemd manager configuration reloaded" \
         || warn "systemd daemon-reexec failed; timeout cleanup will fully apply after reboot"
+}
+
+remove_pcie_aspm() {
+    section "Removing PCIe ASPM Policy"
+
+    local grub_d="/etc/default/grub.d/99-infra-pcie-aspm.cfg"
+
+    if [[ -f "${grub_d}" ]]; then
+        sudo rm -f "${grub_d}"
+        success "Removed ${grub_d}"
+        if command -v update-grub &>/dev/null; then
+            sudo update-grub >/dev/null \
+                || warn "update-grub reported warnings after removing ${grub_d}"
+        fi
+    else
+        info "${grub_d} not present — skipping"
+    fi
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -1083,6 +1125,7 @@ offer_reboot() {
     echo -e "${BOLD}════════════════════════════════════════${NC}"
     echo -e "${GREEN}${BOLD} Installation complete!${NC}"
     echo -e "  Driver: ${DRIVER_VERSION}-open  |  CUDA: ${CUDA_DISPLAY_VERSION}  |  Ubuntu: ${UBUNTU_VERSION_ID}"
+    echo -e "  PCIe ASPM: disabled (pcie_aspm=off)"
     echo -e "  Full log: ${LOG_FILE}"
     echo -e "${BOLD}════════════════════════════════════════${NC}"
     echo ""
@@ -1133,6 +1176,7 @@ uninstall_node() {
     echo "  • /etc/profile.d/infra-python.sh benchmark Python entry"
     echo "  • /etc/ld.so.conf.d/ CUDA library path entries"
     echo "  • GPU fallback recovery systemd/sysctl settings"
+    echo "  • PCIe ASPM boot policy (pcie_aspm=off)"
     echo "  • GCC update-alternatives entries"
     echo "  • Storage tools: smartmontools, lvm2, mdadm, lsof, ioping"
     echo "  • gpu-burn and infra repos (optional)"
@@ -1305,6 +1349,9 @@ uninstall_node() {
 
     # ── 9.2. Remove GPU fallback recovery policy ──────────────
     remove_gpu_fallback_recovery
+
+    # ── 9.3. Remove PCIe ASPM policy ──────────────────────────
+    remove_pcie_aspm
 
     # ── 9.5. Remove shell aliases ─────────────────────────────
     section "Removing Shell Aliases"
@@ -1560,6 +1607,7 @@ main() {
         install_cli_tool_compat_symlinks
         install_yq_tool
         configure_gpu_fallback_recovery
+        configure_pcie_aspm
         install_user_access
         install_shell_aliases
         configure_gcc_alternatives
