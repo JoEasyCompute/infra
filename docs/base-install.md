@@ -137,6 +137,8 @@ During install, `base-install.sh` also writes a managed GRUB drop-in:
 
 The drop-in is a separate managed file so reruns are idempotent and uninstall can remove only the installer-managed policy. After writing the file, the installer runs `update-grub` so the next boot picks up the change.
 
+To inspect, enable, or disable the same policy after provisioning, use `install/pcie-aspm.sh`. The operator reference lives in [docs/pcie-aspm.md](pcie-aspm.md).
+
 For a last-resort in-band emergency reboot from the host console, use `install/force-reboot.sh --yes` as root. It syncs filesystems, remounts them read-only, then triggers a SysRq reboot. It defaults to dry-run unless `--yes` is supplied.
 
 For manual out-of-band recovery, use `install/ipmi-power-cycle.sh` from an operator machine that can reach the BMC/IPMI network:

@@ -16,6 +16,8 @@ The short version:
 - **`network-test`** = link, routing, MTU, bandwidth, remote reachability
 - **`cpu-test` / `cpu-ram-stress` / `ramtest`** = CPU, RAM, socket, thermal, memory-controller issues
 
+Provisioned NVIDIA and AMD hosts now boot with the managed PCIe ASPM policy disabled by default. If a PCIe link still looks slow under load, treat BIOS lane-speed caps, bifurcation, or riser issues as the next suspects before assuming ASPM is the cause.
+
 ---
 
 ## Quick Decision Tree

@@ -191,6 +191,7 @@ The NVIDIA and AMD base-install scripts also install a small operator tool bundl
 On the NVIDIA path, `base-install.sh` currently supports driver 575, 580, 595, and 610, with CUDA toolkit options 12.9, 13.0, and 13.3.
 If you only want the host tooling and not the NVIDIA stack yet, `base-install.sh --no-gpu-stack` skips the driver, CUDA toolkit, DCGM, and gpu-burn steps.
 Both `base-install.sh` and `amd-base-install.sh` also disable PCIe ASPM at boot via a managed `pcie_aspm=off` GRUB drop-in.
+If you need to inspect or toggle that policy later, use [install/pcie-aspm.sh](install/pcie-aspm.sh).
 
 ## Operator Entry Matrix
 
@@ -204,6 +205,7 @@ Use this as the shortest path from intent to script:
 | Bootstrap a local user | [install/user-bootstrap.sh](install/user-bootstrap.sh) | Creates or updates a user, adds sudo-group access, installs SSH authorized keys from a named repo key, file, or inline text, and writes a passwordless sudoers drop-in |
 | Manage graphical autologin | [install/autologin.sh](install/autologin.sh) | Enables or disables desktop autologin for the current sudo user on GDM3, LightDM, or SDDM |
 | Manage console autologin | [install/console-autologin.sh](install/console-autologin.sh) | Enables or disables tty1 autologin for the current sudo user |
+| Manage PCIe ASPM policy | [install/pcie-aspm.sh](install/pcie-aspm.sh) | Shows the current boot policy and writes or removes the managed `pcie_aspm=off` GRUB drop-in |
 | Validate NVIDIA node | [test/fulltest.sh](test/fulltest.sh) | Stable production validation path |
 | Validate experimental NVIDIA flow | [test/gpu-fulltest-v2.sh](test/gpu-fulltest-v2.sh) | Prepare-then-run experimental lane for NVIDIA validation changes |
 | Rebuild live root | [install/rebuild-gpu-livefs.sh](install/rebuild-gpu-livefs.sh) | Copies a mounted USB root filesystem and regenerates the `gpu-test` live tree |
