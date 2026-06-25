@@ -950,15 +950,16 @@ test_pcie() {
     # lane width never power-gates. Gen mismatches are warnings only, because even
     # under load some platforms briefly drop before re-negotiating.
 
-    local aspm_policy aspm_boot_state
+    local aspm_policy managed_boot_policy managed_boot_policy_complete=true boot_arg
     aspm_policy=$(cat /sys/module/pcie_aspm/parameters/policy 2>/dev/null || echo "unknown")
-    if grep -qw 'pcie_aspm=off' /proc/cmdline 2>/dev/null; then
-        aspm_boot_state="pcie_aspm=off present in current boot cmdline"
-    else
-        aspm_boot_state="pcie_aspm=off absent from current boot cmdline"
-    fi
+    for boot_arg in pcie_aspm=off pci=noaer pcie_aspm.policy=performance nvme_core.default_ps_max_latency_us=0; do
+        if ! grep -Fqw "${boot_arg}" /proc/cmdline 2>/dev/null; then
+            managed_boot_policy_complete=false
+        fi
+    done
     log "  PCIe ASPM policy : $aspm_policy"
-    log "  Boot cmdline     : $aspm_boot_state"
+    managed_boot_policy="pcie_aspm=off=$(grep -Fqw 'pcie_aspm=off' /proc/cmdline 2>/dev/null && echo yes || echo no), pci=noaer=$(grep -Fqw 'pci=noaer' /proc/cmdline 2>/dev/null && echo yes || echo no), pcie_aspm.policy=performance=$(grep -Fqw 'pcie_aspm.policy=performance' /proc/cmdline 2>/dev/null && echo yes || echo no), nvme_core.default_ps_max_latency_us=0=$(grep -Fqw 'nvme_core.default_ps_max_latency_us=0' /proc/cmdline 2>/dev/null && echo yes || echo no)"
+    log "  Managed boot policy: $managed_boot_policy"
     log "  Spinning up GPU load to force links to full speed before sampling..."
 
     # Run load on all GPUs for 10 seconds, sample in the middle while it's active
@@ -1035,10 +1036,10 @@ PYEOF
     if [ "$any_gen_warn" = true ]; then
         log "  NOTE: Generation mismatch detected (warning only — not a failure)."
         log "  Gen speed can legitimately stay low due to:"
-        if grep -qw 'pcie_aspm=off' /proc/cmdline 2>/dev/null; then
-            log "    • ASPM is already disabled for this boot; look at BIOS PCIe speed caps, lane bifurcation, or riser issues."
+        if [ "${managed_boot_policy_complete}" = true ]; then
+            log "    • Managed boot policy is already present; look at BIOS PCIe speed caps, lane bifurcation, or riser issues."
         else
-            log "    • ASPM is still active on this boot; run install/pcie-aspm.sh --enable and reboot to rule it out."
+            log "    • Managed boot policy is not present; run install/pcie-aspm.sh --enable and reboot to rule it out."
         fi
         log "    • BIOS PCIe speed forced to Gen1/Gen2 — set to Auto or Gen3/Gen4"
         log "    • 'Above 4G Decoding' disabled in BIOS (required for 8-GPU systems)"

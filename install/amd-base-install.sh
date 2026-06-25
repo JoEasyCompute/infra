@@ -418,16 +418,28 @@ install_base_packages() {
 }
 
 configure_pcie_aspm() {
-    section "PCIe ASPM Policy"
+    section "PCIe / NVMe Boot Policy"
 
     local grub_d="/etc/default/grub.d/99-infra-pcie-aspm.cfg"
 
     sudo install -d -m 0755 /etc/default/grub.d
     sudo tee "${grub_d}" >/dev/null <<'EOF'
-# PCIe ASPM policy — added by amd-base-install.sh
+# PCIe / storage boot policy — added by amd-base-install.sh
 case " ${GRUB_CMDLINE_LINUX_DEFAULT:-} " in
     *" pcie_aspm=off "*) ;;
     *) GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:+${GRUB_CMDLINE_LINUX_DEFAULT} }pcie_aspm=off" ;;
+esac
+case " ${GRUB_CMDLINE_LINUX_DEFAULT:-} " in
+    *" pci=noaer "*) ;;
+    *) GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:+${GRUB_CMDLINE_LINUX_DEFAULT} }pci=noaer" ;;
+esac
+case " ${GRUB_CMDLINE_LINUX_DEFAULT:-} " in
+    *" pcie_aspm.policy=performance "*) ;;
+    *) GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:+${GRUB_CMDLINE_LINUX_DEFAULT} }pcie_aspm.policy=performance" ;;
+esac
+case " ${GRUB_CMDLINE_LINUX_DEFAULT:-} " in
+    *" nvme_core.default_ps_max_latency_us=0 "*) ;;
+    *) GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:+${GRUB_CMDLINE_LINUX_DEFAULT} }nvme_core.default_ps_max_latency_us=0" ;;
 esac
 EOF
     sudo chown root:root "${grub_d}"
@@ -435,7 +447,7 @@ EOF
 
     if command -v update-grub &>/dev/null; then
         sudo update-grub >/dev/null \
-            && success "Applied PCIe ASPM policy from ${grub_d}" \
+            && success "Applied PCIe / NVMe boot policy from ${grub_d}" \
             || warn "update-grub reported warnings while applying ${grub_d}"
     else
         warn "update-grub not found — reboot will not pick up ${grub_d} until grub config is regenerated"
@@ -443,7 +455,7 @@ EOF
 }
 
 remove_pcie_aspm() {
-    section "Removing PCIe ASPM Policy"
+    section "Removing PCIe / NVMe Boot Policy"
 
     local grub_d="/etc/default/grub.d/99-infra-pcie-aspm.cfg"
 
@@ -933,7 +945,7 @@ offer_reboot() {
     echo -e "${BOLD}=======================================${NC}"
     echo -e "${GREEN}${BOLD} Installation complete!${NC}"
     echo -e "  ROCm: ${ROCM_VERSION}  |  Ubuntu: ${UBUNTU_VERSION_ID}"
-    echo -e "  PCIe ASPM: disabled (pcie_aspm=off)"
+    echo -e "  PCIe boot policy: managed (pcie_aspm=off, pci=noaer, pcie_aspm.policy=performance, nvme_core.default_ps_max_latency_us=0)"
     echo -e "  Full log: ${LOG_FILE}"
     echo -e "${BOLD}=======================================${NC}"
     echo ""
@@ -977,7 +989,7 @@ uninstall_node() {
     echo "  * /etc/apt/keyrings/rocm.gpg, /etc/apt/keyrings/amdrocm.gpg"
     echo "  * /etc/profile.d/rocm.sh PATH + ML env vars (PYTORCH_ROCM_ARCH etc.)"
     echo "  * /opt/rocm directory"
-    echo "  * PCIe ASPM boot policy (pcie_aspm=off)"
+    echo "  * PCIe / NVMe boot policy (pcie_aspm=off, pci=noaer, pcie_aspm.policy=performance, nvme_core.default_ps_max_latency_us=0)"
     echo "  * GCC update-alternatives entries"
     echo "  * Storage tools: smartmontools, lvm2, mdadm, lsof, ioping"
     echo "  * infra repo (optional)"
@@ -1065,7 +1077,7 @@ uninstall_node() {
     export PATH=$(echo "${PATH}" | tr ':' '\n' | grep -v rocm | tr '\n' ':' | sed 's/:$//')
     export LD_LIBRARY_PATH=$(echo "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v rocm | tr '\n' ':' | sed 's/:$//')
 
-    # -- 5.5. Remove PCIe ASPM policy -----------------------------
+    # -- 5.5. Remove PCIe / NVMe boot policy ----------------------
     remove_pcie_aspm
 
     # -- 6. Remove AMD apt sources and keyring --------------------

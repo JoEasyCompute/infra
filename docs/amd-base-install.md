@@ -23,7 +23,7 @@ The script is GPU-agnostic — it works for any ROCm-supported AMD GPU including
 
 This script is the AMD counterpart to `base-install.sh` (NVIDIA/CUDA). The design patterns are identical — same logging, preflight checks, interactive/non-interactive modes, structured sections, and full uninstall capability.
 
-It also disables PCIe ASPM at boot by writing a managed GRUB drop-in that appends `pcie_aspm=off`. The drop-in is removed again during uninstall.
+It also writes a managed GRUB drop-in that appends `pcie_aspm=off`, `pci=noaer`, `pcie_aspm.policy=performance`, and `nvme_core.default_ps_max_latency_us=0`. The drop-in is removed again during uninstall.
 
 Ubuntu 26.04 is treated as an experimental ROCm 7.13 preview lane. The script uses AMD's 31.30 preview driver repository plus the `amdrocm7.13` package family for that OS, while 22.04 and 24.04 stay on the current production ROCm flow.
 
@@ -44,9 +44,9 @@ The `rocm` meta-package pulls in: HIP runtime, OpenCL, rocBLAS, rocFFT, MIOpen (
 
 PyTorch is intentionally not pip-installed by this script. The correct ROCm wheel index URL changes per release, most production workloads use per-project venvs or Docker (`rocm/pytorch` images), and the driver must be loaded (post-reboot) before `torch.cuda` is useful. The script prints the exact install commands to run post-reboot.
 
-### PCIe ASPM policy
+### PCIe / NVMe boot policy
 
-The installer also writes `/etc/default/grub.d/99-infra-pcie-aspm.cfg` so the next boot appends `pcie_aspm=off`. Uninstall removes the drop-in and regenerates grub configuration.
+The installer also writes `/etc/default/grub.d/99-infra-pcie-aspm.cfg` so the next boot appends the managed PCIe / NVMe boot policy args. Uninstall removes the drop-in and regenerates grub configuration.
 
 Use `install/pcie-aspm.sh` later if you need to inspect, enable, or disable the same boot policy by hand. The operator reference lives in [docs/pcie-aspm.md](pcie-aspm.md).
 
