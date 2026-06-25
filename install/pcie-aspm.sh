@@ -14,15 +14,21 @@ section() { echo -e "\n${BOLD}${CYAN}-- $* --${NC}"; }
 
 ACTION=""
 GRUB_DROPIN="/etc/default/grub.d/99-infra-pcie-aspm.cfg"
+MANAGED_BOOT_ARGS=(
+    "pcie_aspm=off"
+    "pci=noaer"
+    "pcie_aspm.policy=performance"
+    "nvme_core.default_ps_max_latency_us=0"
+)
 
 usage() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-  --enable               Write the managed GRUB drop-in that appends pcie_aspm=off
+  --enable               Write the managed GRUB drop-in that appends the boot policy args
   --disable              Remove the managed GRUB drop-in
-  --status               Show the managed drop-in and current boot PCIe ASPM state
+  --status               Show the managed drop-in and current boot policy state
   -h, --help             Show this help
 
 Notes:
@@ -68,8 +74,36 @@ current_policy() {
     fi
 }
 
-boot_cmdline_has_aspm_off() {
-    grep -qw 'pcie_aspm=off' /proc/cmdline 2>/dev/null
+boot_cmdline_has_arg() {
+    local arg="$1"
+    grep -Fqw -- "${arg}" /proc/cmdline 2>/dev/null
+}
+
+boot_cmdline_policy_summary() {
+    local present=()
+    local arg
+    for arg in "${MANAGED_BOOT_ARGS[@]}"; do
+        if boot_cmdline_has_arg "${arg}"; then
+            present+=("${arg}")
+        fi
+    done
+
+    if ((${#present[@]} == 0)); then
+        echo "none"
+    else
+        local IFS=', '
+        echo "${present[*]}"
+    fi
+}
+
+boot_policy_is_complete() {
+    local arg
+    for arg in "${MANAGED_BOOT_ARGS[@]}"; do
+        if ! boot_cmdline_has_arg "${arg}"; then
+            return 1
+        fi
+    done
+    return 0
 }
 
 managed_dropin_status() {
@@ -90,51 +124,56 @@ ensure_grub_update() {
 
 write_dropin() {
     install -d -m 0755 /etc/default/grub.d
-    cat > "${GRUB_DROPIN}" <<'EOF'
+    {
+        cat <<EOF
 # Managed by install/pcie-aspm.sh
-case " ${GRUB_CMDLINE_LINUX_DEFAULT:-} " in
-    *" pcie_aspm=off "*) ;;
-    *) GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:+${GRUB_CMDLINE_LINUX_DEFAULT} }pcie_aspm=off" ;;
-esac
 EOF
+        local arg
+        for arg in "${MANAGED_BOOT_ARGS[@]}"; do
+            printf 'case " ${GRUB_CMDLINE_LINUX_DEFAULT:-} " in\n'
+            printf '    *" %s "*) ;;\n' "${arg}"
+            printf '    *) GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:+${GRUB_CMDLINE_LINUX_DEFAULT} }%s" ;;\n' "${arg}"
+            printf 'esac\n'
+        done
+    } > "${GRUB_DROPIN}"
     chmod 0644 "${GRUB_DROPIN}"
 }
 
 show_status() {
-    section "PCIe ASPM Policy"
+    section "PCIe / NVMe Boot Policy"
     info "Managed GRUB drop-in : ${GRUB_DROPIN}"
     info "Drop-in state         : $(managed_dropin_status)"
     if [[ -f "${GRUB_DROPIN}" ]]; then
-        info "Configured for next boot: pcie_aspm=off"
+        info "Configured for next boot: $(printf '%s' "${MANAGED_BOOT_ARGS[*]}")"
     else
-        info "Configured for next boot: not forcing pcie_aspm=off"
+        info "Configured for next boot: not forcing managed boot args"
     fi
-    info "Current boot cmdline  : $(boot_cmdline_has_aspm_off && echo 'pcie_aspm=off present' || echo 'pcie_aspm=off absent')"
+    info "Current boot cmdline  : $(boot_cmdline_policy_summary)"
     info "Active module policy  : $(current_policy)"
-    if boot_cmdline_has_aspm_off; then
-        success "PCIe ASPM is disabled for the current boot"
+    if boot_policy_is_complete; then
+        success "Managed PCIe / NVMe boot policy is present in the current boot"
     else
-        warn "PCIe ASPM is not disabled for the current boot"
+        warn "Managed PCIe / NVMe boot policy is incomplete or absent in the current boot"
     fi
 }
 
 enable_policy() {
-    section "PCIe ASPM Policy"
+    section "PCIe / NVMe Boot Policy"
     write_dropin
     ensure_grub_update
-    success "Enabled managed PCIe ASPM boot policy"
+    success "Enabled managed PCIe / NVMe boot policy"
     warn "Reboot required for the change to take effect"
 }
 
 disable_policy() {
-    section "PCIe ASPM Policy"
+    section "PCIe / NVMe Boot Policy"
     if [[ -f "${GRUB_DROPIN}" ]]; then
         rm -f "${GRUB_DROPIN}"
         ensure_grub_update
-        success "Disabled managed PCIe ASPM boot policy"
+        success "Disabled managed PCIe / NVMe boot policy"
         warn "Reboot required for the change to take effect"
     else
-        info "Managed PCIe ASPM boot policy is already disabled"
+        info "Managed PCIe / NVMe boot policy is already disabled"
         if command -v update-grub >/dev/null 2>&1; then
             ensure_grub_update
         fi

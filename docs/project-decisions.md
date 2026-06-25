@@ -97,12 +97,12 @@ Current behavior:
 - `install/build-gpu-liveiso.sh` is the standalone helper that turns a mounted USB root filesystem into a bootable `gpu-test` ISO without requiring the intermediate `rebuild-gpu-livefs.sh` step
 - uninstall removes the managed systemd block and the sysctl drop-in
 
-### 7. Base installs disable PCIe ASPM at boot
+### 7. Base installs manage PCIe / NVMe boot policy at install time
 
 Current behavior:
 
 - `install/base-install.sh` and `install/amd-base-install.sh` both write a managed GRUB drop-in at `/etc/default/grub.d/99-infra-pcie-aspm.cfg`
-- the drop-in appends `pcie_aspm=off` to the boot command line so PCIe ASPM is disabled by default on fresh installs
+- the drop-in appends `pcie_aspm=off`, `pci=noaer`, `pcie_aspm.policy=performance`, and `nvme_core.default_ps_max_latency_us=0` to the boot command line so PCIe / storage power-management is tuned consistently on fresh installs
 - the setting is idempotent across reruns because it lives in a managed drop-in rather than a hand-edited grub file
 - `install/pcie-aspm.sh` is the standalone operator helper for checking, enabling, or disabling that same managed boot policy after provisioning
 - uninstall removes the drop-in and regenerates grub configuration
