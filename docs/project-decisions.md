@@ -97,7 +97,18 @@ Current behavior:
 - `install/build-gpu-liveiso.sh` is the standalone helper that turns a mounted USB root filesystem into a bootable `gpu-test` ISO without requiring the intermediate `rebuild-gpu-livefs.sh` step
 - uninstall removes the managed systemd block and the sysctl drop-in
 
-### 7. User bootstrap is available as a standalone helper
+### 7. Base installs disable PCIe ASPM at boot
+
+Current behavior:
+
+- `install/base-install.sh` and `install/amd-base-install.sh` both write a managed GRUB drop-in at `/etc/default/grub.d/99-infra-pcie-aspm.cfg`
+- the drop-in appends `pcie_aspm=off` to the boot command line so PCIe ASPM is disabled by default on fresh installs
+- the setting is idempotent across reruns because it lives in a managed drop-in rather than a hand-edited grub file
+- uninstall removes the drop-in and regenerates grub configuration
+
+This is a conservative stability choice for GPU hosts where ASPM-related link state changes can contribute to device instability.
+
+### 8. User bootstrap is available as a standalone helper
 
 Current behavior:
 
@@ -107,7 +118,7 @@ Current behavior:
 - the helper requires an explicit key selector for bootstrap mode and does not fall back to a hidden default key
 - `root` remains unsupported as a bootstrap target
 
-### 8. Sustained stress detects 12V-2x6 / 12VHPWR power anomalies as remarks by default
+### 9. Sustained stress detects 12V-2x6 / 12VHPWR power anomalies as remarks by default
 
 Current behavior:
 
@@ -117,7 +128,7 @@ Current behavior:
 - the warning is treated as a connector early-warning, not a generic thermal failure, because it is intended to catch likely 12V-2x6 / 12VHPWR contact resistance issues before the GPU falls off the bus
 - the same detector and default behavior are documented in both `docs/fulltest.md` and `docs/gpu-fulltest-v2.md`
 
-### 9. Future improvement plans for the power-anomaly detector
+### 10. Future improvement plans for the power-anomaly detector
 
 Planned follow-up work:
 
@@ -127,7 +138,7 @@ Planned follow-up work:
 
 These are tracked as future improvements, not current behavior.
 
-### 10. `code.sh` is a lightweight per-GPU CUDA stress lane
+### 11. `code.sh` is a lightweight per-GPU CUDA stress lane
 
 Current behavior:
 

@@ -417,6 +417,48 @@ install_base_packages() {
     success "Base packages installed"
 }
 
+configure_pcie_aspm() {
+    section "PCIe ASPM Policy"
+
+    local grub_d="/etc/default/grub.d/99-infra-pcie-aspm.cfg"
+
+    sudo install -d -m 0755 /etc/default/grub.d
+    sudo tee "${grub_d}" >/dev/null <<'EOF'
+# PCIe ASPM policy — added by amd-base-install.sh
+case " ${GRUB_CMDLINE_LINUX_DEFAULT:-} " in
+    *" pcie_aspm=off "*) ;;
+    *) GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:+${GRUB_CMDLINE_LINUX_DEFAULT} }pcie_aspm=off" ;;
+esac
+EOF
+    sudo chown root:root "${grub_d}"
+    sudo chmod 0644 "${grub_d}"
+
+    if command -v update-grub &>/dev/null; then
+        sudo update-grub >/dev/null \
+            && success "Applied PCIe ASPM policy from ${grub_d}" \
+            || warn "update-grub reported warnings while applying ${grub_d}"
+    else
+        warn "update-grub not found — reboot will not pick up ${grub_d} until grub config is regenerated"
+    fi
+}
+
+remove_pcie_aspm() {
+    section "Removing PCIe ASPM Policy"
+
+    local grub_d="/etc/default/grub.d/99-infra-pcie-aspm.cfg"
+
+    if [[ -f "${grub_d}" ]]; then
+        sudo rm -f "${grub_d}"
+        success "Removed ${grub_d}"
+        if command -v update-grub &>/dev/null; then
+            sudo update-grub >/dev/null \
+                || warn "update-grub reported warnings after removing ${grub_d}"
+        fi
+    else
+        info "${grub_d} not present -- skipping"
+    fi
+}
+
 install_yq_tool() {
     section "yq Installation"
 
@@ -891,6 +933,7 @@ offer_reboot() {
     echo -e "${BOLD}=======================================${NC}"
     echo -e "${GREEN}${BOLD} Installation complete!${NC}"
     echo -e "  ROCm: ${ROCM_VERSION}  |  Ubuntu: ${UBUNTU_VERSION_ID}"
+    echo -e "  PCIe ASPM: disabled (pcie_aspm=off)"
     echo -e "  Full log: ${LOG_FILE}"
     echo -e "${BOLD}=======================================${NC}"
     echo ""
@@ -934,6 +977,7 @@ uninstall_node() {
     echo "  * /etc/apt/keyrings/rocm.gpg, /etc/apt/keyrings/amdrocm.gpg"
     echo "  * /etc/profile.d/rocm.sh PATH + ML env vars (PYTORCH_ROCM_ARCH etc.)"
     echo "  * /opt/rocm directory"
+    echo "  * PCIe ASPM boot policy (pcie_aspm=off)"
     echo "  * GCC update-alternatives entries"
     echo "  * Storage tools: smartmontools, lvm2, mdadm, lsof, ioping"
     echo "  * infra repo (optional)"
@@ -1020,6 +1064,9 @@ uninstall_node() {
     fi
     export PATH=$(echo "${PATH}" | tr ':' '\n' | grep -v rocm | tr '\n' ':' | sed 's/:$//')
     export LD_LIBRARY_PATH=$(echo "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v rocm | tr '\n' ':' | sed 's/:$//')
+
+    # -- 5.5. Remove PCIe ASPM policy -----------------------------
+    remove_pcie_aspm
 
     # -- 6. Remove AMD apt sources and keyring --------------------
     section "Removing AMD ROCm Repos & Keyring"
@@ -1163,6 +1210,7 @@ main() {
         confirm_install
 
         install_base_packages
+        configure_pcie_aspm
         install_cli_tool_compat_symlinks
         install_yq_tool
         install_python_tooling
