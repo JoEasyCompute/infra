@@ -48,6 +48,8 @@ PyTorch is intentionally not pip-installed by this script. The correct ROCm whee
 
 The installer also writes `/etc/default/grub.d/99-infra-pcie-aspm.cfg` so the next boot appends `pcie_aspm=off`. Uninstall removes the drop-in and regenerates grub configuration.
 
+Use `install/pcie-aspm.sh` later if you need to inspect, enable, or disable the same boot policy by hand. The operator reference lives in [docs/pcie-aspm.md](pcie-aspm.md).
+
 ---
 
 ## Requirements

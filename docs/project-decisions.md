@@ -104,6 +104,7 @@ Current behavior:
 - `install/base-install.sh` and `install/amd-base-install.sh` both write a managed GRUB drop-in at `/etc/default/grub.d/99-infra-pcie-aspm.cfg`
 - the drop-in appends `pcie_aspm=off` to the boot command line so PCIe ASPM is disabled by default on fresh installs
 - the setting is idempotent across reruns because it lives in a managed drop-in rather than a hand-edited grub file
+- `install/pcie-aspm.sh` is the standalone operator helper for checking, enabling, or disabling that same managed boot policy after provisioning
 - uninstall removes the drop-in and regenerates grub configuration
 
 This is a conservative stability choice for GPU hosts where ASPM-related link state changes can contribute to device instability.
