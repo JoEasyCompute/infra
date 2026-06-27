@@ -952,13 +952,13 @@ test_pcie() {
 
     local aspm_policy managed_boot_policy managed_boot_policy_complete=true boot_arg
     aspm_policy=$(cat /sys/module/pcie_aspm/parameters/policy 2>/dev/null || echo "unknown")
-    for boot_arg in pcie_aspm=off pci=noaer pcie_aspm.policy=performance nvme_core.default_ps_max_latency_us=0; do
+    for boot_arg in pcie_aspm=off pci=noaer pci=realloc=on pcie_aspm.policy=performance nvme_core.default_ps_max_latency_us=0; do
         if ! grep -Fqw "${boot_arg}" /proc/cmdline 2>/dev/null; then
             managed_boot_policy_complete=false
         fi
     done
     log "  PCIe ASPM policy : $aspm_policy"
-    managed_boot_policy="pcie_aspm=off=$(grep -Fqw 'pcie_aspm=off' /proc/cmdline 2>/dev/null && echo yes || echo no), pci=noaer=$(grep -Fqw 'pci=noaer' /proc/cmdline 2>/dev/null && echo yes || echo no), pcie_aspm.policy=performance=$(grep -Fqw 'pcie_aspm.policy=performance' /proc/cmdline 2>/dev/null && echo yes || echo no), nvme_core.default_ps_max_latency_us=0=$(grep -Fqw 'nvme_core.default_ps_max_latency_us=0' /proc/cmdline 2>/dev/null && echo yes || echo no)"
+    managed_boot_policy="pcie_aspm=off=$(grep -Fqw 'pcie_aspm=off' /proc/cmdline 2>/dev/null && echo yes || echo no), pci=noaer=$(grep -Fqw 'pci=noaer' /proc/cmdline 2>/dev/null && echo yes || echo no), pci=realloc=on=$(grep -Fqw 'pci=realloc=on' /proc/cmdline 2>/dev/null && echo yes || echo no), pcie_aspm.policy=performance=$(grep -Fqw 'pcie_aspm.policy=performance' /proc/cmdline 2>/dev/null && echo yes || echo no), nvme_core.default_ps_max_latency_us=0=$(grep -Fqw 'nvme_core.default_ps_max_latency_us=0' /proc/cmdline 2>/dev/null && echo yes || echo no)"
     log "  Managed boot policy: $managed_boot_policy"
     log "  Spinning up GPU load to force links to full speed before sampling..."
 

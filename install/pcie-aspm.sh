@@ -17,6 +17,7 @@ GRUB_DROPIN="/etc/default/grub.d/99-infra-pcie-aspm.cfg"
 MANAGED_BOOT_ARGS=(
     "pcie_aspm=off"
     "pci=noaer"
+    "pci=realloc=on"
     "pcie_aspm.policy=performance"
     "nvme_core.default_ps_max_latency_us=0"
 )

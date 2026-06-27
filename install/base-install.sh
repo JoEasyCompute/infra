@@ -681,6 +681,10 @@ case " ${GRUB_CMDLINE_LINUX_DEFAULT:-} " in
     *) GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:+${GRUB_CMDLINE_LINUX_DEFAULT} }pci=noaer" ;;
 esac
 case " ${GRUB_CMDLINE_LINUX_DEFAULT:-} " in
+    *" pci=realloc=on "*) ;;
+    *) GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:+${GRUB_CMDLINE_LINUX_DEFAULT} }pci=realloc=on" ;;
+esac
+case " ${GRUB_CMDLINE_LINUX_DEFAULT:-} " in
     *" pcie_aspm.policy=performance "*) ;;
     *) GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:+${GRUB_CMDLINE_LINUX_DEFAULT} }pcie_aspm.policy=performance" ;;
 esac
@@ -1137,7 +1141,7 @@ offer_reboot() {
     echo -e "${BOLD}════════════════════════════════════════${NC}"
     echo -e "${GREEN}${BOLD} Installation complete!${NC}"
     echo -e "  Driver: ${DRIVER_VERSION}-open  |  CUDA: ${CUDA_DISPLAY_VERSION}  |  Ubuntu: ${UBUNTU_VERSION_ID}"
-    echo -e "  PCIe boot policy: managed (pcie_aspm=off, pci=noaer, pcie_aspm.policy=performance, nvme_core.default_ps_max_latency_us=0)"
+    echo -e "  PCIe boot policy: managed (pcie_aspm=off, pci=noaer, pci=realloc=on, pcie_aspm.policy=performance, nvme_core.default_ps_max_latency_us=0)"
     echo -e "  Full log: ${LOG_FILE}"
     echo -e "${BOLD}════════════════════════════════════════${NC}"
     echo ""
@@ -1188,7 +1192,7 @@ uninstall_node() {
     echo "  • /etc/profile.d/infra-python.sh benchmark Python entry"
     echo "  • /etc/ld.so.conf.d/ CUDA library path entries"
     echo "  • GPU fallback recovery systemd/sysctl settings"
-    echo "  • PCIe / NVMe boot policy (pcie_aspm=off, pci=noaer, pcie_aspm.policy=performance, nvme_core.default_ps_max_latency_us=0)"
+    echo "  • PCIe / NVMe boot policy (pcie_aspm=off, pci=noaer, pci=realloc=on, pcie_aspm.policy=performance, nvme_core.default_ps_max_latency_us=0)"
     echo "  • GCC update-alternatives entries"
     echo "  • Storage tools: smartmontools, lvm2, mdadm, lsof, ioping"
     echo "  • gpu-burn and infra repos (optional)"
