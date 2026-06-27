@@ -23,7 +23,7 @@ The script is GPU-agnostic — it works for any ROCm-supported AMD GPU including
 
 This script is the AMD counterpart to `base-install.sh` (NVIDIA/CUDA). The design patterns are identical — same logging, preflight checks, interactive/non-interactive modes, structured sections, and full uninstall capability.
 
-It also writes a managed GRUB drop-in that appends `pcie_aspm=off`, `pci=noaer`, `pcie_aspm.policy=performance`, and `nvme_core.default_ps_max_latency_us=0`. The drop-in is removed again during uninstall.
+It also writes a managed GRUB drop-in that appends `pcie_aspm=off`, `pci=noaer`, `pci=realloc=on`, `pcie_aspm.policy=performance`, and `nvme_core.default_ps_max_latency_us=0`. The drop-in is removed again during uninstall.
 
 Ubuntu 26.04 is treated as an experimental ROCm 7.13 preview lane. The script uses AMD's 31.30 preview driver repository plus the `amdrocm7.13` package family for that OS, while 22.04 and 24.04 stay on the current production ROCm flow.
 

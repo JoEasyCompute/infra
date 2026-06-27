@@ -6,7 +6,7 @@ It manages one file only:
 
 - `/etc/default/grub.d/99-infra-pcie-aspm.cfg`
 
-That drop-in appends `pcie_aspm=off`, `pci=noaer`, `pcie_aspm.policy=performance`, and `nvme_core.default_ps_max_latency_us=0` to the boot command line. The helper does not edit `/etc/default/grub` directly.
+That drop-in appends `pcie_aspm=off`, `pci=noaer`, `pci=realloc=on`, `pcie_aspm.policy=performance`, and `nvme_core.default_ps_max_latency_us=0` to the boot command line. The helper does not edit `/etc/default/grub` directly.
 
 ## Usage
 

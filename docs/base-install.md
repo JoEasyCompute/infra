@@ -96,7 +96,7 @@ across a fleet of nodes.
 
 Ubuntu 26.04 is supported too; the script automatically maps it to the `ubuntu2604` NVIDIA repo codename.
 If you use `--no-gpu-stack`, the NVIDIA repo / Secure Boot checks are skipped and the installer stops after the host tooling and general recovery setup.
-The installer also writes a managed GRUB drop-in that appends `pcie_aspm=off`, `pci=noaer`, `pcie_aspm.policy=performance`, and `nvme_core.default_ps_max_latency_us=0`.
+The installer also writes a managed GRUB drop-in that appends `pcie_aspm=off`, `pci=noaer`, `pci=realloc=on`, `pcie_aspm.policy=performance`, and `nvme_core.default_ps_max_latency_us=0`.
 
 ### GPU fallback recovery policy
 
@@ -271,7 +271,7 @@ expose the commands as `fdfind` and `batcat`.
 | CUDA PATH | `/etc/profile.d/cuda.sh` written — adds `/usr/local/cuda/bin` and `lib64` for all users |
 | Shell aliases | `~/.aliases` is installed from repo root; `~/.bashrc`, `~/.zshrc`, and `~/.config/fish/config.fish` are updated to source the managed alias files |
 | SSH / sudo access | `~/.ssh/authorized_keys` updated with the repo key; `/etc/sudoers.d/99-infra-<user>` grants passwordless sudo if the user did not already have it; `install/user-bootstrap.sh` provides the same access bootstrap as a standalone helper |
-| PCIe boot policy | `/etc/default/grub.d/99-infra-pcie-aspm.cfg` appends `pcie_aspm=off`, `pci=noaer`, `pcie_aspm.policy=performance`, and `nvme_core.default_ps_max_latency_us=0` to the boot command line |
+| PCIe boot policy | `/etc/default/grub.d/99-infra-pcie-aspm.cfg` appends `pcie_aspm=off`, `pci=noaer`, `pci=realloc=on`, `pcie_aspm.policy=performance`, and `nvme_core.default_ps_max_latency_us=0` to the boot command line |
 | DCGM service | `nvidia-dcgm` enabled and started |
 | Chrony service | `chrony` enabled and started for NTP sync |
 
@@ -513,7 +513,7 @@ This means `disktest.sh` can be run immediately after a reboot following
 | `/etc/profile.d/infra-python.sh` | Benchmark Python 3.11 PATH/runtime exports for the PyTorch lane |
 | `/etc/systemd/system.conf` | Managed systemd stop/abort timeout block for GPU fallback recovery |
 | `/etc/sysctl.d/99-gpu-fallback.conf` | Kernel panic / hung-task fallback policy for GPU nodes |
-| `/etc/default/grub.d/99-infra-pcie-aspm.cfg` | Managed GRUB drop-in that appends `pcie_aspm=off`, `pci=noaer`, `pcie_aspm.policy=performance`, and `nvme_core.default_ps_max_latency_us=0` |
+| `/etc/default/grub.d/99-infra-pcie-aspm.cfg` | Managed GRUB drop-in that appends `pcie_aspm=off`, `pci=noaer`, `pci=realloc=on`, `pcie_aspm.policy=performance`, and `nvme_core.default_ps_max_latency_us=0` |
 | `/opt/infra/python/` | Benchmark Python 3.11 installation root managed by `uv` |
 | `~/.aliases` | Bash alias file copied from repo root by `base-install.sh` |
 | `~/.aliases.fish` | Fish wrapper file generated from `~/.aliases` and sourced by `config.fish` |

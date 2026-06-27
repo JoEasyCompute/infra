@@ -102,7 +102,7 @@ Current behavior:
 Current behavior:
 
 - `install/base-install.sh` and `install/amd-base-install.sh` both write a managed GRUB drop-in at `/etc/default/grub.d/99-infra-pcie-aspm.cfg`
-- the drop-in appends `pcie_aspm=off`, `pci=noaer`, `pcie_aspm.policy=performance`, and `nvme_core.default_ps_max_latency_us=0` to the boot command line so PCIe / storage power-management is tuned consistently on fresh installs
+- the drop-in appends `pcie_aspm=off`, `pci=noaer`, `pci=realloc=on`, `pcie_aspm.policy=performance`, and `nvme_core.default_ps_max_latency_us=0` to the boot command line so PCIe / storage power-management is tuned consistently on fresh installs
 - the setting is idempotent across reruns because it lives in a managed drop-in rather than a hand-edited grub file
 - `install/pcie-aspm.sh` is the standalone operator helper for checking, enabling, or disabling that same managed boot policy after provisioning
 - uninstall removes the drop-in and regenerates grub configuration
