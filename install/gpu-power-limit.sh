@@ -6,26 +6,24 @@
 #   sudo ./gpu-power-limit.sh            # auto-detect GPU type, apply preset, install
 #   ./gpu-power-limit.sh --dry-run       # preview only, no changes made
 #   sudo ./gpu-power-limit.sh --override 400  # force a specific wattage for all GPUs
+#   sudo ./gpu-power-limit.sh --gpu-limit 0:350 --gpu-limit 1:320
 
 set -euo pipefail
 
 # ─── Presets (GPU model substring → watts) ───────────────────────────────────
-declare -A GPU_PRESETS=(
-    ["5090"]=450
-    ["4090"]=300
-    ["A100"]=300
-    ["H100"]=500
-    ["A4000"]=140
-)
+GPU_PRESET_MODELS=("5090" "4090" "A100" "H100" "A4000")
+GPU_PRESET_WATTS=(450 300 300 500 140)
 DEFAULT_FALLBACK_WATTS=300   # used if no preset matches and no --override given
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 SERVICE_NAME="nvidia-runtime-policy"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 HELPER_FILE="/usr/local/sbin/${SERVICE_NAME}.sh"
-NVIDIA_SMI="/usr/bin/nvidia-smi"
+NVIDIA_SMI="${NVIDIA_SMI:-/usr/bin/nvidia-smi}"
 DRY_RUN=false
 OVERRIDE_WATTS=""
+PER_GPU_LIMIT_INDICES=()
+PER_GPU_LIMIT_WATTS=()
 
 # ─── Colours ─────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -34,6 +32,52 @@ success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 dryrun()  { echo -e "${YELLOW}[DRY-RUN]${NC} $*"; }
+
+per_gpu_limit_pos() {
+    local search_idx="$1"
+    local pos
+
+    for pos in "${!PER_GPU_LIMIT_INDICES[@]}"; do
+        if [[ "${PER_GPU_LIMIT_INDICES[$pos]}" == "$search_idx" ]]; then
+            printf "%s\n" "$pos"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+parse_gpu_limit() {
+    local spec="$1"
+    local idx watts pos
+
+    if [[ "$spec" =~ ^([0-9]+)[=:]([0-9]+)$ ]]; then
+        idx="${BASH_REMATCH[1]}"
+        watts="${BASH_REMATCH[2]}"
+    else
+        error "--gpu-limit requires INDEX:WATTS (e.g. --gpu-limit 0:350)"
+        exit 1
+    fi
+
+    if pos="$(per_gpu_limit_pos "$idx")"; then
+        warn "GPU ${idx} power limit specified more than once; using latest value."
+        PER_GPU_LIMIT_WATTS[$pos]="$watts"
+    else
+        PER_GPU_LIMIT_INDICES+=("$idx")
+        PER_GPU_LIMIT_WATTS+=("$watts")
+    fi
+}
+
+gpu_power_limit_for_index() {
+    local idx="$1"
+    local pos
+
+    if pos="$(per_gpu_limit_pos "$idx")"; then
+        printf "%s\n" "${PER_GPU_LIMIT_WATTS[$pos]}"
+    else
+        printf "%s\n" "$POWER_LIMIT"
+    fi
+}
 
 # ─── Argument parsing ─────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -50,23 +94,33 @@ while [[ $# -gt 0 ]]; do
             OVERRIDE_WATTS="$2"
             shift 2
             ;;
+        --gpu-limit)
+            if [[ -z "${2:-}" ]]; then
+                error "--gpu-limit requires INDEX:WATTS (e.g. --gpu-limit 0:350)"
+                exit 1
+            fi
+            parse_gpu_limit "$2"
+            shift 2
+            ;;
         --help|-h)
             echo -e "${BOLD}Usage:${NC} $0 [OPTIONS]"
             echo ""
             echo "Options:"
             echo "  --dry-run           Preview the generated service file without making any changes"
             echo "  --override WATTS    Force a specific power limit for all GPUs (skips preset lookup)"
+            echo "  --gpu-limit I:W     Override one GPU index with a specific wattage (repeatable)"
             echo "  --help              Show this help"
             echo ""
             echo -e "${BOLD}GPU Presets:${NC}"
-            for model in "${!GPU_PRESETS[@]}"; do
-                printf "  %-10s %dW\n" "$model" "${GPU_PRESETS[$model]}"
+            for pos in "${!GPU_PRESET_MODELS[@]}"; do
+                printf "  %-10s %dW\n" "${GPU_PRESET_MODELS[$pos]}" "${GPU_PRESET_WATTS[$pos]}"
             done | sort
             echo ""
             echo -e "${BOLD}Examples:${NC}"
             echo "  sudo $0                      # detect GPU, apply preset, install service"
             echo "  $0 --dry-run                 # preview without changes"
             echo "  sudo $0 --override 350       # force 350W on all GPUs"
+            echo "  sudo $0 --gpu-limit 0:350 --gpu-limit 1:320"
             exit 0
             ;;
         *)
@@ -94,6 +148,13 @@ if [[ "$GPU_COUNT" -eq 0 ]]; then
     exit 1
 fi
 
+for idx in "${PER_GPU_LIMIT_INDICES[@]}"; do
+    if (( idx >= GPU_COUNT )); then
+        error "--gpu-limit references GPU ${idx}, but detected GPU indices are 0-$((GPU_COUNT - 1))."
+        exit 1
+    fi
+done
+
 # ─── Detect GPU model and resolve power limit ─────────────────────────────────
 # Read the first GPU's name for preset matching (assumes homogeneous nodes)
 GPU_NAME=$("$NVIDIA_SMI" -i 0 --query-gpu=name --format=csv,noheader | xargs)
@@ -111,9 +172,10 @@ else
     # Walk presets, pick first match
     POWER_LIMIT=""
     MATCHED_MODEL=""
-    for model in "${!GPU_PRESETS[@]}"; do
+    for pos in "${!GPU_PRESET_MODELS[@]}"; do
+        model="${GPU_PRESET_MODELS[$pos]}"
         if [[ "$GPU_NAME" == *"$model"* ]]; then
-            POWER_LIMIT="${GPU_PRESETS[$model]}"
+            POWER_LIMIT="${GPU_PRESET_WATTS[$pos]}"
             MATCHED_MODEL="$model"
             break
         fi
@@ -128,16 +190,26 @@ else
     fi
 fi
 
+if [[ "${#PER_GPU_LIMIT_INDICES[@]}" -gt 0 ]]; then
+    info "Per-GPU power limit overrides:"
+    for pos in "${!PER_GPU_LIMIT_INDICES[@]}"; do
+        idx="${PER_GPU_LIMIT_INDICES[$pos]}"
+        info "  GPU ${idx} → ${BOLD}${PER_GPU_LIMIT_WATTS[$pos]}W${NC}"
+    done
+fi
+
 # ─── Validate wattage against each GPU's min/max ─────────────────────────────
 VALIDATION_FAILED=false
 while IFS=',' read -r idx _name min_raw max_raw; do
+    idx="${idx// /}"
     min="${min_raw// /}"; min="${min%.*}"; min="${min%W}"
     max="${max_raw// /}"; max="${max%.*}"; max="${max%W}"
-    if (( POWER_LIMIT < min || POWER_LIMIT > max )); then
-        error "GPU ${idx}: ${POWER_LIMIT}W is outside allowed range [${min}W – ${max}W]"
+    limit="$(gpu_power_limit_for_index "$idx")"
+    if (( limit < min || limit > max )); then
+        error "GPU ${idx}: ${limit}W is outside allowed range [${min}W – ${max}W]"
         VALIDATION_FAILED=true
     else
-        success "GPU ${idx}: ${POWER_LIMIT}W ✓  (allowed range: ${min}W – ${max}W)"
+        success "GPU ${idx}: ${limit}W ✓  (allowed range: ${min}W – ${max}W)"
     fi
 done < <("$NVIDIA_SMI" --query-gpu=index,name,power.min_limit,power.max_limit \
             --format=csv,noheader)
@@ -148,6 +220,27 @@ if [[ "$VALIDATION_FAILED" == true ]]; then
 fi
 
 # ─── Build service file content ───────────────────────────────────────────────
+PER_GPU_HELPER_BLOCK=""
+for pos in "${!PER_GPU_LIMIT_INDICES[@]}"; do
+    idx="${PER_GPU_LIMIT_INDICES[$pos]}"
+    PER_GPU_HELPER_BLOCK+="        ${idx}) limit=\"${PER_GPU_LIMIT_WATTS[$pos]}\" ;;"$'\n'
+done
+
+if [[ "${#PER_GPU_LIMIT_INDICES[@]}" -gt 0 ]]; then
+    APPLY_POWER_LIMITS_BLOCK='while IFS= read -r gpu_idx; do
+    case "$gpu_idx" in
+'"${PER_GPU_HELPER_BLOCK}"'        *) limit="$POWER_LIMIT" ;;
+    esac
+    "$NVIDIA_SMI" -i "$gpu_idx" -pl "$limit"
+done < <("$NVIDIA_SMI" --query-gpu=index --format=csv,noheader,nounits | tr -d " \r")
+'
+    SERVICE_DESCRIPTION="NVIDIA runtime policy (persistence + mixed GPU power caps; base ${POWER_LIMIT}W)"
+else
+    APPLY_POWER_LIMITS_BLOCK='"$NVIDIA_SMI" -pl "$POWER_LIMIT"
+'
+    SERVICE_DESCRIPTION="NVIDIA runtime policy (persistence + power cap @ ${POWER_LIMIT}W)"
+fi
+
 HELPER_CONTENT="#!/usr/bin/env bash
 set -euo pipefail
 
@@ -169,11 +262,11 @@ if ! [[ -e /dev/nvidiactl ]] || ! \"\$NVIDIA_SMI\" -L >/dev/null 2>&1; then
 fi
 
 \"\$NVIDIA_SMI\" -pm 1
-\"\$NVIDIA_SMI\" -pl \"\$POWER_LIMIT\"
+${APPLY_POWER_LIMITS_BLOCK}
 "
 
 SERVICE_CONTENT="[Unit]
-Description=NVIDIA runtime policy (persistence + power cap @ ${POWER_LIMIT}W)
+Description=${SERVICE_DESCRIPTION}
 After=multi-user.target systemd-udev-settle.service
 Wants=systemd-udev-settle.service
 
@@ -199,9 +292,15 @@ echo ""
 
 # ─── Dry-run exits here ───────────────────────────────────────────────────────
 if [[ "$DRY_RUN" == true ]]; then
+    INSTALL_ARGS=()
+    [[ -n "$OVERRIDE_WATTS" ]] && INSTALL_ARGS+=(--override "$OVERRIDE_WATTS")
+    for pos in "${!PER_GPU_LIMIT_INDICES[@]}"; do
+        INSTALL_ARGS+=(--gpu-limit "${PER_GPU_LIMIT_INDICES[$pos]}:${PER_GPU_LIMIT_WATTS[$pos]}")
+    done
+
     dryrun "No changes made."
-    dryrun "To install, re-run as root (with or without --override):"
-    dryrun "  sudo $0 $( [[ -n "$OVERRIDE_WATTS" ]] && echo "--override ${OVERRIDE_WATTS}" )"
+    dryrun "To install, re-run as root:"
+    dryrun "  sudo $0 ${INSTALL_ARGS[*]}"
     exit 0
 fi
 

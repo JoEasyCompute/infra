@@ -43,7 +43,7 @@ Current platform status:
 │   ├── docker-install.sh       # Docker CE + NVIDIA toolkit + runtime storage
 │   ├── amd-base-install.sh     # AMDGPU + ROCm base installer
 │   ├── amd-stack-pin.sh        # Inspect / reset the AMD ROCm apt pin
-│   ├── gpu-power-limit.sh      # Persistent NVIDIA power-limit service installer
+│   ├── gpu-power-limit.sh      # Persistent NVIDIA power-limit service installer with per-GPU overrides
 │   ├── manage-gpu.sh           # Bind selected NVIDIA GPU slots to vfio-pci at boot
 │   ├── nvidia-stack-hold.sh    # Freeze / unfreeze validated NVIDIA/CUDA packages
 │   ├── install-raid.sh         # Optional RAID / ESP redundancy installer
@@ -307,7 +307,7 @@ Use `amd-stack-pin.sh --status` to inspect the active pin and `amd-stack-pin.sh 
 | `test/ramtest.sh` | System RAM burn-in and ECC-aware memory validation | [docs/ramtest.md](docs/ramtest.md) |
 | `test/network-test.sh` | Network connectivity, latency, MTU, and bandwidth validation | [docs/network-test.md](docs/network-test.md) |
 | `test/network-batch.sh` | SSH-based orchestration helper for chain, pair, rotate, grouped, and plan-export network validation | [docs/network-batch.md](docs/network-batch.md) |
-| `install/gpu-power-limit.sh` | Installs a persistent NVIDIA power-limit policy service | [docs/gpu-power-limit.md](docs/gpu-power-limit.md) |
+| `install/gpu-power-limit.sh` | Installs a persistent NVIDIA power-limit policy service with global or per-GPU caps | [docs/gpu-power-limit.md](docs/gpu-power-limit.md) |
 | Combined acceptance workflow | Client-facing 60-node validation kit combining GPU, network, disk, burn, reboot, and variance checks | [docs/client-acceptance-test-kit.md](docs/client-acceptance-test-kit.md) |
 
 ## Provisioning Details
