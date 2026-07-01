@@ -259,6 +259,31 @@ phase_done() {
     [[ "$(state_get "$1")" == "complete" ]]
 }
 
+phase_healthy() {
+    local phase="$1"
+    case "$phase" in
+        DOCKER_INSTALL)
+            command -v docker &>/dev/null && dpkg-query -W docker-ce docker-ce-cli containerd.io &>/dev/null
+            ;;
+        DAEMON_CONFIG)
+            [[ -s "${DAEMON_JSON}" ]] || return 1
+            python3 -c "import json; json.load(open('${DAEMON_JSON}'))" &>/dev/null || return 1
+            systemctl is-active --quiet docker.service 2>/dev/null || return 1
+            docker info &>/dev/null
+            ;;
+        NVIDIA_TOOLKIT)
+            [[ "$SKIP_NVIDIA_TOOLKIT" == true ]] && return 0
+            command -v nvidia-ctk &>/dev/null || return 1
+            [[ -s "${DAEMON_JSON}" ]] || return 1
+            python3 -c "import json; cfg=json.load(open('${DAEMON_JSON}')); assert cfg.get('default-runtime') == 'nvidia'; assert 'nvidia' in cfg.get('runtimes', {})" \
+                &>/dev/null
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
 # --reset-state wipes the state file
 if [[ "$RESET_STATE" == true ]]; then
     rm -f "$STATE_FILE"
@@ -271,8 +296,11 @@ run_phase() {
     local phase="$1" desc="$2" fn="$3"
     CURRENT_PHASE="$phase"
     if phase_done "$phase"; then
-        info "Phase ${phase} already complete — skipping (use --reset-state to re-run)"
-        return 0
+        if phase_healthy "$phase"; then
+            info "Phase ${phase} already complete — skipping (use --reset-state to re-run)"
+            return 0
+        fi
+        warn "Phase ${phase} was marked complete but failed health checks — re-running"
     fi
     header "${desc}"
     state_set "$phase" "running"
@@ -929,20 +957,13 @@ phase_daemon_config() {
 
     # data-root points to the docker subdir on the shared XFS volume
     python3 - <<PYEOF
-import json, subprocess, shutil
+import json
 cfg = {
     "log-driver": "json-file",
     "log-opts": {"max-size": "100m", "max-file": "3"},
     "storage-driver": "${storage_driver}",
     "data-root": "${DOCKER_DATA_DIR}"
 }
-if shutil.which("nvidia-smi"):
-    try:
-        subprocess.check_call(["nvidia-smi"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        cfg["default-runtime"] = "nvidia"
-    except subprocess.CalledProcessError:
-        pass
 with open("${DAEMON_JSON}", "w") as f:
     json.dump(cfg, f, indent=2)
     f.write("\n")
@@ -1114,6 +1135,16 @@ run_phase "NOUVEAU_BLACKLIST" "Blacklisting Nouveau driver"      phase_nouveau_b
 CURRENT_PHASE="VALIDATION"
 header "Post-install validation"
 
+info "Checking Docker daemon..."
+if docker info &>/dev/null; then
+    success "Docker daemon reachable"
+else
+    error "Docker daemon is not reachable"
+    error "Check: systemctl status docker --no-pager -l"
+    error "Check: journalctl -u docker -n 100 --no-pager"
+    exit 1
+fi
+
 info "Running hello-world container..."
 if docker run --rm hello-world &>/dev/null; then
     success "docker run hello-world — OK"
@@ -1124,7 +1155,12 @@ fi
 if nvidia-ctk --version &>/dev/null; then
     success "nvidia-ctk: $(nvidia-ctk --version 2>&1 | head -1)"
 else
-    warn "nvidia-ctk not in PATH"
+    if [[ "$SKIP_NVIDIA_TOOLKIT" == true ]]; then
+        warn "nvidia-ctk not in PATH — skipped by request"
+    else
+        error "nvidia-ctk not in PATH after NVIDIA_TOOLKIT phase"
+        exit 1
+    fi
 fi
 
 if [[ "$WITH_COMPOSE" == true ]] && docker compose version &>/dev/null; then
