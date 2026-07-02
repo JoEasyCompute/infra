@@ -44,6 +44,8 @@ Current platform status:
 │   ├── amd-base-install.sh     # AMDGPU + ROCm base installer
 │   ├── amd-stack-pin.sh        # Inspect / reset the AMD ROCm apt pin
 │   ├── gpu-power-limit.sh      # Persistent NVIDIA power-limit service installer with per-GPU overrides
+│   ├── pearl-5090-tune.sh      # Runtime Pearl RTX 5090 power/clock tuning profile
+│   ├── gpu-setting-reset.sh    # Reset NVIDIA runtime graphics/memory clock locks
 │   ├── manage-gpu.sh           # Bind selected NVIDIA GPU slots to vfio-pci at boot
 │   ├── nvidia-stack-hold.sh    # Freeze / unfreeze validated NVIDIA/CUDA packages
 │   ├── install-raid.sh         # Optional RAID / ESP redundancy installer
@@ -206,6 +208,8 @@ Use this as the shortest path from intent to script:
 | Manage graphical autologin | [install/autologin.sh](install/autologin.sh) | Enables or disables desktop autologin for the current sudo user on GDM3, LightDM, or SDDM |
 | Manage console autologin | [install/console-autologin.sh](install/console-autologin.sh) | Enables or disables tty1 autologin for the current sudo user |
 | Manage PCIe boot policy | [install/pcie-aspm.sh](install/pcie-aspm.sh) | Shows the current boot policy and writes or removes the managed GRUB drop-in for PCIe AER, ASPM, and NVMe latency tuning |
+| Apply Pearl RTX 5090 runtime tuning | [install/pearl-5090-tune.sh](install/pearl-5090-tune.sh) | Sets persistence mode, 400W power cap, and Pearl clock locks for RTX 5090 nodes; see [docs/gpu-runtime-tuning.md](docs/gpu-runtime-tuning.md) |
+| Reset NVIDIA runtime clock locks | [install/gpu-setting-reset.sh](install/gpu-setting-reset.sh) | Clears graphics and memory clock locks set through `nvidia-smi`; see [docs/gpu-runtime-tuning.md](docs/gpu-runtime-tuning.md) |
 | Validate NVIDIA node | [test/fulltest.sh](test/fulltest.sh) | Stable production validation path |
 | Validate experimental NVIDIA flow | [test/gpu-fulltest-v2.sh](test/gpu-fulltest-v2.sh) | Prepare-then-run experimental lane for NVIDIA validation changes |
 | Rebuild live root | [install/rebuild-gpu-livefs.sh](install/rebuild-gpu-livefs.sh) | Copies a mounted USB root filesystem and regenerates the `gpu-test` live tree |
