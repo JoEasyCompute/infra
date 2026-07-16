@@ -20,7 +20,9 @@ It can be run standalone or called by `provision.sh` as part of a full multi-sta
 
 Docker and containerd **share a single XFS volume** rather than each consuming separate mounts. The full volume capacity is available to whichever runtime needs it at any given time — no pre-splitting required.
 
-### Layout
+By default, the volume is mounted at `/data/container-runtime` and both runtime paths are bind-mounted into `/var/lib`. For RunPod hosts that require Docker's data root to be the actual XFS mountpoint, use `--runpod-storage-layout`.
+
+### Default Layout
 
 ```
 /data/container-runtime/              ← XFS volume (single mount, prjquota)
@@ -53,6 +55,15 @@ UUID=<uuid>  /data/container-runtime  xfs  defaults,noatime,nofail,prjquota  0  
 # Bind mounts — registered by _ensure_subdirs_and_bind_mounts
 /data/container-runtime/docker      /var/lib/docker      none  bind,nofail  0  0
 /data/container-runtime/containerd  /var/lib/containerd  none  bind,nofail  0  0
+```
+
+**RunPod-compatible layout (`--runpod-storage-layout`):**
+```
+# XFS volume mounted directly where Docker expects its data root
+UUID=<uuid>  /var/lib/docker  xfs  defaults,noatime,nofail,prjquota  0  2
+
+# containerd remains a real mountpoint, sourced from inside Docker's volume
+/var/lib/docker/containerd  /var/lib/containerd  none  bind,nofail  0  0
 ```
 
 **Loopback image (root fallback):**
@@ -131,6 +142,7 @@ sudo /opt/provision/docker-install.sh [OPTIONS]
 | `--reset-state` | Clear phase state file and re-run all phases from scratch |
 | `--skip-nvidia-toolkit` | Skip NVIDIA Container Toolkit install (useful on AMD hosts) |
 | `--skip-nouveau-blacklist` | Skip Nouveau blacklist step (useful on AMD hosts) |
+| `--runpod-storage-layout` | Mount the XFS volume directly at `/var/lib/docker`, then bind-mount `/var/lib/docker/containerd` to `/var/lib/containerd` |
 | `--called-by-provision` | Internal flag set by `provision.sh` — do not use manually |
 | `-h, --help` | Show help and exit |
 
@@ -158,6 +170,9 @@ sudo /opt/provision/docker-install.sh --reset-state --non-interactive
 # Reuse on an AMD host
 sudo /opt/provision/docker-install.sh --non-interactive --skip-nvidia-toolkit --skip-nouveau-blacklist
 
+# Use the RunPod-compatible direct Docker mount layout
+sudo /opt/provision/docker-install.sh --non-interactive --runpod-storage-layout
+
 # Clean uninstall
 sudo /opt/provision/docker-install.sh --uninstall
 ```
@@ -177,7 +192,7 @@ docker-install.sh
         │       └─► Existing Docker detection
         │
         ├─► PHASE 1: DISK_SETUP
-        │       ├─► Check if /data/container-runtime already mounted
+        │       ├─► Check if runtime volume already mounted
         │       │     YES → verify bind mounts active + skip format
         │       ├─► Auto-install xfsprogs if missing
         │       ├─► Scan for free disks (unpartitioned, unmounted)
@@ -187,12 +202,13 @@ docker-install.sh
         │       ├─► Mount now for this session
         │       ├─► Write fstab entries (in order):
         │       │     block/LVM: UUID=...  xfs  defaults,noatime,nofail,prjquota
+        │       │     RunPod:   UUID=... /var/lib/docker xfs defaults,noatime,nofail,prjquota
         │       │     loopback:  /var/lib/container-runtime.img  xfs  loop,noatime,prjquota,nofail
-        │       │     both:      bind entry for /var/lib/docker
-        │       │                bind entry for /var/lib/containerd
+        │       │     default:   bind entries for /var/lib/docker and /var/lib/containerd
+        │       │     RunPod:    bind entry for /var/lib/containerd only
         │       │     (prjquota patched into any pre-existing block device fstab entry)
         │       ├─► Migrate existing data from /var/lib/docker + /var/lib/containerd
-        │       └─► Create subdirs + bind-mount both into /var/lib/ (idempotent)
+        │       └─► Create runtime dirs + required bind mounts (idempotent)
         │               Converts any existing symlinks to bind mounts automatically
         │
         ├─► PHASE 2: DOCKER_INSTALL
@@ -255,8 +271,8 @@ docker-install.sh
 ## Storage Decision Logic (Phase 1 — DISK_SETUP)
 
 ```
-Is /data/container-runtime already mounted?
-    YES → Verify bind mounts active at /var/lib/docker and /var/lib/containerd
+Is the selected runtime volume already mounted?
+    YES → Verify the selected layout's mountpoints are active
           Skip format + mount → return
      NO ↓
 
@@ -323,6 +339,8 @@ For each of /var/lib/docker and /var/lib/containerd:
 
 The `.pre-migration.bak` directories are intentionally left on disk. Remove them manually once you have confirmed the new layout is working correctly.
 
+When `--runpod-storage-layout` is used, `/var/lib/docker` must become the XFS mountpoint itself. The script stages any existing `/var/lib/docker` directory to `/var/lib/docker.pre-migration.bak` before mounting, then copies that staged data back onto the mounted XFS volume. Existing `/var/lib/containerd` data is migrated into `/var/lib/docker/containerd` before `/var/lib/containerd` is replaced by a bind mount.
+
 ### Loopback Image Provisioning (`_provision_loopback_image`)
 
 Used only when no dedicated disk or LVM space is found. Provides the same XFS features and bind-mount layout as a real block device while keeping container data isolated from root.
@@ -376,6 +394,8 @@ For each (source → target) pair:
     If target directory absent → mkdir, add fstab entry, mount --bind
 ```
 
+With `--runpod-storage-layout`, `/var/lib/docker` is not a bind mount. It is the XFS volume mountpoint. Only `/var/lib/containerd` is bind-mounted, from `/var/lib/docker/containerd`.
+
 ### Storage Sizing
 
 | Threshold | Action |
@@ -410,7 +430,7 @@ For each (source → target) pair:
 | `log-opts.max-size` | `100m` | Prevents container logs silently filling the volume |
 | `log-opts.max-file` | `3` | Keeps last 300 MB of logs per container |
 | `storage-driver` | `overlay2` | Correct for XFS with `ftype=1` (set at format time) |
-| `data-root` | `/data/container-runtime/docker` | Docker's subdir on the shared volume |
+| `data-root` | `/data/container-runtime/docker` by default, `/var/lib/docker` with `--runpod-storage-layout` | Docker's data root on the shared XFS volume |
 | `default-runtime` | `nvidia` | Every container gets GPU access without `--gpus all` |
 
 `default-runtime` is only written if `nvidia-smi` is present at config time. Phase 5 patches it in afterwards if it was absent.
