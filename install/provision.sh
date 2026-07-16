@@ -532,7 +532,11 @@ docker version --format \
 
 echo
 echo -e "${BOLD}Storage:${RESET}"
-if mountpoint -q /data/container-runtime 2>/dev/null; then
+if [[ "$RUNPOD_STORAGE_LAYOUT" == true ]] && mountpoint -q /var/lib/docker 2>/dev/null; then
+    df -h /var/lib/docker | awk 'NR==2{printf "  /var/lib/docker  %s total  %s used  %s free\n", $2, $3, $4}'
+    echo "  /var/lib/containerd ← $(findmnt -n -o SOURCE --target /var/lib/containerd 2>/dev/null || echo '(not mounted)')"
+    xfs_info /var/lib/docker 2>/dev/null | grep -E 'reflink|ftype' | sed 's/^/  xfs: /' || true
+elif mountpoint -q /data/container-runtime 2>/dev/null; then
     df -h /data/container-runtime | awk 'NR==2{printf "  /data/container-runtime  %s total  %s used  %s free\n", $2, $3, $4}'
     echo "  /var/lib/docker     ← $(findmnt -n -o SOURCE --target /var/lib/docker 2>/dev/null || echo '(not mounted)')"
     echo "  /var/lib/containerd ← $(findmnt -n -o SOURCE --target /var/lib/containerd 2>/dev/null || echo '(not mounted)')"
