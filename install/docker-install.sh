@@ -5,11 +5,17 @@
 # Handles automatic disk/LVM detection for container runtime storage
 #
 # Storage layout:
+# Default:
 #   /data/container-runtime/          ← XFS volume (shared, mounted with prjquota)
 #   /data/container-runtime/docker/   ← Docker data root
 #   /data/container-runtime/containerd/ ← containerd data root
 #   /var/lib/docker    → bind mount → /data/container-runtime/docker
 #   /var/lib/containerd → bind mount → /data/container-runtime/containerd
+#
+# RunPod-compatible layout (--runpod-storage-layout):
+#   /var/lib/docker                ← XFS volume (mounted with prjquota)
+#   /var/lib/docker/containerd     ← containerd data root
+#   /var/lib/containerd            → bind mount → /var/lib/docker/containerd
 #
 # Part of the /opt/provision provisioning suite.
 # State file: /opt/provision/state/docker-install.state
@@ -100,6 +106,7 @@ RESET_STATE=false
 CALLED_BY_PROVISION=false   # set by provision.sh to suppress reboot prompt
 SKIP_NVIDIA_TOOLKIT=false
 SKIP_NOUVEAU_BLACKLIST=false
+RUNPOD_STORAGE_LAYOUT=false
 
 usage() {
     cat <<EOF
@@ -115,6 +122,9 @@ Options:
   --reset-state         Clear phase state file and re-run all phases from scratch
   --skip-nvidia-toolkit Skip NVIDIA Container Toolkit install
   --skip-nouveau-blacklist Skip Nouveau blacklist step
+  --runpod-storage-layout
+                        Mount the XFS volume directly at /var/lib/docker and
+                        bind-mount /var/lib/docker/containerd to /var/lib/containerd
   --called-by-provision Internal flag set by provision.sh
   -h, --help            Show this help
 
@@ -126,6 +136,7 @@ Examples:
   sudo $0 --uninstall                       # clean removal
   sudo $0 --reset-state                     # force full re-run
   sudo $0 --skip-nvidia-toolkit --skip-nouveau-blacklist
+  sudo $0 --runpod-storage-layout --non-interactive
 EOF
     exit 0
 }
@@ -140,12 +151,19 @@ while [[ $# -gt 0 ]]; do
         --reset-state)        RESET_STATE=true ;;
         --skip-nvidia-toolkit) SKIP_NVIDIA_TOOLKIT=true ;;
         --skip-nouveau-blacklist) SKIP_NOUVEAU_BLACKLIST=true ;;
+        --runpod-storage-layout) RUNPOD_STORAGE_LAYOUT=true ;;
         --called-by-provision) CALLED_BY_PROVISION=true ;;
         -h|--help) usage ;;
         *) echo -e "${RED}[ERROR]${RESET} Unknown argument: $1" >&2; usage ;;
     esac
     shift
 done
+
+if [[ "$RUNPOD_STORAGE_LAYOUT" == true ]]; then
+    CONTAINER_RUNTIME_MOUNT="${DOCKER_MOUNTPOINT}"
+    DOCKER_DATA_DIR="${DOCKER_MOUNTPOINT}"
+    CONTAINERD_DATA_DIR="${DOCKER_MOUNTPOINT}/containerd"
+fi
 
 # confirm() respects --non-interactive
 confirm() {
@@ -672,10 +690,18 @@ phase_disk_setup() {
     # noatime:  skip access time updates — improves I/O performance
     # nofail:   don't halt boot if volume is missing
     # prjquota: enable project quota support (required by vast.ai / Docker quota features)
+    _prepare_runpod_direct_mount_target
     mkdir -p "${CONTAINER_RUNTIME_MOUNT}"
     if ! grep -q "UUID=${uuid}" /etc/fstab; then
-        echo "UUID=${uuid}  ${CONTAINER_RUNTIME_MOUNT}  xfs  defaults,noatime,nofail,prjquota  0  2" \
-            >> /etc/fstab
+        if [[ "$RUNPOD_STORAGE_LAYOUT" == true ]]; then
+            sed -i "\|[[:space:]]${DOCKER_MOUNTPOINT}[[:space:]]|d" /etc/fstab
+            sed -i "\|[[:space:]]${CONTAINERD_MOUNTPOINT}[[:space:]]|d" /etc/fstab
+            echo "UUID=${uuid}  ${DOCKER_MOUNTPOINT}  xfs  defaults,noatime,nofail,prjquota  0  2" \
+                >> /etc/fstab
+        else
+            echo "UUID=${uuid}  ${CONTAINER_RUNTIME_MOUNT}  xfs  defaults,noatime,nofail,prjquota  0  2" \
+                >> /etc/fstab
+        fi
         info "Added fstab entry for UUID=${uuid} (with prjquota)"
     else
         # Ensure prjquota is present on any existing entry for this UUID
@@ -697,12 +723,18 @@ phase_disk_setup() {
         warn "Volume only ${vol_free} GB free — recommend at least ${MIN_CONTAINER_VOL_GB} GB for GPU workloads"
 
     # Migrate any existing data from root, then create subdirs and bind mounts
+    _migrate_runpod_staged_docker_data
     _migrate_existing_data
     _ensure_subdirs_and_bind_mounts
 
     success "Container runtime volume ready: ${vol_free} GB at ${CONTAINER_RUNTIME_MOUNT}"
-    info "  Docker data:     ${DOCKER_DATA_DIR}  (← bind mount at ${DOCKER_MOUNTPOINT})"
-    info "  containerd data: ${CONTAINERD_DATA_DIR}  (← bind mount at ${CONTAINERD_MOUNTPOINT})"
+    if [[ "$RUNPOD_STORAGE_LAYOUT" == true ]]; then
+        info "  Docker data:     ${DOCKER_DATA_DIR}  (XFS mountpoint)"
+        info "  containerd data: ${CONTAINERD_DATA_DIR}  (← bind mount at ${CONTAINERD_MOUNTPOINT})"
+    else
+        info "  Docker data:     ${DOCKER_DATA_DIR}  (← bind mount at ${DOCKER_MOUNTPOINT})"
+        info "  containerd data: ${CONTAINERD_DATA_DIR}  (← bind mount at ${CONTAINERD_MOUNTPOINT})"
+    fi
 }
 
 # -----------------------------------------------------------------------------
@@ -755,6 +787,7 @@ _provision_loopback_image() {
     success "XFS formatted: ${img_path}"
 
     # Mount now for this session (fstab will handle subsequent boots)
+    _prepare_runpod_direct_mount_target
     mkdir -p "${CONTAINER_RUNTIME_MOUNT}"
     mount -o loop,noatime,prjquota "${img_path}" "${CONTAINER_RUNTIME_MOUNT}"
     success "Mounted ${img_path} → ${CONTAINER_RUNTIME_MOUNT} (XFS loopback, prjquota)"
@@ -763,6 +796,9 @@ _provision_loopback_image() {
     # The kernel's loop option handles losetup automatically — no helper needed.
     # nofail: don't block boot if the image file is somehow missing.
     if ! grep -q "${img_path}" /etc/fstab; then
+        if [[ "$RUNPOD_STORAGE_LAYOUT" == true ]]; then
+            sed -i "\|[[:space:]]${DOCKER_MOUNTPOINT}[[:space:]]|d" /etc/fstab
+        fi
         echo "${img_path}  ${CONTAINER_RUNTIME_MOUNT}  xfs  loop,noatime,prjquota,nofail  0  0" \
             >> /etc/fstab
         info "Added fstab loop mount: ${img_path} → ${CONTAINER_RUNTIME_MOUNT}"
@@ -781,14 +817,74 @@ _provision_loopback_image() {
     #   line N:   image → /data/container-runtime  (loop)
     #   line N+1: /data/container-runtime/docker    → /var/lib/docker   (bind)
     #   line N+2: /data/container-runtime/containerd → /var/lib/containerd (bind)
+    _migrate_runpod_staged_docker_data
     _migrate_existing_data
     _ensure_subdirs_and_bind_mounts
 
     success "Loopback container runtime ready: ${vol_free} GB at ${CONTAINER_RUNTIME_MOUNT}"
     info "  Image:           ${img_path} (${img_size_gb} GB, fully allocated)"
-    info "  Docker data:     ${DOCKER_DATA_DIR}  (← bind mount at ${DOCKER_MOUNTPOINT})"
-    info "  containerd data: ${CONTAINERD_DATA_DIR}  (← bind mount at ${CONTAINERD_MOUNTPOINT})"
-    info "  fstab entries:   loop mount + 2 bind mounts — active on every boot"
+    if [[ "$RUNPOD_STORAGE_LAYOUT" == true ]]; then
+        info "  Docker data:     ${DOCKER_DATA_DIR}  (loop-backed XFS mountpoint)"
+        info "  containerd data: ${CONTAINERD_DATA_DIR}  (← bind mount at ${CONTAINERD_MOUNTPOINT})"
+        info "  fstab entries:   loop mount + containerd bind mount — active on every boot"
+    else
+        info "  Docker data:     ${DOCKER_DATA_DIR}  (← bind mount at ${DOCKER_MOUNTPOINT})"
+        info "  containerd data: ${CONTAINERD_DATA_DIR}  (← bind mount at ${CONTAINERD_MOUNTPOINT})"
+        info "  fstab entries:   loop mount + 2 bind mounts — active on every boot"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Helper: when the RunPod-compatible layout is requested, /var/lib/docker itself
+# becomes the XFS mountpoint. Existing Docker data must be staged before the
+# mount hides that directory, then copied back after the new volume is mounted.
+# -----------------------------------------------------------------------------
+_prepare_runpod_direct_mount_target() {
+    [[ "$RUNPOD_STORAGE_LAYOUT" == true ]] || return 0
+
+    if mountpoint -q "${DOCKER_MOUNTPOINT}" 2>/dev/null; then
+        return 0
+    fi
+
+    if [[ -L "${DOCKER_MOUNTPOINT}" ]]; then
+        warn "${DOCKER_MOUNTPOINT} is a symlink — removing before direct mount"
+        rm -f "${DOCKER_MOUNTPOINT}"
+    elif [[ -d "${DOCKER_MOUNTPOINT}" ]]; then
+        local item_count
+        item_count=$(find "${DOCKER_MOUNTPOINT}" -maxdepth 1 -mindepth 1 2>/dev/null | wc -l)
+        if (( item_count > 0 )); then
+            for svc in docker containerd; do
+                systemctl is-active --quiet "$svc" 2>/dev/null && \
+                    { info "Stopping ${svc} before staging ${DOCKER_MOUNTPOINT}..."; systemctl stop "$svc"; }
+            done
+            warn "Existing data found in ${DOCKER_MOUNTPOINT} (${item_count} items) — staging before direct mount"
+            mv "${DOCKER_MOUNTPOINT}" "${DOCKER_MOUNTPOINT}.pre-migration.bak"
+        else
+            rm -rf "${DOCKER_MOUNTPOINT}"
+            info "${DOCKER_MOUNTPOINT} was empty — removed before direct mount"
+        fi
+    fi
+
+    mkdir -p "${DOCKER_MOUNTPOINT}"
+}
+
+_migrate_runpod_staged_docker_data() {
+    [[ "$RUNPOD_STORAGE_LAYOUT" == true ]] || return 0
+
+    local backup="${DOCKER_MOUNTPOINT}.pre-migration.bak"
+    [[ -d "${backup}" ]] || return 0
+
+    local item_count
+    item_count=$(find "${backup}" -maxdepth 1 -mindepth 1 2>/dev/null | wc -l)
+    (( item_count > 0 )) || return 0
+
+    warn "Migrating staged Docker data from ${backup} to ${DOCKER_DATA_DIR}..."
+    if command -v rsync &>/dev/null; then
+        rsync -aHSx "${backup}/" "${DOCKER_DATA_DIR}/"
+    else
+        cp -ax "${backup}/." "${DOCKER_DATA_DIR}/"
+    fi
+    success "Migrated ${backup} → ${DOCKER_DATA_DIR}"
 }
 
 # -----------------------------------------------------------------------------
@@ -855,6 +951,33 @@ _ensure_subdirs_and_bind_mounts() {
     mkdir -p "${DOCKER_DATA_DIR}" "${CONTAINERD_DATA_DIR}"
     chmod 710 "${DOCKER_DATA_DIR}"
     chmod 710 "${CONTAINERD_DATA_DIR}"
+
+    if [[ "$RUNPOD_STORAGE_LAYOUT" == true ]]; then
+        if mountpoint -q "${DOCKER_MOUNTPOINT}" 2>/dev/null; then
+            info "${DOCKER_MOUNTPOINT} already mounted as runtime volume"
+        else
+            error "${DOCKER_MOUNTPOINT} is not mounted — RunPod storage layout is incomplete"
+            return 1
+        fi
+
+        sed -i "\|[[:space:]]${CONTAINERD_MOUNTPOINT}[[:space:]]|d" /etc/fstab
+        if ! grep -q "^${CONTAINERD_DATA_DIR}[[:space:]]" /etc/fstab; then
+            echo "${CONTAINERD_DATA_DIR}  ${CONTAINERD_MOUNTPOINT}  none  bind,nofail  0  0" >> /etc/fstab
+            info "Added fstab bind mount: ${CONTAINERD_DATA_DIR} → ${CONTAINERD_MOUNTPOINT}"
+        else
+            info "fstab bind mount already present: ${CONTAINERD_DATA_DIR} → ${CONTAINERD_MOUNTPOINT}"
+        fi
+
+        if mountpoint -q "${CONTAINERD_MOUNTPOINT}" 2>/dev/null; then
+            info "${CONTAINERD_MOUNTPOINT} already mounted"
+        else
+            [[ -L "${CONTAINERD_MOUNTPOINT}" ]] && rm -f "${CONTAINERD_MOUNTPOINT}"
+            [[ -d "${CONTAINERD_MOUNTPOINT}" ]] || mkdir -p "${CONTAINERD_MOUNTPOINT}"
+            mount --bind "${CONTAINERD_DATA_DIR}" "${CONTAINERD_MOUNTPOINT}"
+            success "Bind-mounted: ${CONTAINERD_DATA_DIR} → ${CONTAINERD_MOUNTPOINT}"
+        fi
+        return 0
+    fi
 
     # Helper: set up one bind mount entry
     # Usage: _setup_bind_mount <source> <target>
@@ -1205,7 +1328,11 @@ if mountpoint -q "${CONTAINER_RUNTIME_MOUNT}" 2>/dev/null; then
         if mountpoint -q "${tgt}" 2>/dev/null; then
             src=""
             src=$(findmnt -n -o SOURCE "${tgt}" 2>/dev/null || echo "?")
-            echo -e "    ${tgt} → bind mount from ${src}"
+            if [[ "$RUNPOD_STORAGE_LAYOUT" == true && "${tgt}" == "${DOCKER_MOUNTPOINT}" ]]; then
+                echo -e "    ${tgt} → runtime volume from ${src}"
+            else
+                echo -e "    ${tgt} → bind mount from ${src}"
+            fi
         else
             echo -e "    ${tgt} → (not mounted)"
         fi

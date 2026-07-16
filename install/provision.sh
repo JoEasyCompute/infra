@@ -73,6 +73,7 @@ FORCE_VG=""
 FORCE_DISK=""
 FREEZE_GPU_STACK=false
 UNFREEZE_GPU_STACK=false
+RUNPOD_STORAGE_LAYOUT=false
 RESET_STATE=false
 RESUME=false        # set internally by the systemd resume service
 
@@ -87,6 +88,9 @@ Options:
   --with-compose        Install Docker Compose (passed to docker-install.sh)
   --vg <vgname>         Pass VG selection to docker-install.sh
   --disk /dev/sdX       Pass disk selection to docker-install.sh
+  --runpod-storage-layout
+                        Pass RunPod-compatible /var/lib/docker mount layout
+                        to docker-install.sh
   --freeze-gpu-stack    Hold the validated NVIDIA/CUDA stack after stage1
   --unfreeze-gpu-stack  Temporarily unhold NVIDIA/CUDA packages before stage1, then re-hold after validation
   --reset-state         Wipe provision state and restart from stage1
@@ -98,6 +102,7 @@ Examples:
   sudo $0                           # interactive full provision
   sudo $0 --non-interactive         # automated (cloud-init / Ansible)
   sudo $0 --non-interactive --with-compose --vg ubuntu-vg
+  sudo $0 --non-interactive --runpod-storage-layout
   sudo $0 --freeze-gpu-stack        # freeze validated NVIDIA packages after stage1
   sudo $0 --unfreeze-gpu-stack      # temporarily unfreeze, update, then re-freeze
   sudo $0 --status                  # check progress
@@ -114,6 +119,7 @@ while [[ $# -gt 0 ]]; do
         --with-compose)    WITH_COMPOSE=true ;;
         --vg)              FORCE_VG="$2"; shift ;;
         --disk)            FORCE_DISK="$2"; shift ;;
+        --runpod-storage-layout) RUNPOD_STORAGE_LAYOUT=true ;;
         --freeze-gpu-stack) FREEZE_GPU_STACK=true ;;
         --unfreeze-gpu-stack) UNFREEZE_GPU_STACK=true ;;
         --reset-state)     RESET_STATE=true ;;
@@ -323,6 +329,7 @@ DOCKER_ARGS="--called-by-provision"
 [[ "$WITH_COMPOSE" == true ]] && DOCKER_ARGS+=" --with-compose"
 [[ -n "$FORCE_VG" ]]          && DOCKER_ARGS+=" --vg ${FORCE_VG}"
 [[ -n "$FORCE_DISK" ]]        && DOCKER_ARGS+=" --disk ${FORCE_DISK}"
+[[ "$RUNPOD_STORAGE_LAYOUT" == true ]] && DOCKER_ARGS+=" --runpod-storage-layout"
 
 BASE_ARGS=""
 [[ "$NON_INTERACTIVE" == true ]] && BASE_ARGS+=" --yes"
@@ -417,7 +424,30 @@ if ! stage_done "stage2_docker"; then
     # If DISK_SETUP fell back to root this will be a no-op check, but if a dedicated
     # volume was provisioned and the mount silently failed we must catch it here
     # rather than letting fulltest run against root.
-    if ! mountpoint -q /data/container-runtime 2>/dev/null; then
+    if [[ "$RUNPOD_STORAGE_LAYOUT" == true ]]; then
+        if ! mountpoint -q /var/lib/docker 2>/dev/null; then
+            error "  /var/lib/docker is not a mountpoint — RunPod storage layout failed"
+            error "  Reset and re-run: sudo ${PROVISION_DIR}/provision.sh --reset-state --runpod-storage-layout"
+            exit 1
+        fi
+        success "Container runtime volume mounted: $(df -h /var/lib/docker | awk 'NR==2{print $2" total, "$4" free"}')"
+
+        if ! mountpoint -q /var/lib/containerd 2>/dev/null; then
+            error "  /var/lib/containerd is not a mountpoint — RunPod storage layout failed"
+            error "  Reset and re-run: sudo ${PROVISION_DIR}/provision.sh --reset-state --runpod-storage-layout"
+            exit 1
+        fi
+
+        src=$(findmnt -n -o SOURCE --target /var/lib/containerd 2>/dev/null || true)
+        expected="/var/lib/docker/containerd"
+        if [[ "$src" != "$expected" ]]; then
+            error "  /var/lib/containerd source mismatch — expected ${expected}, got ${src:-'(unknown)'}"
+            error "  Reset and re-run: sudo ${PROVISION_DIR}/provision.sh --reset-state --runpod-storage-layout"
+            exit 1
+        fi
+        success "  /var/lib/docker mounted as runtime volume"
+        success "  /var/lib/containerd bind-mounted from ${src}"
+    elif ! mountpoint -q /data/container-runtime 2>/dev/null; then
         warn "No dedicated volume at /data/container-runtime — container runtime is on root"
         warn "This is expected only if no free disk or LVM space was available"
     else

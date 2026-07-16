@@ -55,6 +55,7 @@ FORCE_VG=""
 FORCE_DISK=""
 FREEZE_GPU_STACK=false
 UNFREEZE_GPU_STACK=false
+RUNPOD_STORAGE_LAYOUT=false
 RESET_STATE=false
 RESUME=false
 SHOW_STATUS=false
@@ -70,6 +71,9 @@ Options:
   --with-compose        Install Docker Compose (passed to docker-install.sh)
   --vg <vgname>         Pass VG selection to docker-install.sh
   --disk /dev/sdX       Pass disk selection to docker-install.sh
+  --runpod-storage-layout
+                        Pass RunPod-compatible /var/lib/docker mount layout
+                        to docker-install.sh
   --freeze-gpu-stack    Pass through to amd-base-install.sh (repo-pin symmetry; informational)
   --unfreeze-gpu-stack  Pass through to amd-base-install.sh (repo-pin symmetry; informational)
   --reset-state         Wipe provision state and restart from stage1
@@ -81,6 +85,7 @@ Examples:
   sudo $0
   sudo $0 --non-interactive --with-compose
   sudo $0 --non-interactive --vg ubuntu-vg
+  sudo $0 --non-interactive --runpod-storage-layout
   sudo $0 --freeze-gpu-stack
   sudo $0 --status
 EOF
@@ -93,6 +98,7 @@ while [[ $# -gt 0 ]]; do
         --with-compose)    WITH_COMPOSE=true ;;
         --vg)              FORCE_VG="$2"; shift ;;
         --disk)            FORCE_DISK="$2"; shift ;;
+        --runpod-storage-layout) RUNPOD_STORAGE_LAYOUT=true ;;
         --freeze-gpu-stack) FREEZE_GPU_STACK=true ;;
         --unfreeze-gpu-stack) UNFREEZE_GPU_STACK=true ;;
         --reset-state)     RESET_STATE=true ;;
@@ -268,6 +274,7 @@ DOCKER_ARGS="--called-by-provision --skip-nvidia-toolkit --skip-nouveau-blacklis
 [[ "$WITH_COMPOSE" == true ]] && DOCKER_ARGS+=" --with-compose"
 [[ -n "$FORCE_VG" ]]          && DOCKER_ARGS+=" --vg ${FORCE_VG}"
 [[ -n "$FORCE_DISK" ]]        && DOCKER_ARGS+=" --disk ${FORCE_DISK}"
+[[ "$RUNPOD_STORAGE_LAYOUT" == true ]] && DOCKER_ARGS+=" --runpod-storage-layout"
 
 BASE_ARGS=""
 [[ "$NON_INTERACTIVE" == true ]] && BASE_ARGS+=" --yes"
@@ -364,7 +371,26 @@ if ! stage_done "stage2_docker"; then
 
     run_stage "stage2_docker" "Docker Install (AMD host)" "$SCRIPT_DOCKER_INSTALL" "$DOCKER_ARGS"
 
-    if mountpoint -q /data/container-runtime 2>/dev/null; then
+    if [[ "$RUNPOD_STORAGE_LAYOUT" == true ]]; then
+        if ! mountpoint -q /var/lib/docker 2>/dev/null; then
+            error "  /var/lib/docker is not a mountpoint — RunPod storage layout failed"
+            exit 1
+        fi
+        success "Container runtime volume mounted: $(df -h /var/lib/docker | awk 'NR==2{print $2" total, "$4" free"}')"
+
+        if ! mountpoint -q /var/lib/containerd 2>/dev/null; then
+            error "  /var/lib/containerd is not a mountpoint — RunPod storage layout failed"
+            exit 1
+        fi
+        src=$(findmnt -n -o SOURCE --target /var/lib/containerd 2>/dev/null || true)
+        expected="/var/lib/docker/containerd"
+        if [[ "$src" != "$expected" ]]; then
+            error "  /var/lib/containerd source mismatch — expected ${expected}, got ${src:-'(unknown)'}"
+            exit 1
+        fi
+        success "  /var/lib/docker mounted as runtime volume"
+        success "  /var/lib/containerd bind-mounted from ${src}"
+    elif mountpoint -q /data/container-runtime 2>/dev/null; then
         success "Container runtime volume mounted: $(df -h /data/container-runtime | awk 'NR==2{print $2" total, "$4" free"}')"
         for link in /var/lib/docker /var/lib/containerd; do
             if ! mountpoint -q "$link" 2>/dev/null; then
