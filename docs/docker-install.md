@@ -119,7 +119,9 @@ If the script detects an existing fstab entry for the UUID that is **missing** `
 ```bash
 sudo mkdir -p /opt/provision
 sudo cp install/docker-install.sh /opt/provision/
+sudo cp install/docker-storage-layout-convert.sh /opt/provision/
 sudo chmod +x /opt/provision/docker-install.sh
+sudo chmod +x /opt/provision/docker-storage-layout-convert.sh
 ```
 
 ---
@@ -176,6 +178,33 @@ sudo /opt/provision/docker-install.sh --non-interactive --runpod-storage-layout
 # Clean uninstall
 sudo /opt/provision/docker-install.sh --uninstall
 ```
+
+### Converting Between Storage Layouts
+
+Use `docker-storage-layout-convert.sh` when Docker is already installed and you need to switch an existing node between the default layout and the RunPod-compatible layout without reinstalling Docker.
+
+```bash
+# Inspect the current mount, fstab, and daemon.json state
+sudo /opt/provision/docker-storage-layout-convert.sh --status
+
+# Preview conversion from default layout to RunPod layout
+sudo /opt/provision/docker-storage-layout-convert.sh --to runpod --dry-run
+
+# Convert from default layout to RunPod layout
+sudo /opt/provision/docker-storage-layout-convert.sh --to runpod --yes
+
+# Convert from RunPod layout back to default layout
+sudo /opt/provision/docker-storage-layout-convert.sh --to default --yes
+```
+
+The converter preserves the existing fstab mount source, including `UUID=...`, `/dev/...`, or loopback image entries. It backs up `/etc/fstab` and `/etc/docker/daemon.json`, stops Docker and containerd, reshapes the data directories on the same XFS volume, rewrites only the relevant fstab entries, remounts the selected layout, updates Docker's `data-root`, and restarts services unless `--no-start` is passed.
+
+During conversion:
+
+| Direction | Docker data-root after conversion | containerd source after conversion |
+|---|---|---|
+| default -> RunPod | `/var/lib/docker` | `/var/lib/docker/containerd` |
+| RunPod -> default | `/data/container-runtime/docker` | `/data/container-runtime/containerd` |
 
 ---
 
