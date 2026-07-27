@@ -355,11 +355,11 @@ Runs 100 forward passes of a 10,000×10,000 linear layer across all GPUs in scop
 
 **Fails if:** PyTorch install fails, `torchrun` not found, NCCL process group init fails, or any forward pass errors.
 
-**Runtime contract:** The lane uses the benchmark Python 3.11 runtime provisioned by `base-install.sh` (via `uv` or the installed `/opt/infra/python` tree). If only the host's default Python 3.12 runtime is available, the lane is treated as `NOT BEING RUN` instead of attempting a DDP run on an unsupported interpreter. PyTorch installs are force-refreshed so reruns do not keep stale wheel families alive in an existing venv.
+**Runtime contract:** The lane prefers the benchmark Python 3.11 runtime provisioned by `base-install.sh` (via `uv` or the installed `/opt/infra/python` tree). If `base-install.sh` has not run, `fulltest.sh` falls back to a supported system Python 3.10-3.12 and creates its own isolated `build/pytorch-venv`. Existing PyTorch venvs are rebuilt when their base interpreter does not match the selected runtime, so reruns do not keep stale Python or wheel families alive.
 
 **Failure diagnostics:** On failure, the script now keeps the generated DDP repro script in `/tmp`, emits a condensed summary of the failing `local_rank` / child exit code, and prints a direct `torchrun` repro command plus a suggested debug rerun with `NCCL_DEBUG=INFO` and `TORCH_DISTRIBUTED_DEBUG=DETAIL`.
 
-**Python runtime warning:** The script logs the active system `python3` runtime plus the benchmark runtime it will actually use. If no benchmark runtime is available, PyTorch is skipped rather than running on the host default interpreter.
+**Python runtime warning:** The script logs the active system `python3` runtime plus the PyTorch runtime it will actually use. If no supported Python runtime is available, PyTorch is skipped with an explicit `NOT BEING RUN` reason.
 
 **PyTorch wheel selection:**
 

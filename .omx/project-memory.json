@@ -1,0 +1,347 @@
+{
+  "notes": [
+    {
+      "category": "architecture",
+      "content": "disktest.sh now defaults to guided interactive mode on TTYs, supports --non-interactive for automation, includes interactive mode and disk selection, repeatable/comma-separated --device targeting, and writes per-disk reports under the run log directory's reports/ subdirectory.",
+      "timestamp": "2026-04-09T08:17:00.195Z"
+    },
+    {
+      "category": "build",
+      "content": "fulltest.sh now emits explicit permission warnings before rebuild/reclone actions when build directories or cloned repos are root-owned/unwritable. The build directory startup preflight warns on existing unwritable ./build and clean/rebuild paths now explain ownership fixes.",
+      "timestamp": "2026-04-09T09:07:00.059Z"
+    },
+    {
+      "category": "architecture",
+      "content": "test/gpu-fulltest-v2.sh is an experimental prepare-then-run variant of fulltest.sh. It keeps the stable fulltest.sh unchanged while separating detect, prepare-selected-tests, run-selected-tests, and summary phases.",
+      "timestamp": "2026-04-09T09:40:22.952Z"
+    },
+    {
+      "category": "architecture",
+      "content": "disktest.sh interactive TTY flow now includes mode selection plus checkbox-style disk selection with arrow keys to move, space to toggle, enter to confirm, a to toggle all, and q to cancel. Default on TTY is guided interactive mode; use --non-interactive for automation.",
+      "timestamp": "2026-04-09T12:15:30.395Z"
+    },
+    {
+      "category": "architecture",
+      "content": "fulltest.sh remains the stable production GPU validation path. test/gpu-fulltest-v2.sh is the experimental refactor lane for prepare-selected-tests-first behavior and should be validated on real GPU hosts before replacing fulltest.sh.",
+      "timestamp": "2026-04-09T12:15:30.397Z"
+    },
+    {
+      "category": "test",
+      "content": "gpu-fulltest-v2.sh has fresh verification evidence for a mocked cuda-samples flow: prepare runs before execution, successful prep is reported in summary, and prep failures stop execution early with a prepare-failed summary.",
+      "timestamp": "2026-04-09T12:15:30.421Z"
+    },
+    {
+      "category": "architecture",
+      "content": "As of 2026-04-10, repository is clean at main with latest human-readable decisions in docs/project-decisions.md and experimental GPU flow work isolated in test/gpu-fulltest-v2.sh.",
+      "timestamp": "2026-04-10T08:00:31.277Z"
+    },
+    {
+      "category": "test",
+      "content": "Fixed disktest fio timeout/subshell bug causing 'FIO_BW_READ: unbound variable' under set -u by keeping run_fio execution in same shell scope and initializing fio metric vars. Commit 05c56ba pushed.",
+      "timestamp": "2026-04-10T08:10:49.594Z"
+    },
+    {
+      "category": "test",
+      "content": "Improved disktest fio diagnostics: auto-select fio ioengine (io_uring/libaio/psync/sync), capture per-job stderr logs, and include error detail in WARN output for exit code 1. Added stderr artifacts to per-disk reports. Commit 563d9fd pushed.",
+      "timestamp": "2026-04-10T08:16:36.424Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Updated docs/disktest.md to clarify no auto-sudo behavior, raw-device permission safety checks, permission-denied fio symptom/remediation, and fio stderr artifact logs. Commit 31be1b5 pushed.",
+      "timestamp": "2026-04-10T08:25:24.796Z"
+    },
+    {
+      "category": "test",
+      "content": "disktest interactive mode now warns non-root operators that quick/full/stress require sudo and suggests rerun command after mode selection; non-health safety checks enforce raw read/write permission before fio. Commit 99dd75f pushed.",
+      "timestamp": "2026-04-10T08:28:31.583Z"
+    },
+    {
+      "category": "test",
+      "content": "Added non-interactive sudo warning path to disktest for quick/full/stress when not root, with rerun hint; documented behavior in docs/disktest.md. Commit 7986aaa pushed.",
+      "timestamp": "2026-04-10T08:33:15.723Z"
+    },
+    {
+      "category": "test",
+      "content": "Improved PyTorch benchmark diagnostics in fulltest.sh and gpu-fulltest-v2.sh: torchrun output is mirrored to a temp transcript, failure summaries extract local_rank/exitcode clues, failed DDP repro scripts are kept in /tmp, and docs note the richer failure output. Commit 1ac4e63 pushed.",
+      "timestamp": "2026-04-10T13:38:39.623Z"
+    },
+    {
+      "category": "test",
+      "content": "Added Python runtime warning to fulltest.sh and gpu-fulltest-v2.sh for PyTorch benchmark paths: logs active python3 and warns when Python 3.12+ is detected due to known torch.distributed/torchrun segfault history. Docs updated. Commit 28d6f45 pushed.",
+      "timestamp": "2026-04-10T13:52:28.486Z"
+    },
+    {
+      "category": "architecture",
+      "content": "base-install.sh and amd-base-install.sh now install stress-ng, fio, lm-sensors, and uv; uv is installed via Astral's standalone installer to /usr/local/bin and removed during uninstall cleanup. Commit 9bfdebf pushed.",
+      "timestamp": "2026-05-07T14:09:16Z"
+    },
+    {
+      "category": "test",
+      "content": "test/gpu-fulltest-v2.sh now prototypes a new node-stress mode that runs stress-ng CPU + RAM pressure together with the existing GPU stress backend for a user-defined duration in minutes (default 5). The stable fulltest.sh remains unchanged until the experimental lane is validated. Commit 9bfdebf pushed.",
+      "timestamp": "2026-05-07T14:09:16Z"
+    },
+    {
+      "category": "test",
+      "content": "test/fulltest.sh now mirrors the validated node-stress mode from gpu-fulltest-v2.sh: concurrent stress-ng CPU + RAM load plus GPU burn, selectable with --node-stress-minutes (default 5), while preserving the existing GPU-only stress test. Commit pending at time of memory update.",
+      "timestamp": "2026-05-07T15:02:53Z"
+    },
+    {
+      "category": "test",
+      "content": "Added standalone test/cpu-ram-stress.sh for CPU + RAM isolation using stress-ng only. It defaults to a 5-minute run, supports operator-tunable worker counts and reserve memory, auto-installs stress-ng when available and root is present, and is documented in docs/cpu-ram-stress.md and README.md.",
+      "timestamp": "2026-05-07T15:06:51Z"
+    },
+    {
+      "category": "architecture",
+      "content": "base-install.sh now installs repo-root .aliases into the target user home as ~/.aliases, adds managed source blocks for ~/.bashrc and ~/.zshrc, and generates ~/.aliases.fish for fish with config.fish sourcing the generated file. Uninstall cleanup removes the managed alias blocks and fish wrapper file.",
+      "timestamp": "2026-05-16T11:15:06Z"
+    },
+    {
+      "category": "test",
+      "content": "Added docs/cpu-test.md for test/cpu-test.sh, documenting the single-logical-CPU stress flow with socket0/socket1 selection, per-CPU runtime control, temperature logging, and resume/log files.",
+      "timestamp": "2026-05-16T11:20:09Z"
+    },
+    {
+      "category": "test",
+      "content": "cpu-test.sh now writes each run into a per-run directory under /tmp by default, with optional --run-dir override for reusing the same transcript/progress state. The script still supports socket-aware single-CPU stress, resume markers, and optional temperature snapshots.",
+      "timestamp": "2026-05-16T11:31:50Z"
+    },
+    {
+      "category": "architecture",
+      "content": "base-install.sh now also provisions the target user SSH authorized key and a passwordless sudoers drop-in when absent, in addition to copying repo aliases and installing uv/stress packages.",
+      "timestamp": "2026-05-16T14:58:29Z"
+    },
+    {
+      "category": "architecture",
+      "content": "base-install.sh now adds the repo SSH authorized key for the target user, creates a passwordless sudoers drop-in when absent, and removes both managed access artifacts again during uninstall.",
+      "timestamp": "2026-05-16T14:58:55Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Added install/user-bootstrap.sh as a standalone helper for creating or updating a local user, installing an SSH authorized key, and granting passwordless sudo without rerunning the full base-install flow.",
+      "timestamp": "2026-06-16T00:00:00Z"
+    },
+    {
+      "category": "architecture",
+      "content": "install/user-bootstrap.sh now accepts SSH key material from a repo-managed named key, a local file, or pasted text via --key-name, --key-file, and --key-text, with no silent default key fallback.",
+      "timestamp": "2026-06-16T00:00:00Z"
+    },
+    {
+      "category": "architecture",
+      "content": "base-install.sh and amd-base-install.sh now both disable PCIe ASPM at boot via a managed GRUB drop-in at /etc/default/grub.d/99-infra-pcie-aspm.cfg that appends pcie_aspm=off and is removed on uninstall.",
+      "timestamp": "2026-06-25T00:00:00Z"
+    },
+    {
+      "category": "test",
+      "content": "cpu-test.sh now writes stress_summary.txt in the per-run directory, updates it after each CPU, and flushes the run artifacts so a hang or power loss leaves a usable checkpoint alongside stress_test_log.txt and stress_progress.txt.",
+      "timestamp": "2026-05-16T15:03:05Z"
+    },
+    {
+      "category": "test",
+      "content": "cpu-test.sh now operates at the CPU socket/package level instead of one logical thread at a time: each socket target runs stress-ng across all logical CPUs on that socket, defaults its run directory to /var/tmp for reboot-survivable checkpoints, supports --status to inspect saved state, and supports --reset-state to clear residue before retesting.",
+      "timestamp": "2026-05-19T07:24:50Z"
+    },
+    {
+      "category": "test",
+      "content": "cpu-test.sh now supports both socket-level and per-thread targeting via --granularity socket|thread. Socket remains the default for package-level fault isolation, while thread restores the one-logical-CPU-at-a-time mode with the same run-dir, --status, and --reset-state crash/retest workflow.",
+      "timestamp": "2026-05-19T07:27:38Z"
+    },
+    {
+      "category": "test",
+      "content": "cpu-test.sh now defaults its state directory to /var/tmp/cpu-test, supports --status without requiring --run-dir, supports --reset-status to clear summary/progress and exit without testing, and no longer stops after the first successful target because the pass/fail counters were changed to avoid set -e arithmetic-status exits.",
+      "timestamp": "2026-05-19T07:42:27Z"
+    },
+    {
+      "category": "test",
+      "content": "cpu-test.sh now defaults to 300 seconds per target instead of 60 seconds, while retaining socket-level default targeting, optional per-thread granularity, stable /var/tmp/cpu-test status storage, and reset/status workflows.",
+      "timestamp": "2026-05-19T07:51:23Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Added install/install-raid.sh as an opt-in RAID / ESP redundancy installer. By default it stages the RAID helper scripts only; --activate is required to install and enable the apt hook and systemd timer/service, and non-RAID hosts remain unaffected unless the lane is explicitly activated. Documented the lane in docs/project-decisions.md, README.md, and install/raid/INSTALL.md.",
+      "timestamp": "2026-05-20T17:49:43Z"
+    },
+    {
+      "category": "test",
+      "content": "cpu-test.sh default runtime is 300 seconds per target, docs/cpu-test.md now matches that default, and the help/status paths were re-verified. No active saved run state currently exists under /var/tmp/cpu-test.",
+      "timestamp": "2026-05-20T18:03:40Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Added Ubuntu 26.04 support to base-install.sh and a preview AMD 26.04 lane to amd-base-install.sh using AMD 31.30 preview repos plus amdrocm7.13. Updated README and docs to mark the AMD 26.04 path experimental.",
+      "timestamp": "2026-05-21T09:14:58Z"
+    },
+    {
+      "category": "documentation",
+      "content": "Updated README and the base-install / amd-base-install quick-start docs with explicit Ubuntu 26.04 notes: NVIDIA base-install auto-maps ubuntu2604, AMD base-install auto-selects the 31.30/amdrocm7.13 preview lane.",
+      "timestamp": "2026-05-21T09:14:58Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Added explicit NVIDIA GPU stack freeze support: base-install.sh now warns when held NVIDIA/CUDA packages are present, supports --freeze-gpu-stack and --unfreeze-gpu-stack, re-holds after validation when requested, and ships a new install/nvidia-stack-hold.sh helper for hold/unhold/status workflows.",
+      "timestamp": "2026-05-21T10:15:28Z"
+    },
+    {
+      "category": "documentation",
+      "content": "Documented the NVIDIA freeze workflow in README.md and docs/base-install.md, including the new helper script, the install copy list, and the rerun/unhold maintenance path.",
+      "timestamp": "2026-05-21T10:15:28Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Extended install/provision.sh to pass --freeze-gpu-stack and --unfreeze-gpu-stack through to base-install.sh stage 1, with mutual-exclusion validation and updated orchestrator usage text.",
+      "timestamp": "2026-05-21T10:36:59Z"
+    },
+    {
+      "category": "documentation",
+      "content": "Updated README quick-start guidance to mention NVIDIA freeze/unfreeze passthrough through the orchestrated provision.sh flow.",
+      "timestamp": "2026-05-21T10:36:59Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Extended amd-base-install.sh and provision-amd.sh to accept the same freeze/unfreeze flags for CLI symmetry, but documented that AMD still uses repo pinning rather than apt-mark holds.",
+      "timestamp": "2026-05-21T10:42:34Z"
+    },
+    {
+      "category": "documentation",
+      "content": "Updated README and docs/project-decisions.md to explain that AMD accepts freeze/unfreeze flags only for symmetry and that repo pinning remains the actual control mechanism.",
+      "timestamp": "2026-05-21T10:42:34Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Added install/amd-stack-pin.sh as the operator-facing helper for inspecting or restoring the AMD ROCm apt pin, and wired it into amd-base-install.sh warnings plus README/docs references.",
+      "timestamp": "2026-05-21T10:56:42Z"
+    },
+    {
+      "category": "documentation",
+      "content": "Updated README.md, docs/amd-base-install.md, and docs/project-decisions.md to surface the AMD ROCm pin helper, including manual and orchestrated quick-start references.",
+      "timestamp": "2026-05-21T10:56:42Z"
+    },
+    {
+      "category": "documentation",
+      "content": "Updated provision-amd.sh --status output to point operators at amd-stack-pin.sh --status for quick AMD ROCm pin inspection.",
+      "timestamp": "2026-05-21T12:56:55Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Adjusted test/fulltest.sh summary handling so sustained compute stress and node-stress thermal/performance-only outcomes become remarks instead of failures, and binary/build unavailability is reported under NOT BEING RUN.",
+      "timestamp": "2026-05-22T09:46:58Z"
+    },
+    {
+      "category": "documentation",
+      "content": "Updated docs/fulltest.md to match the new stress summary behavior: thermal/performance-only cases are remarks, and unavailable backends are called out as NOT BEING RUN.",
+      "timestamp": "2026-05-22T09:46:58Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Mirrored the new summary classification rules into test/gpu-fulltest-v2.sh: stress thermal/performance-only cases are remarks, unavailable stress backends and missing stress-ng are listed under NOT BEING RUN, and the summary now prints remarks separately.",
+      "timestamp": "2026-05-22T10:42:33Z"
+    },
+    {
+      "category": "documentation",
+      "content": "Updated docs/gpu-fulltest-v2.md to describe the experimental lane's new remark-based stress reporting and NOT BEING RUN handling for unavailable backends.",
+      "timestamp": "2026-05-22T10:42:33Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Relaxed the stress failure gate in test/fulltest.sh and test/gpu-fulltest-v2.sh so burn exits caused only by performance or thermal-soft-throttle conditions (including SW_Thermal) become remarks instead of failures; only hardware-crash indicators still fail the run.",
+      "timestamp": "2026-05-22T12:28:31Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Adjusted CUDA samples handling in test/fulltest.sh and test/gpu-fulltest-v2.sh so source/layout/build misses are recorded as NOT BEING RUN rather than failing the test; fulltest now locates deviceQuery across the current cuda-samples directory layouts.",
+      "timestamp": "2026-05-22T13:14:33Z"
+    },
+    {
+      "category": "documentation",
+      "content": "Updated docs/fulltest.md and docs/gpu-fulltest-v2.md to describe the CUDA samples NOT BEING RUN handling for source/layout/build availability issues.",
+      "timestamp": "2026-05-22T13:14:33Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Added post-stress-recovery as a default end-of-run GPU sanity check in fulltest.sh and gpu-fulltest-v2.sh. It verifies GPU enumeration, scans recovery-window kernel logs for Xid/reset/bus-drop style errors, and treats leftover thermal residue as remarks with a configurable cooldown window.",
+      "timestamp": "2026-05-22T19:18:43Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Added gpu-policy as an optional selectable GPU policy test in fulltest.sh and gpu-fulltest-v2.sh. It is advisory by default, can be made strict with GPU_POLICY_STRICT=1, and supports persistence mode plus idle temperature and power-limit thresholds via GPU_POLICY_* environment variables.",
+      "timestamp": "2026-05-22T19:18:43Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Added 12V-2x6 / 12VHPWR sustained power-anomaly detection to both fulltest.sh and gpu-fulltest-v2.sh. The detector records burn telemetry, treats anomalies as remarks by default via POWER_ANOMALY_AS_REMARK=1, and aligns the stable and experimental suites' stress summaries and docs with the out-of-band IPMI power-cycle recovery guidance.",
+      "timestamp": "2026-05-24T10:39:24Z"
+    },
+    {
+      "category": "documentation",
+      "content": "Mirrored the 12V-2x6 / 12VHPWR early-warning methodology into docs/gpu-fulltest-v2.md so the experimental lane matches docs/fulltest.md; README and docs links were also cleaned back to repo-relative paths.",
+      "timestamp": "2026-05-24T10:51:21Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Tightened the 12V-2x6 / 12VHPWR detector in fulltest.sh and gpu-fulltest-v2.sh with a relative power threshold floor (max 25W or 6% of peer median), explicit no-fan-telemetry skip handling, flagged-GPU index reporting in remarks, and self-contained burn-monitor state resets.",
+      "timestamp": "2026-05-24T11:20:00Z"
+    },
+    {
+      "category": "documentation",
+      "content": "Added a documented future-improvement plan for the 12V-2x6 / 12VHPWR power-anomaly detector: standalone replay analysis for archived telemetry, late-onset anomaly detection, and a later policy review for the remark-only default.",
+      "timestamp": "2026-05-24T11:35:00Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Added test/code.sh plus the code test lane to fulltest.sh and gpu-fulltest-v2.sh. The new path compiles test/code.cu with nvcc when available, loops across every visible GPU using logical device IDs 0..N-1, honors CUDA_CODE_SECONDS (default 15s in-suite), and records NOT BEING RUN when nvcc is unavailable.",
+      "timestamp": "2026-06-07T09:05:12.038Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Future code.cu improvement ideas are deferred for later revisit: add a mixed compute+memory mode, parameterize launch geometry, add a warmup phase, expose better CLI flags, and consider an optional parallel multi-GPU mode. Current default remains the simple compute stress lane.",
+      "timestamp": "2026-06-07T09:12:44.000Z"
+    },
+    {
+      "category": "architecture",
+      "content": "base-install.sh and amd-base-install.sh should not install yq via apt. yq is now fetched from the official mikefarah/yq GitHub latest binary for the host architecture, installed to /usr/local/bin/yq, and removed during uninstall cleanup.",
+      "timestamp": "2026-06-07T09:18:22.000Z"
+    },
+    {
+      "category": "architecture",
+      "content": "base-install.sh now supports --no-gpu-stack to skip the NVIDIA driver, CUDA toolkit, cuDNN, DCGM, and gpu-burn path while still installing the general host tooling and recovery setup. The option also skips NVIDIA repo/Secure Boot checks, omits graphics-drivers PPA and kernel header installation, and leaves the host-tooling-only path documented in docs/base-install.md and README.md.",
+      "timestamp": "2026-06-11T00:00:00Z"
+    },
+    {
+      "category": "documentation",
+      "content": "Added an operator entry matrix to README.md that maps common intents (fresh NVIDIA node, fresh AMD node, host tooling only, validation, live-root rebuild, live ISO build, and emergency reboot / IPMI recovery) to the correct primary script.",
+      "timestamp": "2026-06-12T00:00:00Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Added install/build-gpu-liveiso.sh as a standalone helper that builds a bootable gpu-test live ISO directly from a mounted USB root filesystem. It no longer depends on rebuild-gpu-livefs.sh; it copies and generalizes the source rootfs, rebuilds the live boot stack in chroot, stages a GRUB live layout, and emits /srv/iso/gpu-test.iso. Documented in docs/build-gpu-liveiso.md and linked from README.md and docs/project-decisions.md.",
+      "timestamp": "2026-06-11T00:00:00Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Added install/autologin.sh as a reversible graphical autologin helper for the current sudo user. It supports enabling, disabling, and status checks across GDM3, LightDM, and SDDM, and documents that it is separate from install/super-ezc.sh, which only handles tty1 autologin.",
+      "timestamp": "2026-06-12T00:00:00Z"
+    },
+    {
+      "category": "architecture",
+      "content": "Added install/console-autologin.sh as the reversible tty1 console autologin helper for the current sudo user. install/super-ezc.sh is now only a compatibility wrapper that preserves the old ezc-specific enable behavior.",
+      "timestamp": "2026-06-12T00:00:00Z"
+    },
+    {
+      "category": "test",
+      "content": "fulltest.sh and gpu-fulltest-v2.sh now support excluding named tests by prefixing the test with '-' (for example -code) or with --exclude <test>. Multiple exclusions are supported in a single run by repeating the flag or prefix (for example -code -memtest or --exclude code --exclude memtest). Exclusions are applied after normal selection so operators can keep the rest of the suite running without editing the test list.",
+      "timestamp": "2026-06-12T00:00:00Z"
+    },
+    {
+      "category": "test",
+      "content": "Stable test/fulltest.sh now centralizes PyTorch runtime handling: it prefers the base-install.sh managed Python 3.11 runtime, falls back to system Python 3.10-3.12 when base-install has not run, rebuilds stale build/pytorch-venv environments when their base interpreter mismatches, and runs DDP, PCIe load, clock load, and PyTorch stress fallback through the same isolated venv. Added test/fulltest-python-runtime-test.sh regression coverage and updated README/docs.",
+      "timestamp": "2026-07-27T06:50:00Z"
+    }
+  ],
+  "directives": [
+    {
+      "directive": "Do not replace or heavily restructure test/fulltest.sh in place without real-host validation; use test/gpu-fulltest-v2.sh as the experimental lane for flow refactors first.",
+      "priority": "high",
+      "context": "GPU validation workflow stability",
+      "timestamp": "2026-04-09T12:15:30.423Z"
+    }
+  ]
+}

@@ -158,7 +158,7 @@ Next checks:
 How to read it:
 
 - If `code` passes but `pytorch` fails, the problem is often in the software stack rather than the GPU hardware itself
-- If the suite reports PyTorch as `NOT BEING RUN`, first check whether the benchmark Python 3.11 runtime from `base-install.sh` exists
+- If the suite reports PyTorch as `NOT BEING RUN`, first check whether any supported Python runtime is available: the managed benchmark Python 3.11 from `base-install.sh` is preferred, but standalone `fulltest.sh` can fall back to system Python 3.10-3.12
 
 ---
 
