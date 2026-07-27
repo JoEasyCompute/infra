@@ -243,6 +243,9 @@ modifying shell profiles.
 `base-install.sh` also uses `uv` to provision and refresh a benchmark-safe
 Python 3.11 runtime for the PyTorch lane, keeping the distro's default
 `python3` unchanged.
+`test/fulltest.sh` prefers this managed runtime after provisioning, but can
+also create its isolated PyTorch venv from a supported system Python 3.10-3.12
+when run on a host where `base-install.sh` has not been executed.
 `fd` and `bat` compatibility symlinks are created when the Ubuntu packages
 expose the commands as `fdfind` and `batcat`.
 

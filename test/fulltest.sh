@@ -84,8 +84,11 @@ PIP_EXTRA=""
 UBUNTU_MAJOR=""
 RESULTS_STRESS_LABEL="Sustained Compute Stress"
 PYTORCH_RUNTIME_WARNED=false
+PYTORCH_RUNTIME_READY=false
+PYTORCH_RUNTIME_SKIP_REASON=""
 PYTORCH_PYTHON=""
 PYTORCH_VENV="$BUILD_DIR/pytorch-venv"
+TORCHRUN_BIN=""
 STRESS_ACTIVITY_START_TS=""
 CUDA_CODE_SECONDS="${CUDA_CODE_SECONDS:-15}"
 
@@ -128,8 +131,17 @@ find_benchmark_python() {
         fi
     done
 
+    if command -v python3.11 >/dev/null 2>&1; then
+        candidate="$(command -v python3.11)"
+        if [ -x "${candidate}" ] && "${candidate}" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' \
+            >/dev/null 2>&1; then
+            echo "${candidate}"
+            return 0
+        fi
+    fi
+
     if command -v python3 >/dev/null 2>&1; then
-        if python3 -c 'import sys; raise SystemExit(0 if sys.version_info[:2] in ((3, 10), (3, 11)) else 1)' \
+        if python3 -c 'import sys; raise SystemExit(0 if (3, 10) <= sys.version_info[:2] <= (3, 12) else 1)' \
             >/dev/null 2>&1; then
             command -v python3
             return 0
@@ -139,13 +151,45 @@ find_benchmark_python() {
     return 1
 }
 
+pytorch_venv_matches_python() {
+    local py_bin="$1"
+    local venv_dir="$2"
+
+    [ -x "${venv_dir}/bin/python" ] || return 1
+
+    "${venv_dir}/bin/python" -c '
+import os
+import sys
+
+selected = os.path.realpath(sys.argv[1])
+base = getattr(sys, "_base_executable", "") or sys.executable
+try:
+    same_python = os.path.samefile(base, selected)
+except OSError:
+    same_python = os.path.realpath(base) == selected
+
+supported = (3, 10) <= sys.version_info[:2] <= (3, 12)
+raise SystemExit(0 if same_python and supported else 1)
+' "${py_bin}" >/dev/null 2>&1
+}
+
 ensure_pytorch_venv() {
     local py_bin="$1"
     local venv_dir="$2"
 
+    if [ -x "${venv_dir}/bin/python" ] && ! pytorch_venv_matches_python "$py_bin" "$venv_dir"; then
+        log "  Rebuilding PyTorch venv: existing venv was created from a different Python runtime."
+        rm -rf "${venv_dir}" || return 1
+    fi
+
     if [ ! -x "${venv_dir}/bin/python" ]; then
         "${py_bin}" -m venv "${venv_dir}" || return 1
     fi
+
+    pytorch_venv_matches_python "$py_bin" "$venv_dir" || {
+        log "ERROR: PyTorch venv runtime does not match selected Python: $py_bin"
+        return 1
+    }
 
     "${venv_dir}/bin/python" -m pip install --upgrade pip --quiet \
         $PIP_EXTRA 2>&1 | tee -a "$LOG_FILE" || return 1
@@ -160,17 +204,16 @@ warn_pytorch_python_runtime() {
     log "  System python3     : python3 $py_version ($py_path)"
 
     if benchmark_python=$(find_benchmark_python 2>/dev/null); then
-        log "  Benchmark python   : $benchmark_python"
+        log "  PyTorch python     : $benchmark_python"
     else
-        log "  Benchmark python   : missing (PyTorch DDP lane will be NOT BEING RUN)"
+        log "  PyTorch python     : missing (supported Python 3.10-3.12 runtime required)"
     fi
 
     if python3 -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 12) else 1)' 2>/dev/null; then
         if [ -z "${benchmark_python}" ]; then
-            log "  WARNING: Python 3.12+ has known torch.distributed / torchrun segfault history."
-            log "           If the pytorch test fails during DDP init, prefer the benchmark Python 3.11 runtime."
+            log "  NOTE: no benchmark Python 3.11 runtime found; PyTorch helpers will use the supported system python3 fallback if available."
         else
-            log "  NOTE: system python3 is 3.12+, but PyTorch will use the benchmark Python runtime above."
+            log "  NOTE: system python3 is 3.12+, but PyTorch helpers will use the runtime above."
         fi
     fi
 
@@ -702,8 +745,18 @@ test_pcie() {
     log "  Managed boot policy: $managed_boot_policy"
     log "  Spinning up GPU load to force links to full speed before sampling..."
 
+    local prepare_rc=0
+    prepare_pytorch_runtime || prepare_rc=$?
+    if [ "$prepare_rc" -eq 2 ]; then
+        log "ERROR: Cannot run PCIe load helper: $PYTORCH_RUNTIME_SKIP_REASON"
+        return 1
+    fi
+    if [ "$prepare_rc" -ne 0 ]; then
+        return "$prepare_rc"
+    fi
+
     # Run load on all GPUs for 10 seconds, sample in the middle while it's active
-    python3 - << 'PYEOF' &
+    "$PYTORCH_VENV/bin/python" - << 'PYEOF' &
 import torch, time
 gpus = list(range(torch.cuda.device_count()))
 if not gpus:
@@ -828,6 +881,16 @@ test_clocks() {
     log ""
     log "  Running 30s load to measure sustained clocks..."
 
+    local prepare_rc=0
+    prepare_pytorch_runtime || prepare_rc=$?
+    if [ "$prepare_rc" -eq 2 ]; then
+        log "ERROR: Cannot run clock load helper: $PYTORCH_RUNTIME_SKIP_REASON"
+        return 1
+    fi
+    if [ "$prepare_rc" -ne 0 ]; then
+        return "$prepare_rc"
+    fi
+
     # Kick off a background GEMM load on all GPUs via Python
     local load_script="$BUILD_DIR/_clock_load.py"
     ensure_build_dir_writable "writing clock-load helper" || return 1
@@ -847,7 +910,7 @@ while time.time() < end:
     for g in gpus: torch.cuda.synchronize(g)
 PYEOF
 
-    python3 "$load_script" &
+    "$PYTORCH_VENV/bin/python" "$load_script" &
     local load_pid=$!
 
     # Sample clocks and throttle reasons every 3 seconds for 30 seconds
@@ -1187,9 +1250,9 @@ install_pytorch() {
     ensure_pytorch_venv "$PYTORCH_PYTHON" "$PYTORCH_VENV" || return 1
     "${PYTORCH_VENV}/bin/python" -m pip install torch torchvision torchaudio \
         --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}" \
-        --upgrade --force-reinstall --no-cache-dir --quiet $PIP_EXTRA 2>&1 | tee -a "$LOG_FILE"
+        --upgrade --force-reinstall --no-cache-dir --quiet $PIP_EXTRA 2>&1 | tee -a "$LOG_FILE" || return 1
     "${PYTORCH_VENV}/bin/python" -m pip install accelerate \
-        --upgrade --force-reinstall --no-cache-dir --quiet $PIP_EXTRA 2>&1 | tee -a "$LOG_FILE"
+        --upgrade --force-reinstall --no-cache-dir --quiet $PIP_EXTRA 2>&1 | tee -a "$LOG_FILE" || return 1
 }
 
 find_torchrun() {
@@ -1197,9 +1260,31 @@ find_torchrun() {
         echo "$PYTORCH_VENV/bin/torchrun"
         return 0
     fi
+    return 1
+}
 
-    find "$HOME/.local/bin" /usr/local/bin /usr/bin \
-        -name torchrun 2>/dev/null | head -1
+prepare_pytorch_runtime() {
+    if $PYTORCH_RUNTIME_READY; then
+        return 0
+    fi
+
+    warn_pytorch_python_runtime
+
+    if ! PYTORCH_PYTHON=$(find_benchmark_python); then
+        PYTORCH_RUNTIME_SKIP_REASON="supported Python runtime missing — run base-install.sh for managed Python 3.11 or install Python 3.10-3.12"
+        return 2
+    fi
+
+    install_pytorch || return 1
+
+    TORCHRUN_BIN=$(find_torchrun) || {
+        log "ERROR: torchrun not found in PyTorch venv after installing PyTorch."
+        return 1
+    }
+
+    log "  Using PyTorch python: $PYTORCH_VENV/bin/python"
+    log "  Using torchrun      : $TORCHRUN_BIN"
+    PYTORCH_RUNTIME_READY=true
 }
 
 summarize_pytorch_failure() {
@@ -1241,23 +1326,18 @@ summarize_pytorch_failure() {
 }
 
 test_pytorch() {
-    warn_pytorch_python_runtime
-
-    if ! PYTORCH_PYTHON=$(find_benchmark_python); then
+    local prepare_rc=0
+    prepare_pytorch_runtime || prepare_rc=$?
+    if [ "$prepare_rc" -eq 2 ]; then
         record_not_run "PyTorch Multi-GPU Benchmark" \
-            "benchmark Python 3.11 runtime missing — install base-install.sh first (it provisions uv-managed Python 3.11)"
+            "$PYTORCH_RUNTIME_SKIP_REASON"
         return 0
     fi
-
-    install_pytorch
-
-    local torchrun
-    torchrun=$(find_torchrun)
-    if [ -z "$torchrun" ] || [ ! -x "$torchrun" ]; then
-        log "ERROR: torchrun not found after installing PyTorch."
-        return 1
+    if [ "$prepare_rc" -ne 0 ]; then
+        return "$prepare_rc"
     fi
-    log "  Using torchrun: $torchrun"
+
+    local torchrun="$TORCHRUN_BIN"
 
     # Write to /tmp to avoid any permission issues with BUILD_DIR
     local script
@@ -1502,13 +1582,22 @@ run_pytorch_stress() {
 run_pytorch_stress_for_duration() {
     local duration_s="$1"
     local script="$BUILD_DIR/_gpu_stress.py"
+    local prepare_rc=0
     ensure_build_dir_writable "writing stress helper" || return 1
-    if ! python3 - <<'PY' >/dev/null 2>&1
+
+    prepare_pytorch_runtime || prepare_rc=$?
+    if [ "$prepare_rc" -eq 2 ]; then
+        record_not_run "${RESULTS_STRESS_LABEL:-PyTorch fallback}" "$PYTORCH_RUNTIME_SKIP_REASON"
+        log "  NOTE: PyTorch runtime unavailable — fallback stress is not being run."
+        return 0
+    fi
+    if [ "$prepare_rc" -ne 0 ]; then
+        return "$prepare_rc"
+    fi
+
+    if ! "$PYTORCH_VENV/bin/python" - <<'PY' >/dev/null 2>&1
 import sys
-try:
-    import torch
-except Exception:
-    sys.exit(1)
+import torch
 sys.exit(0 if torch.cuda.is_available() and torch.cuda.device_count() > 0 else 1)
 PY
     then
@@ -1545,7 +1634,7 @@ while time.time() - start < DURATION:
 print(f"Stress complete: {iters} iterations — no errors.")
 PYEOF
     local rc=0
-    python3 "$script" 2>&1 | tee -a "$LOG_FILE" || rc=$?
+    "$PYTORCH_VENV/bin/python" "$script" 2>&1 | tee -a "$LOG_FILE" || rc=$?
     rm -f "$script"
     return $rc
 }

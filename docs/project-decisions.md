@@ -151,6 +151,18 @@ Current behavior:
 
 This gives the GPU test kit a simple, explicit integer-ALU stress path in addition to `memtest` and the heavier sustained-stress backends.
 
+### 12. Stable `fulltest.sh` owns the PyTorch runtime boundary
+
+Current behavior:
+
+- `test/fulltest.sh` prefers the `base-install.sh` managed Python 3.11 runtime under `/opt/infra/python`
+- if `base-install.sh` has not run, stable `fulltest.sh` can fall back to a supported system Python 3.10-3.12
+- all PyTorch-backed stable helpers use the same isolated `build/pytorch-venv`, including DDP, PCIe load, clock load, and PyTorch stress fallback
+- an existing PyTorch venv is rebuilt when its base interpreter does not match the selected runtime
+- `torchrun` is resolved only from the managed venv, not from global user or system paths
+
+This keeps the normal workflow (`base-install.sh` first, then `fulltest.sh`) aligned while preserving a standalone `fulltest.sh` path for hosts that already have a usable Python runtime.
+
 ---
 
 ## Operator Notes
