@@ -423,7 +423,10 @@ For the stable `test/fulltest.sh` path, PyTorch checks prefer the
 `base-install.sh` managed Python 3.11 runtime and rebuild stale
 `build/pytorch-venv` environments when their base interpreter no longer
 matches. If `base-install.sh` has not run, `fulltest.sh` can still create an
-isolated PyTorch venv from a supported system Python 3.10-3.12.
+isolated PyTorch venv from a supported system Python 3.10-3.12. The shared
+runtime installs only CUDA-enabled `torch`; unrelated optional packages such
+as `torchvision`, `torchaudio`, and `accelerate` do not gate PCIe, clock,
+stress, or DDP validation.
 
 The experimental `test/gpu-fulltest-v2.sh` mirrors the same sustained-stress remarks, including the 12V-2x6 / 12VHPWR early-warning detector with remark-only default behavior.
 
