@@ -334,6 +334,11 @@
       "category": "test",
       "content": "Stable test/fulltest.sh now centralizes PyTorch runtime handling: it prefers the base-install.sh managed Python 3.11 runtime, falls back to system Python 3.10-3.12 when base-install has not run, rebuilds stale build/pytorch-venv environments when their base interpreter mismatches, and runs DDP, PCIe load, clock load, and PyTorch stress fallback through the same isolated venv. Added test/fulltest-python-runtime-test.sh regression coverage and updated README/docs.",
       "timestamp": "2026-07-27T06:50:00Z"
+    },
+    {
+      "category": "test",
+      "content": "Stable test/fulltest.sh now includes three opt-in deep hardware diagnostics: pcie-errors compares PCIe replay counters around CUDA P2P traffic and scans available fatal/uncorrectable PCIe logs; memory-health classifies ECC, retired-page, row-remapper, and repair-state data; fabric-health checks DCGM NVLink/NVSwitch state and generation-specific error-counter deltas. Unsupported capabilities are NOT BEING RUN, counters are never cleared, and none of these tests are in DEFAULT_TESTS.",
+      "timestamp": "2026-07-29T17:05:00Z"
     }
   ],
   "directives": [

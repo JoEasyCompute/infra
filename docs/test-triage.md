@@ -12,6 +12,9 @@ The short version:
 - **`stress`** = sustained power / thermals / boost stability
 - **`pytorch`** = framework/runtime / Python / PyTorch / NCCL stack
 - **`nccl`** = GPU-to-GPU communication / PCIe / NVLink / NCCL transport
+- **`pcie-errors`** = PCIe replay growth and fatal/uncorrectable bus errors
+- **`memory-health`** = persistent ECC, retired-page, and row-remapper state
+- **`fabric-health`** = NVLink/NVSwitch port state and error-counter growth
 - **`disktest`** = storage path, permissions, disk health, fio behavior
 - **`network-test`** = link, routing, MTU, bandwidth, remote reachability
 - **`cpu-test` / `cpu-ram-stress` / `ramtest`** = CPU, RAM, socket, thermal, memory-controller issues
@@ -135,6 +138,37 @@ Next checks:
 How to read it:
 
 - If single-GPU tests pass but `nccl` fails, suspect interconnect or NCCL stack rather than raw GPU compute
+
+---
+
+### If `pcie-errors` fails
+
+Suspect a marginal riser, slot, lane negotiation problem, motherboard path, or
+GPU PCIe interface. An existing nonzero replay counter is historical; this
+test fails only when the counter grows during its measured traffic interval or
+available kernel logs report a fatal/uncorrectable PCIe event.
+
+Re-run on one GPU, compare slots/risers, and run `pcie` plus `nvbandwidth` to
+separate link negotiation from data-path reliability.
+
+---
+
+### If `memory-health` fails
+
+Treat uncorrectable ECC, pending retirement/remapping, remap failure,
+unrepairable memory, or exhausted remap capacity as a hardware-service event.
+Historical corrected errors or completed retirement appear as remarks and
+should be trended rather than treated as an immediate failure.
+
+---
+
+### If `fabric-health` fails
+
+Suspect an NVLink, NVSwitch, Fabric Manager, GPU endpoint, or platform fabric
+problem. Compare the reported link/counter with `nccl`; isolate the affected
+GPU pair where possible. Disabled links are remarks because some platform
+topologies intentionally disable ports, while down supported links and
+counter growth fail.
 
 ---
 

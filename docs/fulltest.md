@@ -32,7 +32,7 @@ Supports: RTX 4090 / RTX 5090, A4000, A100, H100 on Ubuntu 22.04 / 24.04.
 
 | Dependency | Notes |
 |---|---|
-| `dcgmi` (DCGM) | `dcgm` test is skipped gracefully if not installed. Install from https://developer.nvidia.com/dcgm |
+| `dcgmi` (DCGM) | `dcgm` and opt-in `fabric-health` tests use DCGM. Missing DCGM is reported without failing the suite. Install from https://developer.nvidia.com/dcgm |
 
 ---
 
@@ -84,6 +84,7 @@ sudo chown -R "$USER":"$(id -gn)" ./test/build
 ./test/fulltest.sh memtest                         # VRAM integrity only
 ./test/fulltest.sh stress                          # stress test only (default 5 min)
 ./test/fulltest.sh node-stress                     # CPU + RAM + GPU stress (default 5 min)
+./test/fulltest.sh pcie-errors memory-health fabric-health  # opt-in deep hardware diagnostics
 ```
 
 ### Combine: specific tests on specific GPUs
@@ -91,6 +92,7 @@ sudo chown -R "$USER":"$(id -gn)" ./test/build
 ./test/fulltest.sh --gpu 3 memtest stress
 ./test/fulltest.sh --gpu 2,4,5 memtest stress
 ./test/fulltest.sh --gpu 0,1 preflight ecc pcie
+./test/fulltest.sh --gpu 0,1 pcie-errors memory-health fabric-health
 ./test/fulltest.sh node-stress --node-stress-minutes 15
 ```
 
@@ -197,7 +199,9 @@ When specified:
 
 ## Tests
 
-Tests run in this fixed order when none are specified. Each test is independently selectable by name.
+Default tests run in a fixed order when none are specified. `pcie-errors`,
+`memory-health`, `fabric-health`, and `gpu-policy` are opt-in and run only when
+named explicitly.
 
 ---
 
@@ -239,6 +243,33 @@ sudo reboot
 
 ---
 
+### `memory-health` — Persistent GPU Memory Health *(opt-in)*
+
+Inspects the persistent memory-health surfaces exposed by the installed
+driver and GPU:
+
+- volatile and aggregate correctable/uncorrectable ECC state
+- retired pages and pending page retirement
+- Ampere-and-newer row-remapper counts, pending repairs, repair failures, and
+  exhausted remap banks
+- newer SRAM/DRAM ECC and channel/TPC repair state when exposed
+
+Historical corrected errors and completed page retirement are retained as
+remarks because those counters can legitimately remain nonzero after the
+driver has isolated the affected memory. Uncorrectable ECC, pending repair,
+row-remapping failure, unrepairable memory, or exhausted remap capacity fails
+the test.
+
+Consumer GPUs that expose none of these fields are reported as
+`NOT BEING RUN`; they are not treated as clean data-centre GPUs.
+
+```bash
+./test/fulltest.sh memory-health
+./test/fulltest.sh --gpu 2 memory-health
+```
+
+---
+
 ### `pcie` — PCIe Link Check
 
 Verifies PCIe link width and generation per GPU. Always spins up a brief GPU load before sampling to force links to their negotiated speed.
@@ -255,6 +286,25 @@ Verifies PCIe link width and generation per GPU. Always spins up a brief GPU loa
 To force Gen3 at all times (disables power saving):
 ```bash
 sudo sh -c 'echo performance > /sys/module/pcie_aspm/parameters/policy'
+```
+
+---
+
+### `pcie-errors` — PCIe Error Delta *(opt-in)*
+
+Captures each scoped GPU's cumulative PCIe replay counter, runs the CUDA
+`p2pBandwidthLatencyTest`, and captures the counter again. Existing historical
+counts do not fail; any increase during the measured traffic interval does.
+
+The test also scans available kernel logs for fatal or uncorrectable PCIe/AER
+events. If the host boots with `pci=noaer`, or kernel logs are inaccessible,
+that limitation is recorded as a remark while replay-counter comparison still
+runs. If the installed driver does not expose `pcie.replay_counter`, the test
+is reported as `NOT BEING RUN`.
+
+```bash
+./test/fulltest.sh pcie-errors
+./test/fulltest.sh --gpu 0,3 pcie-errors
 ```
 
 ---
@@ -344,6 +394,33 @@ Runs:
 - `dcgmi dmon -e 203,252,150,155 -c 10` — 10 samples of GPU util, memory util, temperature, and power draw
 
 **Notes:** DCGM hardware and stress subtests are automatically skipped on GeForce GPUs — this is expected behaviour, not a test failure.
+
+---
+
+### `fabric-health` — NVLink / NVSwitch Health *(opt-in)*
+
+Uses DCGM to inspect supported NVLink and NVSwitch port states, then compares
+generation-appropriate fabric error counters before and after the CUDA P2P
+traffic workload.
+
+With `--gpu`, the traffic workload and per-GPU error counters are scoped to
+the selected GPUs. DCGM's link-state inventory remains system-wide because
+the command reports the shared GPU/NVSwitch fabric as one topology.
+
+- supported ports reported `Down` fail
+- supported ports reported `Disabled` produce a remark because some platform
+  topologies disable ports intentionally
+- unchanged cumulative counters are historical and do not fail
+- newly increased CRC, replay, recovery, BER, discard, integrity, malformed,
+  or overrun counters fail
+
+Missing DCGM, no discovered NVLink/NVSwitch ports, or unavailable
+generation-specific error counters are reported under `NOT BEING RUN`.
+
+```bash
+./test/fulltest.sh fabric-health
+./test/fulltest.sh --gpu 0,1 fabric-health
+```
 
 ---
 

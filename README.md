@@ -410,6 +410,14 @@ This is the main NVIDIA validation suite. It covers:
 - VRAM memtest
 - sustained compute stress
 - 12V-2x6 / 12VHPWR connector early-warning detection during sustained stress
+- opt-in PCIe replay-delta, persistent memory-health, and NVLink/NVSwitch
+  fabric-health diagnostics
+
+The deeper counter-based checks remain opt-in:
+
+```bash
+./test/fulltest.sh pcie-errors memory-health fabric-health
+```
 
 For the stable `test/fulltest.sh` path, PyTorch checks prefer the
 `base-install.sh` managed Python 3.11 runtime and rebuild stale
