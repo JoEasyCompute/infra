@@ -163,6 +163,20 @@ Current behavior:
 
 This keeps the normal workflow (`base-install.sh` first, then `fulltest.sh`) aligned while preserving a standalone `fulltest.sh` path for hosts that already have a usable Python runtime.
 
+### 13. Deep persistent GPU health diagnostics are opt-in
+
+Current behavior:
+
+- `pcie-errors` compares PCIe replay counters around a CUDA P2P traffic interval and scans available kernel logs for fatal/uncorrectable PCIe events
+- `memory-health` inspects ECC, retired-page, row-remapper, and newer repair-state fields without clearing counters
+- `fabric-health` uses DCGM to compare NVLink/NVSwitch state and generation-specific error counters around P2P traffic
+- cumulative historical counts do not fail by themselves; new counter growth and hard pending/failure states do
+- unsupported hardware, missing DCGM, and unavailable counters are reported as `NOT BEING RUN`
+- all three tests are selectable but excluded from `DEFAULT_TESTS`
+
+This keeps routine provisioning runtime unchanged while giving operators
+targeted diagnostics for suspected PCIe, persistent memory, or fabric faults.
+
 ---
 
 ## Operator Notes

@@ -5,7 +5,8 @@
 # Usage:  ./fulltest.sh [test...] [-test...] [--burn-duration <s>] [--node-stress-minutes <m>] [--clean] [--list] [--help]
 #   Tests: preflight, ecc, pcie, clocks, nccl, cuda-samples, nvbandwidth,
 #          dcgm, pytorch, code, memtest, stress, node-stress,
-#          post-stress-recovery, gpu-policy
+#          post-stress-recovery, gpu-policy, pcie-errors, memory-health,
+#          fabric-health
 #   If no tests specified, all are run in the order above.
 # =============================================================================
 
@@ -91,6 +92,9 @@ PYTORCH_VENV="$BUILD_DIR/pytorch-venv"
 TORCHRUN_BIN=""
 STRESS_ACTIVITY_START_TS=""
 CUDA_CODE_SECONDS="${CUDA_CODE_SECONDS:-15}"
+MEMORY_HEALTH_APPLICABLE=false
+NVLINK_STATUS_APPLICABLE=false
+CUDA_SAMPLE_BIN=""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Utilities
@@ -387,6 +391,108 @@ find_cuda_sample_source() {
     return 1
 }
 
+prepare_cuda_sample_binary() {
+    local sample_name="$1"
+    local source_dir
+
+    CUDA_SAMPLE_BIN=""
+    ensure_repo_clone_allowed "$BUILD_DIR/cuda-samples" "cuda-samples" || return 1
+    [ -d "$BUILD_DIR/cuda-samples" ] || \
+        git clone https://github.com/NVIDIA/cuda-samples.git "$BUILD_DIR/cuda-samples" || return 1
+
+    source_dir=$(find_cuda_sample_source "$sample_name")
+    [ -n "$source_dir" ] || return 1
+
+    CUDA_SAMPLE_BIN=$(find_binary "$BUILD_DIR/cuda-samples" "$sample_name")
+    if [ -z "$CUDA_SAMPLE_BIN" ]; then
+        cmake_build "$source_dir" "$sample_name" || return 1
+        CUDA_SAMPLE_BIN=$(find_binary "$BUILD_DIR/cuda-samples" "$sample_name")
+    fi
+
+    [ -n "$CUDA_SAMPLE_BIN" ] && [ -x "$CUDA_SAMPLE_BIN" ]
+}
+
+scoped_gpu_inventory() {
+    nvidia-smi $SMI_FILTER --query-gpu=index,name --format=csv,noheader 2>/dev/null \
+        | tr -d '\r'
+}
+
+capture_pcie_replay_snapshot() {
+    local output_file="$1"
+    local replay_lines
+    local found=false
+
+    : > "$output_file"
+    replay_lines=$(nvidia-smi $SMI_FILTER \
+        --query-gpu=index,pcie.replay_counter \
+        --format=csv,noheader,nounits 2>/dev/null) || return 2
+
+    local gpu_idx replay_counter
+    while IFS=, read -r gpu_idx replay_counter; do
+        gpu_idx=$(echo "$gpu_idx" | xargs)
+        replay_counter=$(echo "$replay_counter" | xargs)
+        if [[ "$gpu_idx" =~ ^[0-9]+$ ]] && [[ "$replay_counter" =~ ^[0-9]+$ ]]; then
+            echo "gpu=$gpu_idx|pcie.replay_counter=$replay_counter" >> "$output_file"
+            found=true
+        fi
+    done <<< "$replay_lines"
+
+    $found || return 2
+}
+
+scan_pcie_kernel_errors() {
+    local since_ts="$1"
+    local kernel_log=""
+
+    if grep -Fqw 'pci=noaer' /proc/cmdline 2>/dev/null; then
+        record_remark "PCIe Error Delta: kernel AER reporting is disabled by pci=noaer; replay-counter delta remains authoritative for this run."
+        log "  NOTE: pci=noaer is active; kernel AER events may not be available."
+    fi
+
+    if ! command -v journalctl >/dev/null 2>&1; then
+        record_remark "PCIe Error Delta: bounded kernel log scan unavailable (journalctl missing)."
+        log "  NOTE: Bounded kernel log scan unavailable (journalctl missing)."
+        return 0
+    fi
+    if ! kernel_log=$(journalctl -k --since "@$since_ts" 2>/dev/null); then
+        record_remark "PCIe Error Delta: bounded kernel log scan unavailable (journal access failed)."
+        log "  NOTE: Bounded kernel log scan unavailable (journal access failed)."
+        return 0
+    fi
+
+    local fatal_lines
+    fatal_lines=$(echo "$kernel_log" \
+        | grep -Ei 'PCIe Bus Error.*severity=(Uncorrected|Fatal)|AER:.*(Uncorrected|Fatal)|DPC:.*containment|uncorrectable.*PCIe|fatal.*PCIe' \
+        | tail -40 || true)
+    if [ -n "$fatal_lines" ]; then
+        log "  ERROR: Kernel log contains fatal/uncorrectable PCIe events:"
+        log "$fatal_lines"
+        return 1
+    fi
+
+    log "  No fatal or uncorrectable PCIe events found in available kernel logs."
+}
+
+capture_nvlink_error_snapshot() {
+    local output_file="$1"
+    local tmp_dir="$2"
+    local found=false
+    local gpu_idx gpu_name report_file
+
+    : > "$output_file"
+    while IFS=, read -r gpu_idx gpu_name; do
+        gpu_idx=$(echo "$gpu_idx" | xargs)
+        [ -n "$gpu_idx" ] || continue
+        report_file="$tmp_dir/nvlink-errors-gpu-${gpu_idx}.txt"
+        if dcgmi nvlink -e -g "$gpu_idx" > "$report_file" 2>/dev/null; then
+            extract_nvlink_error_metrics "$gpu_idx" "$report_file" >> "$output_file"
+        fi
+    done < <(scoped_gpu_inventory)
+
+    [ -s "$output_file" ] && found=true
+    $found
+}
+
 # decode_throttle <hex_bitmask>
 # Translates nvidia-smi clocks_throttle_reasons.active hex bitmask into
 # human-readable labels, returning only the bits that represent real problems.
@@ -422,6 +528,278 @@ decode_throttle() {
         echo "${problems[*]}"
         return 1
     fi
+}
+
+compare_metric_snapshots() {
+    local before_file="$1"
+    local after_file="$2"
+
+    awk '
+function split_metric(line, values,    pos) {
+    pos = match(line, /=[^=]*$/)
+    if (!pos) {
+        return 0
+    }
+    values["key"] = substr(line, 1, pos - 1)
+    values["value"] = substr(line, pos + 1)
+    return values["value"] ~ /^[-+]?[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$/
+}
+NR == FNR {
+    delete metric
+    if (split_metric($0, metric)) {
+        before[metric["key"]] = metric["value"]
+    }
+    next
+}
+{
+    delete metric
+    if (!split_metric($0, metric) || !(metric["key"] in before)) {
+        next
+    }
+    if ((metric["value"] + 0) > (before[metric["key"]] + 0)) {
+        printf "%s: %s -> %s\n", metric["key"], before[metric["key"]], metric["value"]
+        increased = 1
+    }
+}
+END {
+    exit increased ? 1 : 0
+}
+' "$before_file" "$after_file"
+}
+
+extract_memory_health_metrics() {
+    local report_file="$1"
+
+    awk '
+function trim(value) {
+    sub(/^[[:space:]]+/, "", value)
+    sub(/[[:space:]]+$/, "", value)
+    return value
+}
+function emit(key, line,    pos, value) {
+    pos = index(line, ":")
+    if (!pos) {
+        return
+    }
+    value = trim(substr(line, pos + 1))
+    sub(/[[:space:]].*$/, "", value)
+    print key "=" value
+}
+{
+    line = $0
+    text = trim(line)
+
+    if (text == "ECC Errors") {
+        section = "ecc"
+        scope = ""
+        bit = ""
+        next
+    }
+    if (text == "Retired Pages") {
+        section = "retired"
+        next
+    }
+    if (text == "Remapped Rows" || text == "Row Remapper") {
+        section = "remapped"
+        histogram = 0
+        next
+    }
+
+    if (section == "ecc") {
+        if (text == "Volatile") {
+            scope = "volatile"
+            next
+        }
+        if (text == "Aggregate") {
+            scope = "aggregate"
+            next
+        }
+        if (text == "Single Bit") {
+            bit = "corrected"
+            next
+        }
+        if (text == "Double Bit") {
+            bit = "uncorrected"
+            next
+        }
+        if (text ~ /^(SRAM|DRAM)[[:space:]]+(Correctable|Uncorrectable)/) {
+            label = text
+            sub(/[[:space:]]*:.*/, "", label)
+            label = tolower(label)
+            gsub(/[^a-z0-9]+/, "_", label)
+            emit("ecc_" (scope == "" ? "current" : scope) "_" label, line)
+            next
+        }
+        if (text ~ /^(Channel Repair Pending|TPC Repair Pending)[[:space:]]*:/) {
+            label = tolower(text)
+            sub(/[[:space:]]*:.*/, "", label)
+            gsub(/[^a-z0-9]+/, "_", label)
+            emit(label, line)
+            next
+        }
+        if (text ~ /^Unrepairable Memory[[:space:]]*:/) {
+            emit("unrepairable_memory", line)
+            next
+        }
+        if (text ~ /^Total[[:space:]]*:/ && scope != "" && bit != "") {
+            emit("ecc_" scope "_" bit, line)
+        }
+        next
+    }
+
+    if (section == "retired") {
+        if (text ~ /^Single Bit ECC[[:space:]]*:/) {
+            emit("retired_corrected", line)
+        } else if (text ~ /^Double Bit ECC[[:space:]]*:/) {
+            emit("retired_uncorrected", line)
+        } else if (text ~ /^(Pending|Pending Page Blacklist)[[:space:]]*:/) {
+            emit("retired_pending", line)
+        }
+        next
+    }
+
+    if (section == "remapped") {
+        if (text == "Bank Remap Availability Histogram") {
+            histogram = 1
+            next
+        }
+        if (histogram && text ~ /^None[[:space:]]*:/) {
+            emit("remap_none_banks", line)
+        } else if (text ~ /^Correctable Error[[:space:]]*:/) {
+            emit("remap_corrected", line)
+        } else if (text ~ /^Uncorrectable Error[[:space:]]*:/) {
+            emit("remap_uncorrected", line)
+        } else if (text ~ /^Pending[[:space:]]*:/) {
+            emit("remap_pending", line)
+        } else if (text ~ /^Remapping Failure Occurred[[:space:]]*:/) {
+            emit("remap_failure", line)
+        }
+    }
+}
+' "$report_file"
+}
+
+assess_memory_health_report() {
+    local gpu_idx="$1"
+    local gpu_name="$2"
+    local report_file="$3"
+    local rc=0
+    local report_applicable=false
+    local key value
+    local -a historical=()
+
+    while IFS='=' read -r key value; do
+        [ -n "$key" ] || continue
+        case "$value" in
+            N/A|"[N/A]"|"") continue ;;
+        esac
+        MEMORY_HEALTH_APPLICABLE=true
+        report_applicable=true
+
+        case "$key" in
+            ecc_volatile_uncorrected|ecc_aggregate_uncorrected|ecc_*_uncorrectable*)
+                if [ "$value" -gt 0 ] 2>/dev/null; then
+                    log "  ERROR: GPU $gpu_idx ($gpu_name): $key=$value"
+                    rc=1
+                fi
+                ;;
+            retired_pending|remap_pending|remap_failure|channel_repair_pending|tpc_repair_pending|unrepairable_memory)
+                if [ "$value" = "Yes" ]; then
+                    log "  ERROR: GPU $gpu_idx ($gpu_name): $key=$value"
+                    rc=1
+                fi
+                ;;
+            remap_uncorrected|remap_none_banks)
+                if [ "$value" -gt 0 ] 2>/dev/null; then
+                    log "  ERROR: GPU $gpu_idx ($gpu_name): $key=$value"
+                    rc=1
+                fi
+                ;;
+            ecc_volatile_corrected|ecc_aggregate_corrected|ecc_*_correctable|retired_corrected|retired_uncorrected|remap_corrected)
+                if [ "$value" -gt 0 ] 2>/dev/null; then
+                    historical+=("$key=$value")
+                fi
+                ;;
+        esac
+    done < <(extract_memory_health_metrics "$report_file")
+
+    if [ "${#historical[@]}" -gt 0 ]; then
+        local historical_text="${historical[*]}"
+        log "  WARN: GPU $gpu_idx ($gpu_name): historical memory events: $historical_text"
+        record_remark "Memory Health: GPU $gpu_idx ($gpu_name) historical events — $historical_text"
+    elif [ "$report_applicable" = true ] && [ "$rc" -eq 0 ]; then
+        log "  GPU $gpu_idx ($gpu_name): memory health counters clean"
+    fi
+
+    return "$rc"
+}
+
+assess_nvlink_status() {
+    local status_file="$1"
+    local states
+    local rc=0
+
+    NVLINK_STATUS_APPLICABLE=false
+    states=$(sed -n 's/.*:[[:space:]]*\([UDX_][UDX_]*\).*/\1/p' "$status_file")
+    [ -n "$states" ] || return 0
+
+    if echo "$states" | grep -q '[UDX]'; then
+        NVLINK_STATUS_APPLICABLE=true
+    fi
+    if echo "$states" | grep -q 'D'; then
+        log "  ERROR: One or more supported NVLink/NVSwitch ports are down."
+        rc=1
+    fi
+    if echo "$states" | grep -q 'X'; then
+        log "  WARN: One or more supported NVLink/NVSwitch ports are disabled; verify platform topology."
+        record_remark "Fabric Health: one or more supported NVLink/NVSwitch ports are disabled."
+    fi
+
+    return "$rc"
+}
+
+extract_nvlink_error_metrics() {
+    local gpu_idx="$1"
+    local report_file="$2"
+
+    awk -v gpu="$gpu_idx" '
+function trim(value) {
+    sub(/^[[:space:]]+/, "", value)
+    sub(/[[:space:]]+$/, "", value)
+    return value
+}
+{
+    line = $0
+    text = trim(line)
+    if (text ~ /^Link[[:space:]]+[0-9]+/) {
+        split(text, parts, /[[:space:]]+/)
+        link = parts[2]
+        gsub(/[^0-9]/, "", link)
+        next
+    }
+
+    pos = index(line, ":")
+    if (!pos) {
+        next
+    }
+    label = trim(substr(line, 1, pos - 1))
+    value = trim(substr(line, pos + 1))
+    split(value, value_parts, /[[:space:]]+/)
+    value = value_parts[1]
+    lower = tolower(label)
+    if (lower !~ /(error|ber|discard|integrity|overrun|malformed)/) {
+        next
+    }
+    if (value !~ /^[-+]?[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$/) {
+        next
+    }
+
+    key = label
+    gsub(/[^A-Za-z0-9]+/, "_", key)
+    gsub(/^_+|_+$/, "", key)
+    printf "gpu=%s|link=%s|%s=%s\n", gpu, (link == "" ? "gpu" : link), key, value
+}
+' "$report_file"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -852,6 +1230,211 @@ PYEOF
     fi
 
     return $rc
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Optional test: PCIe replay-counter delta + kernel AER scan
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_pcie_errors() {
+    local tmp_dir
+    tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/fulltest-pcie-errors.XXXXXX") || return 1
+    cleanup_pcie_errors() {
+        rm -rf "$tmp_dir"
+    }
+    trap cleanup_pcie_errors RETURN
+
+    local before_file="$tmp_dir/before.metrics"
+    local after_file="$tmp_dir/after.metrics"
+    local start_ts
+    local capture_rc=0
+    local rc=0
+
+    start_ts=$(date +%s)
+    capture_pcie_replay_snapshot "$before_file" || capture_rc=$?
+    if [ "$capture_rc" -eq 2 ]; then
+        record_not_run "PCIe Error Delta" \
+            "pcie.replay_counter is unavailable on the installed driver/GPU"
+        return 0
+    fi
+    if [ "$capture_rc" -ne 0 ]; then
+        log "ERROR: Failed to capture baseline PCIe replay counters."
+        return "$capture_rc"
+    fi
+
+    log "  Baseline PCIe replay counters:"
+    sed 's/^/    /' "$before_file" | tee -a "$LOG_FILE"
+
+    if ! prepare_cuda_sample_binary "p2pBandwidthLatencyTest"; then
+        record_not_run "PCIe Error Delta" \
+            "CUDA p2pBandwidthLatencyTest could not be prepared"
+        return 0
+    fi
+    log "  Running CUDA p2pBandwidthLatencyTest to exercise PCIe traffic..."
+    if ! "$CUDA_SAMPLE_BIN" 2>&1 | tee -a "$LOG_FILE"; then
+        log "ERROR: CUDA p2pBandwidthLatencyTest failed during PCIe error-delta test."
+        return 1
+    fi
+
+    capture_rc=0
+    capture_pcie_replay_snapshot "$after_file" || capture_rc=$?
+    if [ "$capture_rc" -ne 0 ]; then
+        log "ERROR: Failed to capture post-traffic PCIe replay counters."
+        return 1
+    fi
+
+    log "  Post-traffic PCIe replay counters:"
+    sed 's/^/    /' "$after_file" | tee -a "$LOG_FILE"
+
+    local delta_output delta_rc=0
+    delta_output=$(compare_metric_snapshots "$before_file" "$after_file") || delta_rc=$?
+    if [ "$delta_rc" -ne 0 ]; then
+        log "  ERROR: PCIe replay counters increased during the traffic interval:"
+        log "$delta_output"
+        rc=1
+    else
+        log "  PCIe replay counters did not increase."
+    fi
+
+    scan_pcie_kernel_errors "$start_ts" || rc=1
+    return "$rc"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Optional test: ECC, retired-page, and row-remapper health
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_memory_health() {
+    local tmp_dir
+    tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/fulltest-memory-health.XXXXXX") || return 1
+    cleanup_memory_health() {
+        rm -rf "$tmp_dir"
+    }
+    trap cleanup_memory_health RETURN
+
+    local rc=0
+    local gpu_idx gpu_name report_file
+    local inventory_found=false
+
+    MEMORY_HEALTH_APPLICABLE=false
+    while IFS=, read -r gpu_idx gpu_name; do
+        gpu_idx=$(echo "$gpu_idx" | xargs)
+        gpu_name=$(echo "$gpu_name" | xargs)
+        [ -n "$gpu_idx" ] || continue
+        inventory_found=true
+
+        report_file="$tmp_dir/gpu-${gpu_idx}.txt"
+        if ! nvidia-smi -i "$gpu_idx" -q \
+            -d ECC,PAGE_RETIREMENT,ROW_REMAPPER > "$report_file" 2>/dev/null; then
+            record_not_run "Memory Health / GPU $gpu_idx" \
+                "ECC, page-retirement, and row-remapper query unavailable"
+            continue
+        fi
+
+        if ! extract_memory_health_metrics "$report_file" \
+            | grep -Eq '=([0-9]+|Yes|No)$'; then
+            record_not_run "Memory Health / GPU $gpu_idx" \
+                "GPU does not expose ECC, retired-page, or row-remapper health fields"
+            continue
+        fi
+
+        assess_memory_health_report "$gpu_idx" "$gpu_name" "$report_file" || rc=1
+    done < <(scoped_gpu_inventory)
+
+    if [ "$inventory_found" = false ]; then
+        log "ERROR: Could not enumerate scoped GPUs for memory-health checks."
+        return 1
+    fi
+    if [ "$MEMORY_HEALTH_APPLICABLE" = false ]; then
+        record_not_run "Memory Health" \
+            "no scoped GPU exposes ECC, retired-page, or row-remapper health fields"
+    fi
+
+    return "$rc"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Optional test: NVLink/NVSwitch link state + error-counter delta
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_fabric_health() {
+    if ! command -v dcgmi >/dev/null 2>&1; then
+        record_not_run "Fabric Health" "dcgmi is not installed"
+        return 0
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/fulltest-fabric-health.XXXXXX") || return 1
+    cleanup_fabric_health() {
+        rm -rf "$tmp_dir"
+    }
+    trap cleanup_fabric_health RETURN
+
+    local status_before="$tmp_dir/status-before.txt"
+    local status_after="$tmp_dir/status-after.txt"
+    local errors_before="$tmp_dir/errors-before.metrics"
+    local errors_after="$tmp_dir/errors-after.metrics"
+    local rc=0
+
+    if ! dcgmi nvlink -s > "$status_before" 2>&1; then
+        log "ERROR: dcgmi could not query NVLink/NVSwitch link status."
+        cat "$status_before" | tee -a "$LOG_FILE"
+        return 1
+    fi
+    cat "$status_before" | tee -a "$LOG_FILE"
+    assess_nvlink_status "$status_before" || rc=1
+    if [ "$NVLINK_STATUS_APPLICABLE" = false ]; then
+        record_not_run "Fabric Health" \
+            "no supported NVLink or NVSwitch ports were discovered"
+        return 0
+    fi
+
+    local have_error_metrics=false
+    if capture_nvlink_error_snapshot "$errors_before" "$tmp_dir"; then
+        have_error_metrics=true
+        log "  Baseline NVLink/NVSwitch error counters captured."
+    else
+        record_not_run "Fabric Health / error-delta" \
+            "generation-specific DCGM error counters unavailable"
+    fi
+
+    if ! prepare_cuda_sample_binary "p2pBandwidthLatencyTest"; then
+        record_not_run "Fabric Health / error-delta" \
+            "CUDA p2pBandwidthLatencyTest could not be prepared"
+        return "$rc"
+    fi
+
+    log "  Running CUDA p2pBandwidthLatencyTest to exercise the GPU fabric..."
+    if ! "$CUDA_SAMPLE_BIN" 2>&1 | tee -a "$LOG_FILE"; then
+        log "ERROR: CUDA p2pBandwidthLatencyTest failed during fabric-health test."
+        rc=1
+    fi
+
+    if ! dcgmi nvlink -s > "$status_after" 2>&1; then
+        log "ERROR: dcgmi could not query post-traffic NVLink/NVSwitch status."
+        return 1
+    fi
+    cat "$status_after" | tee -a "$LOG_FILE"
+    assess_nvlink_status "$status_after" || rc=1
+
+    if $have_error_metrics; then
+        if ! capture_nvlink_error_snapshot "$errors_after" "$tmp_dir"; then
+            log "ERROR: Failed to capture post-traffic fabric error counters."
+            return 1
+        fi
+
+        local delta_output delta_rc=0
+        delta_output=$(compare_metric_snapshots "$errors_before" "$errors_after") || delta_rc=$?
+        if [ "$delta_rc" -ne 0 ]; then
+            log "  ERROR: Fabric error counters increased during the traffic interval:"
+            log "$delta_output"
+            rc=1
+        else
+            log "  Fabric error counters did not increase."
+        fi
+    fi
+
+    return "$rc"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2490,6 +3073,9 @@ Available tests (run in this order if none specified):
   node-stress   Node-wide stress: stress-ng CPU + RAM plus GPU burn
   post-stress-recovery  GPU recheck after stress: recovery, logs, throttle clear
   gpu-policy    Optional policy check: persistence / power limit / idle temp
+  pcie-errors   Opt-in PCIe replay-counter delta and kernel AER check
+  memory-health Opt-in ECC, retired-page, and row-remapper health check
+  fabric-health Opt-in NVLink/NVSwitch state and error-counter delta check
 
 Options:
   --gpu <index[,index...]>   Target specific GPU(s) by index — single (3) or comma-separated (2,4,5)
@@ -2517,12 +3103,13 @@ Examples:
   ./fulltest.sh stress --burn-duration 3600  # 1 hour stress test
   ./fulltest.sh post-stress-recovery          # recovery check after stress
   GPU_POLICY_REQUIRE_PERSISTENCE=1 ./fulltest.sh gpu-policy
+  ./fulltest.sh pcie-errors memory-health fabric-health
   ./fulltest.sh --clean                      # wipe build/ and exit
   ./fulltest.sh --clean nccl                 # clean then run nccl
 EOF
 }
 
-ALL_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch code memtest stress node-stress post-stress-recovery gpu-policy)
+ALL_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch code memtest stress node-stress post-stress-recovery gpu-policy pcie-errors memory-health fabric-health)
 DEFAULT_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch code memtest stress node-stress post-stress-recovery)
 SELECTED_TESTS=()
 EXCLUDED_TESTS=()
@@ -2614,7 +3201,7 @@ while [ "$i" -lt "${#args[@]}" ]; do
             fi
             NODE_STRESS_MINUTES="$val"
             ;;
-        preflight|ecc|pcie|clocks|nccl|cuda-samples|nvbandwidth|dcgm|pytorch|code|memtest|stress|node-stress|post-stress-recovery|gpu-policy)
+        preflight|ecc|pcie|clocks|nccl|cuda-samples|nvbandwidth|dcgm|pytorch|code|memtest|stress|node-stress|post-stress-recovery|gpu-policy|pcie-errors|memory-health|fabric-health)
             SELECTED_TESTS+=("$arg") ;;
         -*)
             excluded="${arg#-}"
@@ -2680,7 +3267,6 @@ for test in "${SELECTED_TESTS[@]}"; do
         code)         run_test "CUDA Int32 Compute Stress (code.cu)"                   test_cuda_code   ;;
         memtest)      run_test "cuda_memtest (GPU Memory Stress)"                      test_memtest     ;;
         stress)
-            local stress_min
             stress_min=$(echo "scale=1; $BURN_DURATION / 60" | bc)
             run_test "$RESULTS_STRESS_LABEL (${stress_min} min)"                       test_stress
             ;;
@@ -2692,6 +3278,15 @@ for test in "${SELECTED_TESTS[@]}"; do
             ;;
         gpu-policy)
             run_test "GPU Policy"                                                        test_gpu_policy
+            ;;
+        pcie-errors)
+            run_test "PCIe Error Delta"                                                  test_pcie_errors
+            ;;
+        memory-health)
+            run_test "GPU Memory Health"                                                 test_memory_health
+            ;;
+        fabric-health)
+            run_test "NVLink / NVSwitch Fabric Health"                                  test_fabric_health
             ;;
     esac
 done
