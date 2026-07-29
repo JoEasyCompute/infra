@@ -108,6 +108,70 @@ PYEOF
         || fail "standalone Python 3.12 fallback was not selected"
 }
 
+test_runtime_does_not_require_optional_pytorch_packages() {
+    local tmp_dir="$1"
+    load_fulltest_defs "$tmp_dir"
+
+    local fake_python="$tmp_dir/python3.11"
+    local pip_calls="$tmp_dir/pip-calls"
+    PYTORCH_VENV="$tmp_dir/pytorch-venv"
+    PYTORCH_RUNTIME_READY=false
+    PYTORCH_RUNTIME_WARNED=true
+    PYTORCH_PYTHON=""
+    TORCHRUN_BIN=""
+    TORCH_CUDA="cu132"
+    PIP_EXTRA=""
+    INFRA_PYTHON_BENCH="$fake_python"
+    export PIP_CALLS_FILE="$pip_calls"
+
+    cat > "$fake_python" <<'PYEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "-m" ] && [ "${2:-}" = "venv" ]; then
+    venv_dir="$3"
+    mkdir -p "$venv_dir/bin"
+    cat > "$venv_dir/bin/python" <<'VENVEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "-c" ]; then
+    exit 0
+fi
+if [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ]; then
+    printf '%s\n' "$*" >> "${PIP_CALLS_FILE:?}"
+    for arg in "$@"; do
+        if [ "$arg" = "torchaudio" ]; then
+            echo "No matching distribution found for torchaudio" >&2
+            exit 1
+        fi
+        if [ "$arg" = "torch" ]; then
+            touch "$(dirname "$0")/torchrun"
+            chmod +x "$(dirname "$0")/torchrun"
+        fi
+    done
+    exit 0
+fi
+exit 1
+VENVEOF
+    chmod +x "$venv_dir/bin/python"
+    exit 0
+fi
+if [ "${1:-}" = "-c" ]; then
+    exit 0
+fi
+exit 1
+PYEOF
+    chmod +x "$fake_python"
+
+    prepare_pytorch_runtime \
+        || fail "optional PyTorch packages prevented shared runtime preparation"
+
+    grep -Eq '(^|[[:space:]])torch($|[[:space:]])' "$pip_calls" \
+        || fail "shared runtime did not install torch"
+    if grep -Eq '(^|[[:space:]])(torchvision|torchaudio|accelerate)($|[[:space:]])' "$pip_calls"; then
+        fail "shared runtime requested optional PyTorch packages"
+    fi
+}
+
 main() {
     local tmp_dir
     tmp_dir="$(mktemp -d /tmp/fulltest-python-runtime.XXXXXX)"
@@ -116,6 +180,8 @@ main() {
     ( test_rebuilds_stale_pytorch_venv "$tmp_dir/stale-venv" )
     rm -rf "$tmp_dir"/*
     ( test_standalone_allows_system_python312 "$tmp_dir/system-python" )
+    rm -rf "$tmp_dir"/*
+    ( test_runtime_does_not_require_optional_pytorch_packages "$tmp_dir/minimal-packages" )
     echo "fulltest Python runtime tests passed"
 }
 

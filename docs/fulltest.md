@@ -25,7 +25,7 @@ Supports: RTX 4090 / RTX 5090, A4000, A100, H100 on Ubuntu 22.04 / 24.04.
 | `cmake` | nvbandwidth, cuda_memtest, cuda-samples |
 | `libboost-program-options-dev` | nvbandwidth |
 | `libnccl2` / `libnccl-dev` | NCCL test — version-pinned to match active CUDA toolkit |
-| PyTorch + accelerate | pytorch test, clock test, pcie test |
+| PyTorch | pytorch test, clock test, pcie test, PyTorch stress fallback |
 | Rust toolchain (via rustup) | gpu-fryer (primary stress tool) |
 
 ### Optional
@@ -433,6 +433,8 @@ Runs 100 forward passes of a 10,000×10,000 linear layer across all GPUs in scop
 **Fails if:** PyTorch install fails, `torchrun` not found, NCCL process group init fails, or any forward pass errors.
 
 **Runtime contract:** The lane prefers the benchmark Python 3.11 runtime provisioned by `base-install.sh` (via `uv` or the installed `/opt/infra/python` tree). If `base-install.sh` has not run, `fulltest.sh` falls back to a supported system Python 3.10-3.12 and creates its own isolated `build/pytorch-venv`. Existing PyTorch venvs are rebuilt when their base interpreter does not match the selected runtime, so reruns do not keep stale Python or wheel families alive.
+
+The shared runtime installs only `torch`, then verifies that the venv can import it, access at least one CUDA GPU, and provide its own `torchrun`. `torchvision`, `torchaudio`, and `accelerate` are not required by these tests and cannot block PCIe, clock, stress, or DDP validation when their CUDA-specific wheels are unavailable.
 
 **Failure diagnostics:** On failure, the script now keeps the generated DDP repro script in `/tmp`, emits a condensed summary of the failing `local_rank` / child exit code, and prints a direct `torchrun` repro command plus a suggested debug rerun with `NCCL_DEBUG=INFO` and `TORCH_DISTRIBUTED_DEBUG=DETAIL`.
 

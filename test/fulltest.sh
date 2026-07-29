@@ -1831,10 +1831,8 @@ test_dcgm() {
 install_pytorch() {
     [ -n "${PYTORCH_PYTHON:-}" ] || return 1
     ensure_pytorch_venv "$PYTORCH_PYTHON" "$PYTORCH_VENV" || return 1
-    "${PYTORCH_VENV}/bin/python" -m pip install torch torchvision torchaudio \
+    "${PYTORCH_VENV}/bin/python" -m pip install torch \
         --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}" \
-        --upgrade --force-reinstall --no-cache-dir --quiet $PIP_EXTRA 2>&1 | tee -a "$LOG_FILE" || return 1
-    "${PYTORCH_VENV}/bin/python" -m pip install accelerate \
         --upgrade --force-reinstall --no-cache-dir --quiet $PIP_EXTRA 2>&1 | tee -a "$LOG_FILE" || return 1
 }
 
@@ -1859,6 +1857,13 @@ prepare_pytorch_runtime() {
     fi
 
     install_pytorch || return 1
+
+    if ! "${PYTORCH_VENV}/bin/python" -c \
+        'import torch; raise SystemExit(0 if torch.cuda.is_available() and torch.cuda.device_count() > 0 else 1)' \
+        2>&1 | tee -a "$LOG_FILE"; then
+        log "ERROR: PyTorch is installed but cannot access any CUDA GPU from the selected venv."
+        return 1
+    fi
 
     TORCHRUN_BIN=$(find_torchrun) || {
         log "ERROR: torchrun not found in PyTorch venv after installing PyTorch."

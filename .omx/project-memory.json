@@ -339,6 +339,11 @@
       "category": "test",
       "content": "Stable test/fulltest.sh now includes three opt-in deep hardware diagnostics: pcie-errors compares PCIe replay counters around CUDA P2P traffic and scans available fatal/uncorrectable PCIe logs; memory-health classifies ECC, retired-page, row-remapper, and repair-state data; fabric-health checks DCGM NVLink/NVSwitch state and generation-specific error-counter deltas. Unsupported capabilities are NOT BEING RUN, counters are never cleared, and none of these tests are in DEFAULT_TESTS.",
       "timestamp": "2026-07-29T17:05:00Z"
+    },
+    {
+      "category": "test",
+      "content": "Stable test/fulltest.sh installs only torch in its shared Python runtime. torchvision, torchaudio, and accelerate are unused optional packages and must not gate PCIe, clock, stress, or DDP tests. Runtime preparation verifies CUDA visibility and venv-owned torchrun; test/fulltest-python-runtime-test.sh covers unavailable optional packages.",
+      "timestamp": "2026-07-29T18:00:00Z"
     }
   ],
   "directives": [

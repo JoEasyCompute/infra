@@ -159,6 +159,8 @@ Current behavior:
 - if `base-install.sh` has not run, stable `fulltest.sh` can fall back to a supported system Python 3.10-3.12
 - all PyTorch-backed stable helpers use the same isolated `build/pytorch-venv`, including DDP, PCIe load, clock load, and PyTorch stress fallback
 - an existing PyTorch venv is rebuilt when its base interpreter does not match the selected runtime
+- the shared runtime installs only `torch`; unused optional packages such as `torchvision`, `torchaudio`, and `accelerate` must not gate hardware tests
+- runtime preparation verifies that Torch imports, sees a CUDA GPU, and provides `torchrun` from the managed venv
 - `torchrun` is resolved only from the managed venv, not from global user or system paths
 
 This keeps the normal workflow (`base-install.sh` first, then `fulltest.sh`) aligned while preserving a standalone `fulltest.sh` path for hosts that already have a usable Python runtime.
