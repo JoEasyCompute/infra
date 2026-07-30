@@ -179,6 +179,76 @@ Current behavior:
 This keeps routine provisioning runtime unchanged while giving operators
 targeted diagnostics for suspected PCIe, persistent memory, or fabric faults.
 
+### 14. vLLM model evaluation is a standalone post-provision lane
+
+Current behavior:
+
+- `test/vllm-benchmark-test.sh` runs only when an operator invokes it; it is not
+  part of `fulltest.sh` or the automatic provisioning stages
+- backend selection defaults to `auto`: a usable `nvidia-smi` GPU inventory
+  selects NVIDIA, while a usable `rocminfo` GPU inventory plus `/dev/kfd` and
+  `/dev/dri` selects AMD
+- mixed NVIDIA/AMD hosts must use an explicit backend; undetected hosts fail
+  before Docker checks or artifact creation, and metadata records the resolved
+  `nvidia` or `amd` backend rather than the requested `auto` value
+- explicit `--backend nvidia|amd --dry-run` remains hardware-free; default
+  auto dry-runs perform only read-only vendor detection
+- NVIDIA host prerequisites come from `base-install.sh` and
+  `docker-install.sh`; AMD host prerequisites come from `amd-base-install.sh`
+  and the Docker installer's AMD skip flags
+- the NVIDIA backend uses the pinned
+  `vllm/vllm-openai:v0.25.1-cu129` image; the CUDA 12.9 variant preserves
+  compatibility with the repository's supported NVIDIA 575 driver lane
+- the AMD backend targets R9700S-class `gfx120X` GPUs and uses the pinned
+  `rocm/vllm:rocm7.13.0_gfx120X-all_ubuntu24.04_py3.13_pytorch_2.10.0_vllm_0.19.1`
+  image so the container runtime matches the repository's ROCm 7.13 R9700S
+  host lane
+- the wrapper rejects the default AMD image on other GPU architectures;
+  operators must provide a pinned architecture-compatible `--vllm-image`
+- AMD containers receive `/dev/kfd` and `/dev/dri`, use
+  `ROCR_VISIBLE_DEVICES` for selection, and run vLLM in eager mode for the
+  RDNA 4 path
+- Harbor `0.20.0` runs through an isolated uv-managed Python 3.12 tool
+  environment, independently of the managed Python 3.11 runtime used by
+  `fulltest.sh`
+- the default `ornith-35b-practical` profile uses an immutable 35B Hugging
+  Face revision, `terminal-bench@2.0`, 16K context, and model-specific vLLM
+  parser settings
+- the explicit `ornith-397b-published` profile pins the current immutable
+  Ornith-1.0-397B revision, Harbor dataset snapshot
+  `terminal-bench/terminal-bench-2-1@6`, 128K context, JSON response parsing,
+  temperature/top-p 1.0, and 32 CPU / 49,152 MB task overrides
+- benchmark profiles are backend-independent and never select GPU indices or
+  tensor parallelism; explicit CLI settings override profile values regardless
+  of argument order and mark the run metadata as modified when effective
+  profile-controlled values differ
+- a bounded API readiness check and chat-completion smoke test gate the Harbor
+  evaluation
+- the wrapper binds only to localhost, never kills an arbitrary port owner, and
+  cleans up only its named container
+- run metadata, server output, smoke evidence, Harbor output, and task results
+  are stored under `test/logs/vllm-benchmark/`
+
+The default `terminal-bench@2.0` run is a model/agent task-success evaluation,
+not a vLLM throughput benchmark. Its 16K context results must not be compared
+directly with published 128K-context scores or runs with different images,
+revisions, agents, parsers, concurrency, or datasets.
+
+The 397B profile is named `published`, not `exact`. The public model card does
+not disclose the original Harbor patch, immutable dataset snapshot, or
+absolute four-hour task-timeout override. This repository pins Harbor `0.20.0`
+and the current immutable Terminal-Bench 2.1 registry snapshot instead of
+guessing undisclosed inputs. The wrapper defaults to one attempt per task;
+operators can forward `--n-attempts 5` to Harbor when they want the disclosed
+five-run shape.
+
+The default Ornith BF16 model does not fit on one 32 GB R9700S. The documented
+AMD default uses at least four cards; one-card runs require a smaller or
+quantized custom model with an immutable revision. The AMD `rocm/vllm` image
+is a compatibility exception for the ROCm 7.13 `gfx120X` lane and should move
+to a pinned upstream vLLM ROCm image once an equivalent ROCm 7.13-or-newer
+build is available and validated.
+
 ---
 
 ## Operator Notes

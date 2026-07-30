@@ -344,6 +344,31 @@
       "category": "test",
       "content": "Stable test/fulltest.sh installs only torch in its shared Python runtime. torchvision, torchaudio, and accelerate are unused optional packages and must not gate PCIe, clock, stress, or DDP tests. Runtime preparation verifies CUDA visibility and venv-owned torchrun; test/fulltest-python-runtime-test.sh covers unavailable optional packages.",
       "timestamp": "2026-07-29T18:00:00Z"
+    },
+    {
+      "category": "architecture",
+      "content": "test/vllm-benchmark-test.sh is an opt-in post-provision model/agent evaluation, separate from fulltest.sh and the provision orchestrators. The NVIDIA backend uses pinned vllm/vllm-openai:v0.25.1-cu129 for the supported NVIDIA 575 driver lane. The AMD backend targets R9700S-class gfx120X GPUs with pinned rocm/vllm:rocm7.13.0_gfx120X-all_ubuntu24.04_py3.13_pytorch_2.10.0_vllm_0.19.1, maps /dev/kfd and /dev/dri, selects GPUs with ROCR_VISIBLE_DEVICES, runs eager mode, and rejects that default image on other AMD architectures. Harbor 0.20.0 runs through isolated uv-managed Python 3.12, so neither backend alters the base-install managed Python 3.11 runtime. The default Ornith revision is immutable, the API is localhost-only, cleanup targets only the named backend-specific container, and artifacts live under test/logs/vllm-benchmark/.",
+      "timestamp": "2026-07-29T19:22:54Z"
+    },
+    {
+      "category": "test",
+      "content": "The vLLM benchmark default terminal-bench@2.0 run measures model/agent task success rather than vLLM throughput. Default max context is 16K, so its score is not directly comparable with published 128K-context results or runs using different model revisions, images, parsers, agents, concurrency, or datasets.",
+      "timestamp": "2026-07-29T18:50:00Z"
+    },
+    {
+      "category": "architecture",
+      "content": "test/vllm-benchmark-test.sh names its preserved 35B/16K default ornith-35b-practical and provides an explicit backend-independent ornith-397b-published profile. The published profile pins Ornith-1.0-397B revision 5e3e761811e804c295c1d3c0ce68b21da6154209, terminal-bench/terminal-bench-2-1@6, 128K context, Qwen3 vLLM parsers, Harbor JSON parsing, temperature/top-p 1.0, and 32 CPU / 49152 MB task overrides. GPU selection and tensor parallelism remain operator-controlled; explicit profile-setting overrides are order-independent and recorded as profile_modified.",
+      "timestamp": "2026-07-30T09:31:34Z"
+    },
+    {
+      "category": "test",
+      "content": "The ornith-397b-published profile reproduces only publicly available benchmark settings, not the reported score exactly. The original Harbor patch, immutable dataset snapshot, and absolute four-hour timeout override are undisclosed. The wrapper pins Harbor 0.20.0 and dataset snapshot @6, keeps dataset task-specific timeouts, defaults to one attempt per task, and allows operators to forward --n-attempts 5.",
+      "timestamp": "2026-07-30T09:31:34Z"
+    },
+    {
+      "category": "architecture",
+      "content": "test/vllm-benchmark-test.sh defaults to --backend auto. Auto selects NVIDIA only when nvidia-smi reports GPU indices, selects AMD only when rocminfo reports gfx agents and /dev/kfd plus /dev/dri exist, rejects mixed-vendor hosts, and fails clearly when neither backend is usable. Profiles remain backend-independent, and metadata records the resolved nvidia or amd backend. Explicit backend dry-runs remain hardware-free; default auto dry-runs perform read-only vendor detection.",
+      "timestamp": "2026-07-30T09:46:17Z"
     }
   ],
   "directives": [
