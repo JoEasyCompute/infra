@@ -58,6 +58,7 @@ Current platform status:
 │   ├── cpu-test.sh             # CPU socket or per-thread stress tester with crash-state checkpoints
 │   ├── cpu-ram-stress.sh       # CPU + RAM isolation stress using stress-ng
 │   ├── ramtest.sh              # System RAM burn-in using stressapptest
+│   ├── vllm-benchmark-test.sh  # vLLM + Harbor model/agent evaluation
 │   └── network-test.sh         # Network connectivity and throughput test
 ├── gpucheck/                   # Inventory / hardware inspection scripts
 ├── monitor/                    # Monitoring helpers, including IPMI watcher
@@ -212,6 +213,7 @@ Use this as the shortest path from intent to script:
 | Reset NVIDIA runtime clock locks | [install/gpu-setting-reset.sh](install/gpu-setting-reset.sh) | Clears graphics and memory clock locks set through `nvidia-smi`; see [docs/gpu-runtime-tuning.md](docs/gpu-runtime-tuning.md) |
 | Validate NVIDIA node | [test/fulltest.sh](test/fulltest.sh) | Stable production validation path |
 | Validate experimental NVIDIA flow | [test/gpu-fulltest-v2.sh](test/gpu-fulltest-v2.sh) | Prepare-then-run experimental lane for NVIDIA validation changes |
+| Evaluate a model through vLLM | [test/vllm-benchmark-test.sh](test/vllm-benchmark-test.sh) | Opt-in NVIDIA or AMD Harbor evaluation after the matching base install and Docker setup; not part of `fulltest.sh` |
 | Rebuild live root | [install/rebuild-gpu-livefs.sh](install/rebuild-gpu-livefs.sh) | Copies a mounted USB root filesystem and regenerates the `gpu-test` live tree |
 | Build bootable live ISO | [install/build-gpu-liveiso.sh](install/build-gpu-liveiso.sh) | Standalone helper that builds a bootable ISO directly from a mounted USB root filesystem |
 | Reboot a wedged host | [install/force-reboot.sh](install/force-reboot.sh) | In-band SysRq last resort from the host console |
@@ -262,17 +264,30 @@ sudo reboot
 
 ./test/fulltest.sh
 ./test/code.sh 15
+
+# Optional model/agent evaluation after Docker validation
+./test/vllm-benchmark-test.sh --smoke --gpus 0,1 --tp-size 2
 ```
 
 ### AMD Manual
 
 ```bash
-chmod +x install/amd-base-install.sh install/amd-stack-pin.sh
-sudo ./install/amd-base-install.sh
+chmod +x install/amd-base-install.sh install/amd-stack-pin.sh install/docker-install.sh
+sudo ./install/amd-base-install.sh --rocm 7.13
+sudo reboot
+sudo ./install/docker-install.sh --skip-nvidia-toolkit --skip-nouveau-blacklist
+sudo reboot
 
 # Inspect or reset the AMD ROCm apt pin
 sudo ./install/amd-stack-pin.sh --status
 sudo ./install/amd-stack-pin.sh --reset
+
+# Optional R9700S model/agent evaluation
+./test/vllm-benchmark-test.sh \
+    --backend amd \
+    --smoke \
+    --gpus 0,1,2,3 \
+    --tp-size 4
 ```
 
 ### AMD Orchestrated
@@ -301,6 +316,7 @@ Use `amd-stack-pin.sh --status` to inspect the active pin and `amd-stack-pin.sh 
 | `install/docker-install.sh` | Docker CE, NVIDIA Container Toolkit, and runtime storage layout | [docs/docker-install.md](docs/docker-install.md) |
 | `test/fulltest.sh` | NVIDIA GPU acceptance and health validation | [docs/fulltest.md](docs/fulltest.md) |
 | `test/gpu-fulltest-v2.sh` | Experimental prepare-then-run variant of the NVIDIA GPU validation flow | [docs/gpu-fulltest-v2.md](docs/gpu-fulltest-v2.md) |
+| `test/vllm-benchmark-test.sh` | Pinned vLLM server smoke test and Harbor model/agent evaluation | [docs/vllm-benchmark-test.md](docs/vllm-benchmark-test.md) |
 | `test/code.sh` | Tiny nvcc wrapper that compiles and runs `test/code.cu` across the selected GPU(s) | Covered here |
 | `docs/test-triage.md` | Generic failure decision path for isolating software vs hardware vs environment issues | [docs/test-triage.md](docs/test-triage.md) |
 | `install/amd-base-install.sh` | AMDGPU + ROCm base install | [docs/amd-base-install.md](docs/amd-base-install.md) |
@@ -434,6 +450,53 @@ Future improvements for that detector are tracked in `docs/project-decisions.md`
 
 It writes timestamped logs in the same directory where `fulltest.sh` is run.
 
+### `test/vllm-benchmark-test.sh`
+
+This is an optional NVIDIA or AMD model and agent evaluation after the
+matching base install and `docker-install.sh`. It runs vLLM in a pinned
+backend-specific Docker image, checks the local OpenAI-compatible API, and
+runs pinned Harbor through an isolated uv-managed Python 3.12 environment. It
+does not install vLLM into the host Python runtime. The default
+`--backend auto` selects NVIDIA when `nvidia-smi` reports GPUs or AMD when
+`rocminfo` plus `/dev/kfd` and `/dev/dri` report a usable ROCm path. Mixed
+hosts must select a backend explicitly.
+
+```bash
+# NVIDIA
+./test/vllm-benchmark-test.sh --backend nvidia --dry-run --gpus 0,1 --tp-size 2
+./test/vllm-benchmark-test.sh --smoke --gpus 0,1 --tp-size 2
+./test/vllm-benchmark-test.sh --gpus 0,1,2,3 --tp-size 4
+
+# Published-settings Ornith 397B profile; size the GPU topology explicitly
+./test/vllm-benchmark-test.sh \
+    --profile ornith-397b-published \
+    --gpus 0,1,2,3,4,5,6,7 \
+    --tp-size 8
+
+# AMD Radeon AI PRO R9700S / gfx1201
+./test/vllm-benchmark-test.sh --backend amd --dry-run --gpus 0,1,2,3 --tp-size 4
+./test/vllm-benchmark-test.sh --backend amd --smoke --gpus 0,1,2,3 --tp-size 4
+./test/vllm-benchmark-test.sh --backend amd --gpus 0,1,2,3 --tp-size 4
+```
+
+The default `ornith-35b-practical` profile runs `terminal-bench@2.0` at 16K
+context and measures agent task success, not vLLM token throughput. The
+optional `ornith-397b-published` profile pins the disclosed 397B model,
+Terminal-Bench 2.1 snapshot, 128K context, parser, sampling, and task-resource
+settings, but requires an exceptionally large multi-GPU memory pool. It does
+not automatically choose a backend, GPUs, or tensor parallelism.
+
+The public result does not disclose the exact Harbor patch, dataset snapshot,
+or absolute four-hour timeout override, so this profile must not be treated as
+a bit-for-bit reproduction of the reported score. Results are written under
+`test/logs/vllm-benchmark/`.
+
+Default dry-runs perform read-only backend detection. Use an explicit
+`--backend nvidia` or `--backend amd` when rendering commands on a non-GPU
+development machine.
+See [docs/vllm-benchmark-test.md](docs/vllm-benchmark-test.md) for pinned
+versions, artifacts, comparison constraints, and troubleshooting.
+
 ## Operational Utility Scripts
 
 ### Inventory / Hardware
@@ -505,6 +568,7 @@ Script reference guides now live under [docs/](docs):
 - [docs/docker-install.md](docs/docker-install.md)
 - [docs/fulltest.md](docs/fulltest.md)
 - [docs/gpu-fulltest-v2.md](docs/gpu-fulltest-v2.md)
+- [docs/vllm-benchmark-test.md](docs/vllm-benchmark-test.md)
 - [docs/disktest.md](docs/disktest.md)
 - [docs/ramtest.md](docs/ramtest.md)
 - [docs/network-test.md](docs/network-test.md)
