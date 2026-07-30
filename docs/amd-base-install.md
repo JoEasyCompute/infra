@@ -35,6 +35,7 @@ Ubuntu 26.04 is treated as an experimental ROCm 7.13 preview lane. The script us
 | Compute stack | `rocm` meta-package | `cuda-toolkit` + `cudnn` |
 | GPU status tool | `rocm-smi` | `nvidia-smi` |
 | GPU topology | `rocminfo` | `nvidia-smi -q` |
+| GPU process monitor | `nvtop` | `nvtop` |
 | Bandwidth test | `rocm-bandwidth-test` | `nvbandwidth` |
 | ML arch targeting | `PYTORCH_ROCM_ARCH` (auto-detected) | auto via CUDA |
 
