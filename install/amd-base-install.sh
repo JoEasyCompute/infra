@@ -404,7 +404,7 @@ install_base_packages() {
         gcc-11 g++-11 gcc-12 g++-12 lsb-release \
         ipmitool jq fzf ripgrep fd-find bat \
         pciutils usbutils iproute2 util-linux dmidecode lshw \
-        coreutils chrony nvme-cli bpytop mokutil \
+        coreutils chrony nvme-cli bpytop nvtop mokutil \
         python3 python3-pip python3-venv \
         python3-setuptools python3-wheel \
         smartmontools stress-ng fio lm-sensors ethtool iperf3 \
