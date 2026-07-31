@@ -6,6 +6,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 DEFAULT_PROFILE="ornith-35b-practical"
 PUBLISHED_PROFILE="ornith-397b-published"
+MXFP4_PROFILE="ornith-397b-mxfp4-128k"
 
 DEFAULT_MODEL="deepreinforce-ai/Ornith-1.0-35B"
 DEFAULT_MODEL_REVISION="5df2ed3f675c7beaa490328cc70bb573b65fb660"
@@ -28,6 +29,14 @@ PUBLISHED_MAX_MODEL_LEN=131072
 PUBLISHED_TASK_CPUS=32
 PUBLISHED_TASK_MEMORY_MB=49152
 
+MXFP4_MODEL="olka-fi/Ornith-1.0-397B-MXFP4"
+MXFP4_MODEL_REVISION="04940815e4ddf15e2b7cc4710e81e3cecc25540b"
+MXFP4_DCP_SIZE=4
+MXFP4_KV_CACHE_DTYPE="fp8"
+MXFP4_MAX_NUM_SEQS=1
+MXFP4_MIN_FREE_GB=300
+MXFP4_MIN_AGGREGATE_VRAM_MIB=256000
+
 PROFILE="$DEFAULT_PROFILE"
 PROFILE_MODIFIED=false
 BACKEND="auto"
@@ -38,7 +47,14 @@ GPU_SELECTION="all"
 TP_SIZE=""
 PORT=8000
 MAX_MODEL_LEN=""
-GPU_MEMORY_UTILIZATION="0.90"
+GPU_MEMORY_UTILIZATION=""
+DECODE_CONTEXT_PARALLEL_SIZE=""
+KV_CACHE_DTYPE=""
+CALCULATE_KV_SCALES=false
+MAX_NUM_SEQS=""
+CPU_OFFLOAD_GB=""
+ENFORCE_EAGER=false
+LANGUAGE_MODEL_ONLY=false
 TOOL_CALL_PARSER=""
 REASONING_PARSER=""
 BENCHMARK_DATASET=""
@@ -48,9 +64,9 @@ TEMPERATURE=""
 TOP_P=""
 TASK_CPUS=""
 TASK_MEMORY_MB=""
-N_CONCURRENT=4
+N_CONCURRENT=""
 STARTUP_TIMEOUT=1800
-MIN_FREE_GB=100
+MIN_FREE_GB=""
 OUTPUT_DIR=""
 SMOKE_ONLY=false
 DRY_RUN=false
@@ -59,10 +75,12 @@ KEEP_SERVER=false
 MODEL_WAS_SET=false
 REVISION_WAS_SET=false
 IMAGE_WAS_SET=false
+EAGER_WAS_SET=false
 HARBOR_ARGS=()
 HARBOR_ARGS_PRESENT=false
 HARBOR_COMMAND_DISPLAY=""
 HARBOR_ARGS_DISPLAY=""
+VLLM_COMMAND_DISPLAY=""
 
 RUN_DIR=""
 CONTAINER_NAME=""
@@ -98,7 +116,8 @@ backend after amd-base-install.sh and docker-install.sh with
 
 Options:
   --profile NAME               Benchmark profile: $DEFAULT_PROFILE or
-                               $PUBLISHED_PROFILE (default: $DEFAULT_PROFILE)
+                               $PUBLISHED_PROFILE or $MXFP4_PROFILE
+                               (default: $DEFAULT_PROFILE)
   --backend NAME               GPU backend: auto, nvidia, or amd (default: auto)
   --model NAME                 Hugging Face model (default: $DEFAULT_MODEL)
   --model-revision REVISION    Immutable model revision (default: pinned Ornith revision)
@@ -106,10 +125,22 @@ Options:
                                NVIDIA default: $DEFAULT_NVIDIA_VLLM_IMAGE
                                AMD default: $DEFAULT_AMD_VLLM_IMAGE
   --gpus LIST                  Comma-separated GPU indices, or all (default: all)
-  --tp-size COUNT              Tensor-parallel workers (default: selected GPU count)
+  --tp-size COUNT              Tensor-parallel workers
+                               (default: profile setting or selected GPU count)
   --port PORT                  Local API port (default: 8000)
   --max-model-len TOKENS       Maximum model context (profile default)
-  --gpu-memory-utilization N   vLLM GPU memory fraction (default: 0.90)
+  --gpu-memory-utilization N   vLLM GPU memory fraction (profile default)
+  --decode-context-parallel-size COUNT
+                               vLLM decode context parallel workers (profile default)
+  --kv-cache-dtype TYPE        vLLM KV cache dtype (profile default)
+  --calculate-kv-scales        Calculate FP8 KV cache scales dynamically
+  --no-calculate-kv-scales     Do not calculate KV cache scales
+  --max-num-seqs COUNT         Maximum concurrent vLLM sequences
+  --cpu-offload-gb GB          CPU weight offload per GPU (profile default: 0)
+  --enforce-eager              Disable CUDA graph execution
+  --no-enforce-eager           Allow backend-default CUDA graph execution
+  --language-model-only        Disable unused multimodal processing
+  --no-language-model-only     Allow normal multimodal processing
   --tool-call-parser NAME      vLLM tool parser; none disables (default: qwen3_xml)
   --reasoning-parser NAME      vLLM reasoning parser; none disables (default: qwen3)
   --dataset NAME               Harbor dataset (default: $DEFAULT_DATASET)
@@ -119,9 +150,10 @@ Options:
   --top-p NUMBER               Harbor agent top-p (profile default: 1.0)
   --task-cpus COUNT            Override CPUs available to each Harbor task
   --task-memory-mb MB          Override memory available to each Harbor task
-  --n-concurrent COUNT         Concurrent Harbor tasks (default: 4)
+  --n-concurrent COUNT         Concurrent Harbor tasks (profile default)
   --startup-timeout SECONDS    Maximum model startup wait (default: 1800)
-  --min-free-gb GB             Required Docker-root free space; 0 disables (default: 100)
+  --min-free-gb GB             Required Docker-root free space; 0 disables
+                               (profile default)
   --output-dir PATH            Run artifact directory (default: test/logs/vllm-benchmark/TIMESTAMP)
   --smoke                      Stop after the API chat-completion smoke test
   --dry-run                    Print commands without checking the host or creating files
@@ -136,6 +168,7 @@ Environment:
 Examples:
   $(basename "$0") --gpus 0,1,2,3 --tp-size 4
   $(basename "$0") --profile $PUBLISHED_PROFILE --gpus 0,1,2,3,4,5,6,7 --tp-size 8
+  $(basename "$0") --profile $MXFP4_PROFILE --backend nvidia --gpus 0,1,2,3,4,5,6,7 --tp-size 8
   $(basename "$0") --backend amd --gpus 0,1,2,3 --tp-size 4
   $(basename "$0") --smoke --gpus 0 --tp-size 1
   $(basename "$0") --dry-run --gpus 0,1 --tp-size 2
@@ -223,7 +256,7 @@ discover_profile() {
     done
 
     case "$PROFILE" in
-        "$DEFAULT_PROFILE"|"$PUBLISHED_PROFILE")
+        "$DEFAULT_PROFILE"|"$PUBLISHED_PROFILE"|"$MXFP4_PROFILE")
             ;;
         *)
             die "unsupported profile: $PROFILE"
@@ -238,6 +271,16 @@ apply_profile_defaults() {
     TOP_P="$DEFAULT_TOP_P"
     TOOL_CALL_PARSER="$DEFAULT_TOOL_CALL_PARSER"
     REASONING_PARSER="$DEFAULT_REASONING_PARSER"
+    GPU_MEMORY_UTILIZATION="0.90"
+    DECODE_CONTEXT_PARALLEL_SIZE=1
+    KV_CACHE_DTYPE="auto"
+    CALCULATE_KV_SCALES=false
+    MAX_NUM_SEQS=""
+    CPU_OFFLOAD_GB="0"
+    ENFORCE_EAGER=false
+    LANGUAGE_MODEL_ONLY=false
+    N_CONCURRENT=4
+    MIN_FREE_GB=100
 
     case "$PROFILE" in
         "$DEFAULT_PROFILE")
@@ -256,27 +299,77 @@ apply_profile_defaults() {
             TASK_CPUS="$PUBLISHED_TASK_CPUS"
             TASK_MEMORY_MB="$PUBLISHED_TASK_MEMORY_MB"
             ;;
+        "$MXFP4_PROFILE")
+            MODEL_NAME="$MXFP4_MODEL"
+            MODEL_REVISION="$MXFP4_MODEL_REVISION"
+            BENCHMARK_DATASET="$PUBLISHED_DATASET"
+            MAX_MODEL_LEN="$PUBLISHED_MAX_MODEL_LEN"
+            TASK_CPUS="$PUBLISHED_TASK_CPUS"
+            TASK_MEMORY_MB="$PUBLISHED_TASK_MEMORY_MB"
+            TP_SIZE=8
+            GPU_MEMORY_UTILIZATION="0.95"
+            DECODE_CONTEXT_PARALLEL_SIZE="$MXFP4_DCP_SIZE"
+            KV_CACHE_DTYPE="$MXFP4_KV_CACHE_DTYPE"
+            CALCULATE_KV_SCALES=true
+            MAX_NUM_SEQS="$MXFP4_MAX_NUM_SEQS"
+            ENFORCE_EAGER=true
+            LANGUAGE_MODEL_ONLY=true
+            N_CONCURRENT=1
+            MIN_FREE_GB="$MXFP4_MIN_FREE_GB"
+            ;;
     esac
 }
 
 update_profile_modified() {
     local expected_model expected_revision expected_dataset expected_max_model_len
     local expected_task_cpus expected_task_memory_mb
+    local expected_gpu_memory_utilization="0.90"
+    local expected_dcp_size=1
+    local expected_kv_cache_dtype="auto"
+    local expected_calculate_kv_scales=false
+    local expected_max_num_seqs=""
+    local expected_cpu_offload_gb="0"
+    local expected_enforce_eager=false
+    local expected_language_model_only=false
+    local expected_n_concurrent=4
 
-    if [[ "$PROFILE" == "$DEFAULT_PROFILE" ]]; then
-        expected_model="$DEFAULT_MODEL"
-        expected_revision="$DEFAULT_MODEL_REVISION"
-        expected_dataset="$DEFAULT_DATASET"
-        expected_max_model_len="$DEFAULT_MAX_MODEL_LEN"
-        expected_task_cpus=""
-        expected_task_memory_mb=""
-    else
-        expected_model="$PUBLISHED_MODEL"
-        expected_revision="$PUBLISHED_MODEL_REVISION"
-        expected_dataset="$PUBLISHED_DATASET"
-        expected_max_model_len="$PUBLISHED_MAX_MODEL_LEN"
-        expected_task_cpus="$PUBLISHED_TASK_CPUS"
-        expected_task_memory_mb="$PUBLISHED_TASK_MEMORY_MB"
+    case "$PROFILE" in
+        "$DEFAULT_PROFILE")
+            expected_model="$DEFAULT_MODEL"
+            expected_revision="$DEFAULT_MODEL_REVISION"
+            expected_dataset="$DEFAULT_DATASET"
+            expected_max_model_len="$DEFAULT_MAX_MODEL_LEN"
+            expected_task_cpus=""
+            expected_task_memory_mb=""
+            ;;
+        "$PUBLISHED_PROFILE")
+            expected_model="$PUBLISHED_MODEL"
+            expected_revision="$PUBLISHED_MODEL_REVISION"
+            expected_dataset="$PUBLISHED_DATASET"
+            expected_max_model_len="$PUBLISHED_MAX_MODEL_LEN"
+            expected_task_cpus="$PUBLISHED_TASK_CPUS"
+            expected_task_memory_mb="$PUBLISHED_TASK_MEMORY_MB"
+            ;;
+        "$MXFP4_PROFILE")
+            expected_model="$MXFP4_MODEL"
+            expected_revision="$MXFP4_MODEL_REVISION"
+            expected_dataset="$PUBLISHED_DATASET"
+            expected_max_model_len="$PUBLISHED_MAX_MODEL_LEN"
+            expected_task_cpus="$PUBLISHED_TASK_CPUS"
+            expected_task_memory_mb="$PUBLISHED_TASK_MEMORY_MB"
+            expected_gpu_memory_utilization="0.95"
+            expected_dcp_size="$MXFP4_DCP_SIZE"
+            expected_kv_cache_dtype="$MXFP4_KV_CACHE_DTYPE"
+            expected_calculate_kv_scales=true
+            expected_max_num_seqs="$MXFP4_MAX_NUM_SEQS"
+            expected_enforce_eager=true
+            expected_language_model_only=true
+            expected_n_concurrent=1
+            ;;
+    esac
+
+    if [[ "$PROFILE" != "$MXFP4_PROFILE" && "$BACKEND" == "amd" ]]; then
+        expected_enforce_eager=true
     fi
 
     PROFILE_MODIFIED=false
@@ -291,7 +384,25 @@ update_profile_modified() {
         || "$TEMPERATURE" != "$DEFAULT_TEMPERATURE" \
         || "$TOP_P" != "$DEFAULT_TOP_P" \
         || "$TASK_CPUS" != "$expected_task_cpus" \
-        || "$TASK_MEMORY_MB" != "$expected_task_memory_mb" ]]
+        || "$TASK_MEMORY_MB" != "$expected_task_memory_mb" \
+        || "$GPU_MEMORY_UTILIZATION" != "$expected_gpu_memory_utilization" \
+        || "$DECODE_CONTEXT_PARALLEL_SIZE" != "$expected_dcp_size" \
+        || "$KV_CACHE_DTYPE" != "$expected_kv_cache_dtype" \
+        || "$CALCULATE_KV_SCALES" != "$expected_calculate_kv_scales" \
+        || "$MAX_NUM_SEQS" != "$expected_max_num_seqs" \
+        || "$CPU_OFFLOAD_GB" != "$expected_cpu_offload_gb" \
+        || "$ENFORCE_EAGER" != "$expected_enforce_eager" \
+        || "$LANGUAGE_MODEL_ONLY" != "$expected_language_model_only" \
+        || "$N_CONCURRENT" != "$expected_n_concurrent" ]]
+    then
+        PROFILE_MODIFIED=true
+    fi
+
+    if [[ "$PROFILE" == "$MXFP4_PROFILE" ]] \
+        && [[ "$MIN_FREE_GB" != "$MXFP4_MIN_FREE_GB" \
+            || "$TP_SIZE" != "8" \
+            || "$SELECTED_GPU_COUNT" != "8" \
+            || "$VLLM_IMAGE" != "$DEFAULT_NVIDIA_VLLM_IMAGE" ]]
     then
         PROFILE_MODIFIED=true
     fi
@@ -301,6 +412,10 @@ warn_profile_constraints() {
     if [[ "$PROFILE" == "$PUBLISHED_PROFILE" ]]; then
         warn "The 397B BF16 checkpoint requires an exceptionally large multi-GPU memory pool;" \
             "verify usable capacity before pulling the model"
+    fi
+    if [[ "$PROFILE" == "$MXFP4_PROFILE" ]]; then
+        warn "The community MXFP4 checkpoint is experimental and is not directly comparable with the publisher's BF16 result"
+        warn "A real eight-GPU startup test is still required; passing preflight does not guarantee the model will fit"
     fi
     if [[ "$PROFILE_MODIFIED" == true ]]; then
         warn "Effective settings are not directly comparable with the unmodified $PROFILE profile"
@@ -383,6 +498,9 @@ apply_backend_defaults() {
             if [[ "$IMAGE_WAS_SET" == false ]]; then
                 VLLM_IMAGE="$DEFAULT_AMD_VLLM_IMAGE"
             fi
+            if [[ "$EAGER_WAS_SET" == false ]]; then
+                ENFORCE_EAGER=true
+            fi
             ;;
         *)
             die "Internal error: unresolved backend: $BACKEND"
@@ -397,6 +515,10 @@ validate_arguments() {
         || die "--max-model-len must be a positive integer"
     is_positive_integer "$N_CONCURRENT" \
         || die "--n-concurrent must be a positive integer"
+    is_positive_integer "$DECODE_CONTEXT_PARALLEL_SIZE" \
+        || die "--decode-context-parallel-size must be a positive integer"
+    [[ -z "$MAX_NUM_SEQS" ]] || is_positive_integer "$MAX_NUM_SEQS" \
+        || die "--max-num-seqs must be a positive integer"
     is_positive_integer "$STARTUP_TIMEOUT" \
         || die "--startup-timeout must be a positive integer"
     [[ -z "$TASK_CPUS" ]] || is_positive_integer "$TASK_CPUS" \
@@ -405,6 +527,10 @@ validate_arguments() {
         || die "--task-memory-mb must be a positive integer"
     [[ "$MIN_FREE_GB" =~ ^[0-9]+$ ]] \
         || die "--min-free-gb must be a non-negative integer"
+    [[ "$CPU_OFFLOAD_GB" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+        || die "--cpu-offload-gb must be a non-negative number"
+    [[ -n "$KV_CACHE_DTYPE" ]] \
+        || die "--kv-cache-dtype must not be empty"
     [[ "$GPU_MEMORY_UTILIZATION" =~ ^0(\.[0-9]+)?$|^1(\.0+)?$ ]] \
         || die "--gpu-memory-utilization must be between 0 and 1"
     awk -v value="$GPU_MEMORY_UTILIZATION" \
@@ -428,6 +554,51 @@ validate_arguments() {
     if [[ "$MODEL_WAS_SET" == true && "$REVISION_WAS_SET" == false ]]; then
         die "A custom --model requires an explicit immutable --model-revision"
     fi
+    if [[ "$PROFILE" == "$MXFP4_PROFILE" && "$BACKEND" != "nvidia" ]]; then
+        die "$MXFP4_PROFILE requires the NVIDIA backend"
+    fi
+}
+
+validate_effective_topology() {
+    if [[ "$PROFILE" == "$MXFP4_PROFILE" ]]; then
+        (( SELECTED_GPU_COUNT >= 8 )) \
+            || die "$MXFP4_PROFILE requires at least 8 selected GPUs"
+        (( TP_SIZE == SELECTED_GPU_COUNT )) \
+            || die "$MXFP4_PROFILE tensor parallel size must equal the selected GPU count"
+    fi
+
+    (( TP_SIZE % DECODE_CONTEXT_PARALLEL_SIZE == 0 )) \
+        || die "--decode-context-parallel-size: decode context parallel size must divide tensor parallel size"
+}
+
+check_mxfp4_gpu_capacity() {
+    local index memory_mib total_mib=0
+    local selected=()
+
+    [[ "$PROFILE" == "$MXFP4_PROFILE" ]] || return 0
+    IFS=',' read -r -a selected <<<"$SELECTED_GPUS"
+    for index in "${selected[@]}"; do
+        memory_mib="$(
+            awk -F',' -v target="$index" '
+                {
+                    gpu_index = $1
+                    memory = $3
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", gpu_index)
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", memory)
+                    if (gpu_index == target) {
+                        print memory
+                        exit
+                    }
+                }
+            ' <<<"$GPU_INVENTORY"
+        )"
+        [[ "$memory_mib" =~ ^[0-9]+$ ]] \
+            || die "Could not determine memory for selected NVIDIA GPU $index"
+        total_mib=$((total_mib + memory_mib))
+    done
+
+    (( total_mib >= MXFP4_MIN_AGGREGATE_VRAM_MIB )) \
+        || die "$MXFP4_PROFILE requires at least ${MXFP4_MIN_AGGREGATE_VRAM_MIB} MiB aggregate selected GPU memory; found ${total_mib} MiB"
 }
 
 prepare_dry_run_gpu_selection() {
@@ -601,8 +772,28 @@ build_server_command() {
         --enable-prefix-caching
         --enable-auto-tool-choice
     )
-    if [[ "$BACKEND" == "amd" ]]; then
+    if [[ "$ENFORCE_EAGER" == true ]]; then
         SERVER_COMMAND+=(--enforce-eager)
+    fi
+    if (( DECODE_CONTEXT_PARALLEL_SIZE > 1 )); then
+        SERVER_COMMAND+=(
+            --decode-context-parallel-size "$DECODE_CONTEXT_PARALLEL_SIZE"
+        )
+    fi
+    if [[ "$KV_CACHE_DTYPE" != "auto" ]]; then
+        SERVER_COMMAND+=(--kv-cache-dtype "$KV_CACHE_DTYPE")
+    fi
+    if [[ "$CALCULATE_KV_SCALES" == true ]]; then
+        SERVER_COMMAND+=(--calculate-kv-scales)
+    fi
+    if [[ -n "$MAX_NUM_SEQS" ]]; then
+        SERVER_COMMAND+=(--max-num-seqs "$MAX_NUM_SEQS")
+    fi
+    if awk -v value="$CPU_OFFLOAD_GB" 'BEGIN { exit !(value > 0) }'; then
+        SERVER_COMMAND+=(--cpu-offload-gb "$CPU_OFFLOAD_GB")
+    fi
+    if [[ "$LANGUAGE_MODEL_ONLY" == true ]]; then
+        SERVER_COMMAND+=(--language-model-only)
     fi
     if [[ "$TOOL_CALL_PARSER" != "none" ]]; then
         SERVER_COMMAND+=(--tool-call-parser "$TOOL_CALL_PARSER")
@@ -611,6 +802,7 @@ build_server_command() {
         SERVER_COMMAND+=(--reasoning-parser "$REASONING_PARSER")
     fi
     SERVER_COMMAND+=(--trust-remote-code)
+    VLLM_COMMAND_DISPLAY="$(format_command "${SERVER_COMMAND[@]}")"
 }
 
 build_harbor_command() {
@@ -657,7 +849,6 @@ show_dry_run() {
         CONTAINER_NAME="infra-vllm-benchmark-$PORT"
     fi
     SERVED_MODEL_NAME="${MODEL_NAME##*/}"
-    prepare_dry_run_gpu_selection
     build_server_command
     build_harbor_command
 
@@ -667,6 +858,7 @@ show_dry_run() {
     printf 'Backend: %s\n' "$BACKEND"
     warn_profile_constraints
     printf 'Output directory: %s\n' "$planned_output"
+    printf 'Minimum Docker free space: %s GB\n' "$MIN_FREE_GB"
     printf 'vLLM server command:\n'
     print_command "${SERVER_COMMAND[@]}"
     printf 'Harbor environment: OPENAI_API_KEY=EMPTY OPENAI_API_BASE=%s\n' \
@@ -729,6 +921,14 @@ write_metadata() {
         "$TP_SIZE" \
         "$MAX_MODEL_LEN" \
         "$GPU_MEMORY_UTILIZATION" \
+        "$DECODE_CONTEXT_PARALLEL_SIZE" \
+        "$KV_CACHE_DTYPE" \
+        "$CALCULATE_KV_SCALES" \
+        "$MAX_NUM_SEQS" \
+        "$CPU_OFFLOAD_GB" \
+        "$ENFORCE_EAGER" \
+        "$LANGUAGE_MODEL_ONLY" \
+        "$MIN_FREE_GB" \
         "$TOOL_CALL_PARSER" \
         "$REASONING_PARSER" \
         "$HARBOR_PARSER" \
@@ -746,6 +946,7 @@ write_metadata() {
         "$GPU_ARCHITECTURES" \
         "$GPU_INVENTORY" \
         "$SMOKE_ONLY" \
+        "$VLLM_COMMAND_DISPLAY" \
         "$HARBOR_COMMAND_DISPLAY" \
         "$HARBOR_ARGS_DISPLAY" \
         "$([[ -n "${HF_TOKEN:-}" ]] && printf true || printf false)" <<'PY'
@@ -769,6 +970,14 @@ from datetime import datetime, timezone
     tp_size,
     max_model_len,
     gpu_memory_utilization,
+    decode_context_parallel_size,
+    kv_cache_dtype,
+    calculate_kv_scales,
+    max_num_seqs,
+    cpu_offload_gb,
+    enforce_eager,
+    language_model_only,
+    min_free_gb,
     tool_call_parser,
     reasoning_parser,
     harbor_parser,
@@ -786,6 +995,7 @@ from datetime import datetime, timezone
     gpu_architectures,
     gpu_inventory,
     smoke_only,
+    vllm_command,
     harbor_command,
     harbor_extra_args,
     hf_token_present,
@@ -808,6 +1018,14 @@ payload = {
     "tensor_parallel_size": int(tp_size),
     "max_model_len": int(max_model_len),
     "gpu_memory_utilization": float(gpu_memory_utilization),
+    "decode_context_parallel_size": int(decode_context_parallel_size),
+    "kv_cache_dtype": kv_cache_dtype,
+    "calculate_kv_scales": calculate_kv_scales == "true",
+    "max_num_seqs": int(max_num_seqs) if max_num_seqs else None,
+    "cpu_offload_gb": float(cpu_offload_gb),
+    "enforce_eager": enforce_eager == "true",
+    "language_model_only": language_model_only == "true",
+    "min_free_gb": int(min_free_gb),
     "tool_call_parser": tool_call_parser,
     "reasoning_parser": reasoning_parser,
     "harbor_parser": harbor_parser,
@@ -826,6 +1044,7 @@ payload = {
         item for item in gpu_architectures.split(",") if item
     ],
     "gpu_inventory": gpu_inventory.splitlines(),
+    "vllm_command": vllm_command,
     "harbor_command": harbor_command,
     "harbor_extra_args": harbor_extra_args,
     "hf_token_present": hf_token_present == "true",
@@ -854,6 +1073,15 @@ write_summary() {
         printf 'selected_gpus=%s\n' "$SELECTED_GPUS"
         printf 'tensor_parallel_size=%s\n' "$TP_SIZE"
         printf 'max_model_len=%s\n' "$MAX_MODEL_LEN"
+        printf 'gpu_memory_utilization=%s\n' "$GPU_MEMORY_UTILIZATION"
+        printf 'decode_context_parallel_size=%s\n' "$DECODE_CONTEXT_PARALLEL_SIZE"
+        printf 'kv_cache_dtype=%s\n' "$KV_CACHE_DTYPE"
+        printf 'calculate_kv_scales=%s\n' "$CALCULATE_KV_SCALES"
+        printf 'max_num_seqs=%s\n' "$MAX_NUM_SEQS"
+        printf 'cpu_offload_gb=%s\n' "$CPU_OFFLOAD_GB"
+        printf 'enforce_eager=%s\n' "$ENFORCE_EAGER"
+        printf 'language_model_only=%s\n' "$LANGUAGE_MODEL_ONLY"
+        printf 'min_free_gb=%s\n' "$MIN_FREE_GB"
         printf 'gpu_runtime_version=%s\n' "$GPU_RUNTIME_VERSION"
         printf 'gpu_architectures=%s\n' "$GPU_ARCHITECTURES"
         printf 'tool_call_parser=%s\n' "$TOOL_CALL_PARSER"
@@ -864,6 +1092,7 @@ write_summary() {
         printf 'task_cpus=%s\n' "$TASK_CPUS"
         printf 'task_memory_mb=%s\n' "$TASK_MEMORY_MB"
         printf 'dataset=%s\n' "$BENCHMARK_DATASET"
+        printf 'vllm_command=%s\n' "$VLLM_COMMAND_DISPLAY"
         printf 'harbor_command=%s\n' "$HARBOR_COMMAND_DISPLAY"
         printf 'harbor_extra_args=%s\n' "$HARBOR_ARGS_DISPLAY"
         printf 'run_directory=%s\n' "$RUN_DIR"
@@ -1040,6 +1269,52 @@ while (( $# > 0 )); do
             GPU_MEMORY_UTILIZATION="$2"
             shift 2
             ;;
+        --decode-context-parallel-size)
+            [[ $# -ge 2 ]] || die "--decode-context-parallel-size requires a value"
+            DECODE_CONTEXT_PARALLEL_SIZE="$2"
+            shift 2
+            ;;
+        --kv-cache-dtype)
+            [[ $# -ge 2 ]] || die "--kv-cache-dtype requires a value"
+            KV_CACHE_DTYPE="$2"
+            shift 2
+            ;;
+        --calculate-kv-scales)
+            CALCULATE_KV_SCALES=true
+            shift
+            ;;
+        --no-calculate-kv-scales)
+            CALCULATE_KV_SCALES=false
+            shift
+            ;;
+        --max-num-seqs)
+            [[ $# -ge 2 ]] || die "--max-num-seqs requires a value"
+            MAX_NUM_SEQS="$2"
+            shift 2
+            ;;
+        --cpu-offload-gb)
+            [[ $# -ge 2 ]] || die "--cpu-offload-gb requires a value"
+            CPU_OFFLOAD_GB="$2"
+            shift 2
+            ;;
+        --enforce-eager)
+            ENFORCE_EAGER=true
+            EAGER_WAS_SET=true
+            shift
+            ;;
+        --no-enforce-eager)
+            ENFORCE_EAGER=false
+            EAGER_WAS_SET=true
+            shift
+            ;;
+        --language-model-only)
+            LANGUAGE_MODEL_ONLY=true
+            shift
+            ;;
+        --no-language-model-only)
+            LANGUAGE_MODEL_ONLY=false
+            shift
+            ;;
         --tool-call-parser)
             [[ $# -ge 2 ]] || die "--tool-call-parser requires a value"
             TOOL_CALL_PARSER="$2"
@@ -1141,10 +1416,12 @@ done
 
 resolve_backend
 apply_backend_defaults
-update_profile_modified
 validate_arguments
 
 if [[ "$DRY_RUN" == true ]]; then
+    prepare_dry_run_gpu_selection
+    validate_effective_topology
+    update_profile_modified
     show_dry_run
     exit 0
 fi
@@ -1171,6 +1448,9 @@ docker info >/dev/null 2>&1 \
     || die "Docker is unavailable. Start Docker or re-login after docker-install.sh added your user to the docker group"
 
 prepare_gpu_selection
+validate_effective_topology
+check_mxfp4_gpu_capacity
+update_profile_modified
 SERVED_MODEL_NAME="${MODEL_NAME##*/}"
 if [[ "$BACKEND" == "amd" ]]; then
     CONTAINER_NAME="infra-vllm-benchmark-amd-$PORT"

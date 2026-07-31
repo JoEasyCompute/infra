@@ -473,6 +473,13 @@ hosts must select a backend explicitly.
     --gpus 0,1,2,3,4,5,6,7 \
     --tp-size 8
 
+# Experimental community MXFP4 397B / 128K profile for eight NVIDIA GPUs
+./test/vllm-benchmark-test.sh \
+    --profile ornith-397b-mxfp4-128k \
+    --backend nvidia \
+    --gpus 0,1,2,3,4,5,6,7 \
+    --tp-size 8
+
 # AMD Radeon AI PRO R9700S / gfx1201
 ./test/vllm-benchmark-test.sh --backend amd --dry-run --gpus 0,1,2,3 --tp-size 4
 ./test/vllm-benchmark-test.sh --backend amd --smoke --gpus 0,1,2,3 --tp-size 4
@@ -485,6 +492,15 @@ optional `ornith-397b-published` profile pins the disclosed 397B model,
 Terminal-Bench 2.1 snapshot, 128K context, parser, sampling, and task-resource
 settings, but requires an exceptionally large multi-GPU memory pool. It does
 not automatically choose a backend, GPUs, or tensor parallelism.
+
+The experimental `ornith-397b-mxfp4-128k` profile pins the community
+`olka-fi/Ornith-1.0-397B-MXFP4` conversion and attempts to retain 128K context
+on eight 32 GB NVIDIA GPUs. It uses TP8/DCP4, FP8 KV cache, one vLLM sequence,
+eager execution, and Harbor concurrency one. The checkpoint is approximately
+226 GB and the profile requires at least 300 GB free under the Docker root.
+It is NVIDIA-only, is not directly comparable with the publisher's BF16
+result, and remains experimental until it passes a real eight-RTX-5090 smoke
+test.
 
 The public result does not disclose the exact Harbor patch, dataset snapshot,
 or absolute four-hour timeout override, so this profile must not be treated as

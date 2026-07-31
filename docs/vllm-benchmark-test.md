@@ -29,22 +29,27 @@ agent, image, model revision, or dataset settings.
 
 ## Benchmark Profiles
 
-| Setting | `ornith-35b-practical` | `ornith-397b-published` |
-| --- | --- | --- |
-| Model | `deepreinforce-ai/Ornith-1.0-35B` | `deepreinforce-ai/Ornith-1.0-397B` |
-| Revision | `5df2ed3f675c7beaa490328cc70bb573b65fb660` | `5e3e761811e804c295c1d3c0ce68b21da6154209` |
-| Dataset | `terminal-bench@2.0` | `terminal-bench/terminal-bench-2-1@6` |
-| Maximum context | 16,384 | 131,072 |
-| vLLM parsers | `qwen3_xml`, `qwen3` | `qwen3_xml`, `qwen3` |
-| Harbor parser | `json` | `json` |
-| Temperature / top-p | `1.0` / `1.0` | `1.0` / `1.0` |
-| Task resources | Dataset defaults | 32 CPUs / 49,152 MB RAM |
+| Setting | `ornith-35b-practical` | `ornith-397b-published` | `ornith-397b-mxfp4-128k` |
+| --- | --- | --- | --- |
+| Model | `deepreinforce-ai/Ornith-1.0-35B` | `deepreinforce-ai/Ornith-1.0-397B` | `olka-fi/Ornith-1.0-397B-MXFP4` |
+| Revision | `5df2ed3f675c7beaa490328cc70bb573b65fb660` | `5e3e761811e804c295c1d3c0ce68b21da6154209` | `04940815e4ddf15e2b7cc4710e81e3cecc25540b` |
+| Dataset | `terminal-bench@2.0` | `terminal-bench/terminal-bench-2-1@6` | `terminal-bench/terminal-bench-2-1@6` |
+| Maximum context | 16,384 | 131,072 | 131,072 |
+| GPU backend | NVIDIA or AMD | NVIDIA or AMD | NVIDIA only |
+| TP / DCP | Operator selected / 1 | Operator selected / 1 | 8 / 4 |
+| KV cache | `auto` | `auto` | FP8 with calculated scales |
+| vLLM concurrency | Image default | Image default | 1 sequence |
+| Harbor concurrency | 4 | 4 | 1 |
+| vLLM parsers | `qwen3_xml`, `qwen3` | `qwen3_xml`, `qwen3` | `qwen3_xml`, `qwen3` |
+| Harbor parser | `json` | `json` | `json` |
+| Temperature / top-p | `1.0` / `1.0` | `1.0` / `1.0` | `1.0` / `1.0` |
+| Task resources | Dataset defaults | 32 CPUs / 49,152 MB RAM | 32 CPUs / 49,152 MB RAM |
 
-The profile does not select the NVIDIA or AMD backend, GPU indices, or tensor
-parallelism. Backend resolution happens separately through autodetection or an
-explicit override. GPU indices and tensor parallelism remain
-operator-controlled because usable capacity depends on the host topology and
-backend image.
+The practical and published profiles do not select the NVIDIA or AMD backend,
+GPU indices, or tensor parallelism. Backend resolution happens separately
+through autodetection or an explicit override. The MXFP4 profile is the
+exception: it requires NVIDIA, at least eight selected GPUs, and tensor
+parallel size equal to the selected GPU count.
 
 The 397B profile reproduces the settings disclosed by the
 [Ornith-1.0-397B model card](https://huggingface.co/deepreinforce-ai/Ornith-1.0-397B)
@@ -62,6 +67,51 @@ Explicit options override profile values regardless of argument order.
 Changing a profile-controlled setting records `profile_modified=true` and
 prints a warning that the result is not directly comparable with the
 unmodified profile.
+
+### Experimental MXFP4 128K Profile
+
+`ornith-397b-mxfp4-128k` pins the community
+[Ornith-1.0-397B-MXFP4 conversion](https://huggingface.co/olka-fi/Ornith-1.0-397B-MXFP4/blob/04940815e4ddf15e2b7cc4710e81e3cecc25540b/README.md).
+It is not a DeepReinforce checkpoint and its results are not directly
+comparable with the publisher's BF16 result.
+
+The pinned repository contains approximately 225.94 GB of payload
+(210.42 GiB). Eight nominal 32 GB GPUs leave a narrow margin for higher-
+precision weights, CUDA workspaces, communication buffers, and KV cache. The
+profile therefore uses:
+
+- TP8 across the canonical eight selected GPUs
+- DCP4 to shard decode KV cache over existing TP ranks
+- FP8 KV cache with dynamically calculated scales
+- `--gpu-memory-utilization 0.95`
+- `--max-num-seqs 1` and Harbor `--n-concurrent 1`
+- eager execution to avoid CUDA graph reservations
+- language-model-only serving
+- no CPU offload by default
+
+The context-parallel behavior follows the
+[vLLM deployment guidance](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment/).
+The wrapper requires DCP to divide TP, requires TP to use every selected GPU,
+and rejects fewer than eight selected GPUs. On a hardware run it also requires
+at least 256,000 MiB of aggregate reported memory across the selected GPUs.
+Passing that check does not guarantee the model will load.
+
+The profile raises the Docker-root free-space check from 100 GB to 300 GB
+before downloads. If startup still runs out of GPU memory, an operator can
+test a modified run with 2 GB of host-memory weight offload per GPU:
+
+```bash
+./test/vllm-benchmark-test.sh \
+    --profile ornith-397b-mxfp4-128k \
+    --backend nvidia \
+    --gpus 0,1,2,3,4,5,6,7 \
+    --tp-size 8 \
+    --cpu-offload-gb 2
+```
+
+CPU offload changes latency and host-memory demand and records
+`profile_modified=true`. The profile remains experimental until a real
+eight-RTX-5090 startup and smoke run succeeds.
 
 ## Backend Selection
 
@@ -229,6 +279,23 @@ Run the published-settings 397B profile:
     --tp-size 8
 ```
 
+Inspect or run the experimental MXFP4 397B profile on eight NVIDIA GPUs:
+
+```bash
+./test/vllm-benchmark-test.sh \
+    --profile ornith-397b-mxfp4-128k \
+    --backend nvidia \
+    --gpus 0,1,2,3,4,5,6,7 \
+    --tp-size 8 \
+    --dry-run
+
+./test/vllm-benchmark-test.sh \
+    --profile ornith-397b-mxfp4-128k \
+    --backend nvidia \
+    --gpus 0,1,2,3,4,5,6,7 \
+    --tp-size 8
+```
+
 One wrapper invocation performs one attempt per task unless Harbor arguments
 override that behavior. To request five attempts, matching the published
 run-count description:
@@ -267,7 +334,12 @@ Inspect the AMD command without requiring an AMD host:
 ```
 
 Use `--help` for all resource, timeout, image, model, dataset, and output
-options. Arguments after `--` are passed directly to `harbor run`:
+options. The vLLM memory controls include
+`--decode-context-parallel-size`, `--kv-cache-dtype`,
+`--calculate-kv-scales`, `--max-num-seqs`, `--cpu-offload-gb`,
+`--enforce-eager`, and `--language-model-only`, with matching `--no-*`
+switches for the boolean settings. Arguments after `--` are passed directly
+to `harbor run`:
 
 ```bash
 ./test/vllm-benchmark-test.sh --gpus 0,1 --tp-size 2 -- \
@@ -312,6 +384,7 @@ The script:
 - verifies NVIDIA or ROCm access inside the selected vLLM image
 - records the backend, GPU runtime version, and AMD GPU architectures
 - checks Docker-root free space before downloads
+- checks aggregate selected NVIDIA memory before MXFP4 profile downloads
 - uses the persistent Docker volume `infra-vllm-hf-cache` for model cache
 - waits for `/v1/models` with a bounded timeout
 - runs a chat-completion smoke test before Harbor
@@ -348,7 +421,8 @@ The directory contains:
 - `jobs/`: Harbor task results
 
 `metadata.json` and `summary.txt` include the profile name, modified flag,
-effective parser/sampling/resource settings, effective Harbor command, and any
+effective TP/DCP, KV cache, sequence, eager, language-only, CPU-offload,
+parser/sampling/resource settings, effective vLLM and Harbor commands, and any
 arguments forwarded after `--`, so filtered or otherwise customized runs
 remain attributable.
 
@@ -374,6 +448,12 @@ Inspect Harbor's `jobs/` output for task rewards and benchmark scores.
   pass a pinned vLLM image built for the detected AMD architecture.
 - Model startup times out: inspect `server.log`, reduce
   `--max-model-len`, verify the tensor-parallel size, and check GPU memory.
+- MXFP4 profile reports insufficient aggregate memory: select at least eight
+  NVIDIA GPUs providing at least 256,000 MiB total reported memory. Passing
+  this preflight still does not prove the 128K server will fit.
+- MXFP4 profile runs out of memory after passing preflight: inspect
+  `server.log`; a modified `--cpu-offload-gb 2` run can trade host memory and
+  latency for additional GPU headroom.
 - Docker-root free-space check fails: free space or deliberately lower
   `--min-free-gb`; use `0` only when storage capacity is already monitored.
 - Harbor fails after the smoke test: inspect `harbor.log` and the partial

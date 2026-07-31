@@ -23,7 +23,11 @@ test_help_and_safe_dry_run() {
     help_output="$(bash "$SCRIPT" --help)"
     for option in \
         --profile --backend --model --model-revision --vllm-image --gpus --tp-size --port \
-        --max-model-len --tool-call-parser --reasoning-parser --dataset --agent \
+        --max-model-len --decode-context-parallel-size --kv-cache-dtype \
+        --calculate-kv-scales --no-calculate-kv-scales --max-num-seqs \
+        --cpu-offload-gb --enforce-eager --no-enforce-eager \
+        --language-model-only --no-language-model-only \
+        --tool-call-parser --reasoning-parser --dataset --agent \
         --harbor-parser --temperature --top-p --task-cpus --task-memory-mb \
         --n-concurrent --startup-timeout --output-dir --smoke --dry-run \
         --no-pull --keep-server
@@ -31,6 +35,9 @@ test_help_and_safe_dry_run() {
         require_text "$help_output" "$option"
     done
     require_text "$help_output" "auto, nvidia, or amd (default: auto)"
+    require_text "$help_output" "ornith-35b-practical"
+    require_text "$help_output" "ornith-397b-published"
+    require_text "$help_output" "ornith-397b-mxfp4-128k"
 
     dry_run_output="$(
         HF_TOKEN="do-not-print-this-token" \
@@ -59,6 +66,13 @@ test_help_and_safe_dry_run() {
         || fail "practical profile unexpectedly overrides task CPUs"
     ! grep -Fq -- "--override-memory-mb" <<<"$dry_run_output" \
         || fail "practical profile unexpectedly overrides task memory"
+    for option in \
+        --decode-context-parallel-size --kv-cache-dtype --calculate-kv-scales \
+        --max-num-seqs --cpu-offload-gb --enforce-eager --language-model-only
+    do
+        ! grep -Fq -- "$option" <<<"$dry_run_output" \
+            || fail "practical NVIDIA profile unexpectedly emits $option"
+    done
     [[ ! -e "$tmp_dir/dry-run-output" ]] \
         || fail "--dry-run created its output directory"
     ! grep -Fq "do-not-print-this-token" <<<"$dry_run_output" \
@@ -95,10 +109,186 @@ test_published_profile_dry_run() {
     require_text "$dry_run_output" "--override-cpus 32"
     require_text "$dry_run_output" "--override-memory-mb 49152"
     require_text "$dry_run_output" "397B BF16 checkpoint requires an exceptionally large multi-GPU memory pool"
+    for option in \
+        --decode-context-parallel-size --kv-cache-dtype --calculate-kv-scales \
+        --max-num-seqs --cpu-offload-gb --enforce-eager --language-model-only
+    do
+        ! grep -Fq -- "$option" <<<"$dry_run_output" \
+            || fail "published profile unexpectedly emits $option"
+    done
     [[ ! -e "$tmp_dir/published-dry-run-output" ]] \
         || fail "published profile --dry-run created its output directory"
     ! grep -Fq "do-not-print-this-token" <<<"$dry_run_output" \
         || fail "published profile --dry-run exposed HF_TOKEN"
+}
+
+test_mxfp4_profile_dry_run() {
+    local tmp_dir="$1"
+    local dry_run_output
+
+    dry_run_output="$(
+        HF_TOKEN="do-not-print-this-token" \
+            bash "$SCRIPT" \
+                --backend nvidia \
+                --profile ornith-397b-mxfp4-128k \
+                --dry-run \
+                --gpus 0,1,2,3,4,5,6,7 \
+                --tp-size 8 \
+                --output-dir "$tmp_dir/mxfp4-dry-run-output" \
+                2>&1
+    )"
+
+    require_text "$dry_run_output" "Profile: ornith-397b-mxfp4-128k"
+    require_text "$dry_run_output" "Profile modified: false"
+    require_text "$dry_run_output" "olka-fi/Ornith-1.0-397B-MXFP4"
+    require_text "$dry_run_output" "04940815e4ddf15e2b7cc4710e81e3cecc25540b"
+    require_text "$dry_run_output" "--dataset terminal-bench/terminal-bench-2-1@6"
+    require_text "$dry_run_output" "--tensor-parallel-size 8"
+    require_text "$dry_run_output" "--decode-context-parallel-size 4"
+    require_text "$dry_run_output" "--max-model-len 131072"
+    require_text "$dry_run_output" "--gpu-memory-utilization 0.95"
+    require_text "$dry_run_output" "--kv-cache-dtype fp8"
+    require_text "$dry_run_output" "--calculate-kv-scales"
+    require_text "$dry_run_output" "--max-num-seqs 1"
+    require_text "$dry_run_output" "--enforce-eager"
+    require_text "$dry_run_output" "--language-model-only"
+    require_text "$dry_run_output" "--n-concurrent 1"
+    require_text "$dry_run_output" "--override-cpus 32"
+    require_text "$dry_run_output" "--override-memory-mb 49152"
+    require_text "$dry_run_output" "Minimum Docker free space: 300 GB"
+    require_text "$dry_run_output" "community MXFP4 checkpoint is experimental"
+    ! grep -Fq -- "--cpu-offload-gb" <<<"$dry_run_output" \
+        || fail "MXFP4 profile unexpectedly enables CPU offload"
+    [[ ! -e "$tmp_dir/mxfp4-dry-run-output" ]] \
+        || fail "MXFP4 profile --dry-run created its output directory"
+    ! grep -Fq "do-not-print-this-token" <<<"$dry_run_output" \
+        || fail "MXFP4 profile --dry-run exposed HF_TOKEN"
+}
+
+test_mxfp4_profile_validation() {
+    local tmp_dir="$1"
+    local case_name output
+
+    for case_name in amd seven-gpus unused-gpus invalid-dcp; do
+        if case "$case_name" in
+            amd)
+                bash "$SCRIPT" \
+                    --backend amd \
+                    --profile ornith-397b-mxfp4-128k \
+                    --dry-run \
+                    --gpus 0,1,2,3,4,5,6,7 \
+                    --tp-size 8 \
+                    >"$tmp_dir/$case_name-output" 2>&1
+                ;;
+            seven-gpus)
+                bash "$SCRIPT" \
+                    --backend nvidia \
+                    --profile ornith-397b-mxfp4-128k \
+                    --dry-run \
+                    --gpus 0,1,2,3,4,5,6 \
+                    --tp-size 7 \
+                    >"$tmp_dir/$case_name-output" 2>&1
+                ;;
+            unused-gpus)
+                bash "$SCRIPT" \
+                    --backend nvidia \
+                    --profile ornith-397b-mxfp4-128k \
+                    --dry-run \
+                    --gpus 0,1,2,3,4,5,6,7 \
+                    --tp-size 4 \
+                    >"$tmp_dir/$case_name-output" 2>&1
+                ;;
+            invalid-dcp)
+                bash "$SCRIPT" \
+                    --backend nvidia \
+                    --profile ornith-397b-mxfp4-128k \
+                    --decode-context-parallel-size 3 \
+                    --dry-run \
+                    --gpus 0,1,2,3,4,5,6,7 \
+                    --tp-size 8 \
+                    >"$tmp_dir/$case_name-output" 2>&1
+                ;;
+        esac
+        then
+            fail "MXFP4 validation accepted invalid case: $case_name"
+        fi
+    done
+
+    output="$(<"$tmp_dir/amd-output")"
+    require_text "$output" "ornith-397b-mxfp4-128k requires the NVIDIA backend"
+    ! grep -Fq -- "docker run" <<<"$output" \
+        || fail "MXFP4 AMD rejection rendered a Docker command"
+
+    output="$(<"$tmp_dir/seven-gpus-output")"
+    require_text "$output" "requires at least 8 selected GPUs"
+
+    output="$(<"$tmp_dir/unused-gpus-output")"
+    require_text "$output" "tensor parallel size must equal the selected GPU count"
+
+    output="$(<"$tmp_dir/invalid-dcp-output")"
+    require_text "$output" "decode context parallel size must divide tensor parallel size"
+}
+
+test_mxfp4_profile_overrides() {
+    local first_output second_output
+
+    first_output="$(
+        bash "$SCRIPT" \
+            --backend nvidia \
+            --profile ornith-397b-mxfp4-128k \
+            --decode-context-parallel-size 2 \
+            --kv-cache-dtype fp8_e4m3 \
+            --no-calculate-kv-scales \
+            --max-num-seqs 2 \
+            --cpu-offload-gb 2 \
+            --no-enforce-eager \
+            --no-language-model-only \
+            --gpu-memory-utilization 0.90 \
+            --n-concurrent 2 \
+            --min-free-gb 350 \
+            --dry-run \
+            --gpus 0,1,2,3,4,5,6,7 \
+            --tp-size 8 \
+            2>&1
+    )"
+    second_output="$(
+        bash "$SCRIPT" \
+            --backend nvidia \
+            --decode-context-parallel-size 2 \
+            --profile ornith-397b-mxfp4-128k \
+            --kv-cache-dtype fp8_e4m3 \
+            --no-calculate-kv-scales \
+            --max-num-seqs 2 \
+            --cpu-offload-gb 2 \
+            --no-enforce-eager \
+            --no-language-model-only \
+            --gpu-memory-utilization 0.90 \
+            --n-concurrent 2 \
+            --min-free-gb 350 \
+            --dry-run \
+            --gpus 0,1,2,3,4,5,6,7 \
+            --tp-size 8 \
+            2>&1
+    )"
+
+    for output in "$first_output" "$second_output"; do
+        require_text "$output" "Profile: ornith-397b-mxfp4-128k"
+        require_text "$output" "Profile modified: true"
+        require_text "$output" "--decode-context-parallel-size 2"
+        require_text "$output" "--kv-cache-dtype fp8_e4m3"
+        require_text "$output" "--max-num-seqs 2"
+        require_text "$output" "--cpu-offload-gb 2"
+        require_text "$output" "--gpu-memory-utilization 0.90"
+        require_text "$output" "--n-concurrent 2"
+        require_text "$output" "Minimum Docker free space: 350 GB"
+        require_text "$output" "not directly comparable with the unmodified ornith-397b-mxfp4-128k profile"
+        ! grep -Fq -- "--calculate-kv-scales" <<<"$output" \
+            || fail "disabled KV scale calculation was emitted"
+        ! grep -Fq -- "--enforce-eager" <<<"$output" \
+            || fail "disabled eager mode was emitted"
+        ! grep -Fq -- "--language-model-only" <<<"$output" \
+            || fail "disabled language-model-only mode was emitted"
+    done
 }
 
 test_profile_overrides_are_order_independent() {
@@ -140,6 +330,31 @@ test_profile_overrides_are_order_independent() {
         require_text "$output" "--override-cpus 16"
         require_text "$output" "not directly comparable with the unmodified ornith-397b-published profile"
     done
+}
+
+test_general_execution_overrides_modify_profile() {
+    local dry_run_output
+
+    dry_run_output="$(
+        bash "$SCRIPT" \
+            --backend nvidia \
+            --profile ornith-35b-practical \
+            --decode-context-parallel-size 2 \
+            --kv-cache-dtype fp8 \
+            --calculate-kv-scales \
+            --max-num-seqs 2 \
+            --cpu-offload-gb 1 \
+            --language-model-only \
+            --n-concurrent 2 \
+            --dry-run \
+            --gpus 0,1 \
+            --tp-size 2 \
+            2>&1
+    )"
+
+    require_text "$dry_run_output" "Profile: ornith-35b-practical"
+    require_text "$dry_run_output" "Profile modified: true"
+    require_text "$dry_run_output" "not directly comparable with the unmodified ornith-35b-practical profile"
 }
 
 test_unknown_profile_fails_before_host_checks() {
@@ -261,6 +476,12 @@ test_amd_dry_run_contract() {
     require_text "$dry_run_output" "--entrypoint vllm"
     require_text "$dry_run_output" "serve"
     require_text "$dry_run_output" "--enforce-eager"
+    ! grep -Fq -- "--decode-context-parallel-size" <<<"$dry_run_output" \
+        || fail "AMD practical dry run unexpectedly emits context parallelism"
+    ! grep -Fq -- "--kv-cache-dtype" <<<"$dry_run_output" \
+        || fail "AMD practical dry run unexpectedly emits a KV cache dtype"
+    ! grep -Fq -- "--language-model-only" <<<"$dry_run_output" \
+        || fail "AMD practical dry run unexpectedly emits language-model-only"
     ! grep -Fq -- "--gpus" <<<"$dry_run_output" \
         || fail "AMD dry run contains NVIDIA --gpus runtime flags"
     [[ ! -e "$tmp_dir/amd-dry-run-output" ]] \
@@ -294,12 +515,18 @@ write_mock_commands() {
     cat > "$fake_bin/nvidia-smi" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+gpu_count="${MOCK_NVIDIA_GPU_COUNT:-2}"
+gpu_memory_mib="${MOCK_NVIDIA_GPU_MEMORY_MIB:-32768}"
 if [[ "$*" == *"--query-gpu=index --format=csv,noheader,nounits"* ]]; then
-    printf '0\n1\n'
+    seq 0 $((gpu_count - 1))
 elif [[ "$*" == *"--query-gpu=index,name,memory.total"* ]]; then
-    printf '0, Mock GPU 0, 32768\n1, Mock GPU 1, 32768\n'
+    for ((index = 0; index < gpu_count; index++)); do
+        printf '%s, Mock GPU %s, %s\n' "$index" "$index" "$gpu_memory_mib"
+    done
 else
-    printf 'GPU 0: Mock GPU 0\nGPU 1: Mock GPU 1\n'
+    for ((index = 0; index < gpu_count; index++)); do
+        printf 'GPU %s: Mock GPU %s\n' "$index" "$index"
+    done
 fi
 EOF
 
@@ -385,7 +612,7 @@ for arg in "$@"; do
 done
 
 if [[ " $* " == *"/v1/models"* ]]; then
-    payload='{"data":[{"id":"Ornith-1.0-35B"}]}'
+    payload="{\"data\":[{\"id\":\"${MOCK_SERVED_MODEL_NAME:-Ornith-1.0-35B}\"}]}"
 elif [[ -n "${MOCK_SMOKE_RESPONSE:-}" ]]; then
     payload="$MOCK_SMOKE_RESPONSE"
 else
@@ -397,6 +624,13 @@ if [[ -n "$output" ]]; then
 else
     printf '%s\n' "$payload"
 fi
+EOF
+
+    cat > "$fake_bin/df" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf 'mock 524288000 1 419430400 1%% %s\n' "${@: -1}"
 EOF
 
     cat > "$fake_bin/uv" <<'EOF'
@@ -420,6 +654,7 @@ EOF
         "$fake_bin/rocm-smi" \
         "$fake_bin/docker" \
         "$fake_bin/curl" \
+        "$fake_bin/df" \
         "$fake_bin/uv"
 }
 
@@ -479,8 +714,32 @@ test_mocked_full_lifecycle() {
         || fail "effective Harbor parser was not recorded in metadata"
     grep -Fq -- '"task_cpus": null' "$output_dir/metadata.json" \
         || fail "practical task CPU default was not recorded in metadata"
+    grep -Fq -- '"decode_context_parallel_size": 1' "$output_dir/metadata.json" \
+        || fail "default decode context parallel size was not recorded"
+    grep -Fq -- '"kv_cache_dtype": "auto"' "$output_dir/metadata.json" \
+        || fail "default KV cache dtype was not recorded"
+    grep -Fq -- '"calculate_kv_scales": false' "$output_dir/metadata.json" \
+        || fail "default KV scale behavior was not recorded"
+    grep -Fq -- '"max_num_seqs": null' "$output_dir/metadata.json" \
+        || fail "default max sequence behavior was not recorded"
+    grep -Fq -- '"cpu_offload_gb": 0.0' "$output_dir/metadata.json" \
+        || fail "default CPU offload was not recorded"
+    grep -Fq -- '"enforce_eager": false' "$output_dir/metadata.json" \
+        || fail "default NVIDIA eager behavior was not recorded"
+    grep -Fq -- '"language_model_only": false' "$output_dir/metadata.json" \
+        || fail "default language-model-only behavior was not recorded"
+    grep -Fq -- '"min_free_gb": 0' "$output_dir/metadata.json" \
+        || fail "effective Docker free-space threshold was not recorded"
+    grep -Fq -- '"vllm_command": "docker run' "$output_dir/metadata.json" \
+        || fail "effective vLLM command was not recorded"
+    ! grep -Fq "mock-secret-token" "$output_dir/metadata.json" \
+        || fail "HF_TOKEN value leaked into metadata"
     grep -Fq -- 'profile=ornith-35b-practical' "$output_dir/summary.txt" \
         || fail "practical profile was not recorded in the summary"
+    grep -Fq -- 'decode_context_parallel_size=1' "$output_dir/summary.txt" \
+        || fail "decode context parallel size was not recorded in summary"
+    grep -Fq -- 'vllm_command=docker run' "$output_dir/summary.txt" \
+        || fail "vLLM command was not recorded in summary"
     [[ -f "$output_dir/smoke-response.json" ]] \
         || fail "chat-completion smoke response was not preserved"
     [[ -f "$output_dir/jobs/mock-job/result.json" ]] \
@@ -546,6 +805,79 @@ test_mocked_amd_lifecycle() {
         || fail "AMD Harbor job output was not preserved"
 }
 
+test_mocked_mxfp4_lifecycle() {
+    local tmp_dir="$1"
+    local fake_bin="$tmp_dir/bin"
+    local output_dir="$tmp_dir/run"
+    local console_output="$tmp_dir/console-output"
+
+    write_mock_commands "$fake_bin"
+    mkdir -p "$tmp_dir/docker-root"
+    : > "$tmp_dir/docker.log"
+    : > "$tmp_dir/curl.log"
+    : > "$tmp_dir/uv.log"
+
+    if ! PATH="$fake_bin:/usr/bin:/bin" \
+        VLLM_BENCHMARK_DEVICE_ROOT="$tmp_dir/no-amd-dev" \
+        MOCK_NVIDIA_GPU_COUNT=8 \
+        MOCK_NVIDIA_GPU_MEMORY_MIB=32768 \
+        MOCK_SERVED_MODEL_NAME="Ornith-1.0-397B-MXFP4" \
+        MOCK_DOCKER_LOG="$tmp_dir/docker.log" \
+        MOCK_DOCKER_ROOT="$tmp_dir/docker-root" \
+        MOCK_CURL_LOG="$tmp_dir/curl.log" \
+        MOCK_UV_LOG="$tmp_dir/uv.log" \
+            bash "$SCRIPT" \
+                --backend nvidia \
+                --profile ornith-397b-mxfp4-128k \
+                --gpus 0,1,2,3,4,5,6,7 \
+                --tp-size 8 \
+                --startup-timeout 5 \
+                --no-pull \
+                --output-dir "$output_dir" \
+                >"$console_output" 2>&1
+    then
+        cat "$console_output" >&2
+        fail "mock MXFP4 lifecycle exited unsuccessfully"
+    fi
+
+    grep -Fq -- '--decode-context-parallel-size 4' "$tmp_dir/docker.log" \
+        || fail "MXFP4 lifecycle did not use DCP4"
+    grep -Fq -- '--kv-cache-dtype fp8' "$tmp_dir/docker.log" \
+        || fail "MXFP4 lifecycle did not use an FP8 KV cache"
+    grep -Fq -- '--calculate-kv-scales' "$tmp_dir/docker.log" \
+        || fail "MXFP4 lifecycle did not calculate KV scales"
+    grep -Fq -- '--max-num-seqs 1' "$tmp_dir/docker.log" \
+        || fail "MXFP4 lifecycle did not limit vLLM sequences"
+    grep -Fq -- '--enforce-eager' "$tmp_dir/docker.log" \
+        || fail "MXFP4 lifecycle did not enable eager execution"
+    grep -Fq -- '--language-model-only' "$tmp_dir/docker.log" \
+        || fail "MXFP4 lifecycle did not use language-model-only mode"
+    grep -Fq -- '"profile": "ornith-397b-mxfp4-128k"' "$output_dir/metadata.json" \
+        || fail "MXFP4 profile was not recorded in metadata"
+    grep -Fq -- '"profile_modified": false' "$output_dir/metadata.json" \
+        || fail "canonical MXFP4 profile was not recorded as unmodified"
+    grep -Fq -- '"decode_context_parallel_size": 4' "$output_dir/metadata.json" \
+        || fail "MXFP4 DCP size was not recorded"
+    grep -Fq -- '"kv_cache_dtype": "fp8"' "$output_dir/metadata.json" \
+        || fail "MXFP4 KV cache dtype was not recorded"
+    grep -Fq -- '"calculate_kv_scales": true' "$output_dir/metadata.json" \
+        || fail "MXFP4 KV scale behavior was not recorded"
+    grep -Fq -- '"max_num_seqs": 1' "$output_dir/metadata.json" \
+        || fail "MXFP4 max sequence count was not recorded"
+    grep -Fq -- '"enforce_eager": true' "$output_dir/metadata.json" \
+        || fail "MXFP4 eager mode was not recorded"
+    grep -Fq -- '"language_model_only": true' "$output_dir/metadata.json" \
+        || fail "MXFP4 language-model-only mode was not recorded"
+    grep -Fq -- '"min_free_gb": 300' "$output_dir/metadata.json" \
+        || fail "MXFP4 Docker free-space threshold was not recorded"
+    grep -Fq -- 'profile=ornith-397b-mxfp4-128k' "$output_dir/summary.txt" \
+        || fail "MXFP4 profile was not recorded in summary"
+    grep -Fq -- 'decode_context_parallel_size=4' "$output_dir/summary.txt" \
+        || fail "MXFP4 DCP size was not recorded in summary"
+    [[ -f "$output_dir/jobs/mock-job/result.json" ]] \
+        || fail "MXFP4 Harbor job output was not preserved"
+}
+
 test_amd_rejects_unsupported_default_image() {
     local tmp_dir="$1"
     local fake_bin="$tmp_dir/bin"
@@ -578,6 +910,49 @@ test_amd_rejects_unsupported_default_image() {
 
     grep -Fq -- 'default AMD image supports gfx120X GPUs' "$console_output" \
         || fail "unsupported AMD architecture failure was not actionable"
+}
+
+test_mxfp4_rejects_insufficient_aggregate_vram() {
+    local tmp_dir="$1"
+    local fake_bin="$tmp_dir/bin"
+    local output_dir="$tmp_dir/run"
+    local console_output="$tmp_dir/console-output"
+
+    write_mock_commands "$fake_bin"
+    mkdir -p "$tmp_dir/docker-root"
+    : > "$tmp_dir/docker.log"
+    : > "$tmp_dir/curl.log"
+    : > "$tmp_dir/uv.log"
+
+    if PATH="$fake_bin:/usr/bin:/bin" \
+        VLLM_BENCHMARK_DEVICE_ROOT="$tmp_dir/no-amd-dev" \
+        MOCK_NVIDIA_GPU_COUNT=8 \
+        MOCK_NVIDIA_GPU_MEMORY_MIB=30000 \
+        MOCK_DOCKER_LOG="$tmp_dir/docker.log" \
+        MOCK_DOCKER_ROOT="$tmp_dir/docker-root" \
+        MOCK_CURL_LOG="$tmp_dir/curl.log" \
+        MOCK_UV_LOG="$tmp_dir/uv.log" \
+            bash "$SCRIPT" \
+                --backend nvidia \
+                --profile ornith-397b-mxfp4-128k \
+                --gpus 0,1,2,3,4,5,6,7 \
+                --tp-size 8 \
+                --min-free-gb 0 \
+                --no-pull \
+                --output-dir "$output_dir" \
+                >"$console_output" 2>&1
+    then
+        fail "MXFP4 profile accepted insufficient aggregate VRAM"
+    fi
+
+    grep -Fq -- 'requires at least 256000 MiB aggregate selected GPU memory; found 240000 MiB' "$console_output" \
+        || fail "insufficient aggregate VRAM failure was not actionable"
+    ! grep -Fq -- '--detach' "$tmp_dir/docker.log" \
+        || fail "insufficient aggregate VRAM launched the vLLM server"
+    ! grep -Fq -- 'pull ' "$tmp_dir/docker.log" \
+        || fail "insufficient aggregate VRAM pulled a Docker image"
+    [[ ! -e "$output_dir" ]] \
+        || fail "insufficient aggregate VRAM created run artifacts"
 }
 
 test_smoke_rejects_wrong_answer() {
@@ -622,14 +997,20 @@ main() {
 
     test_help_and_safe_dry_run "$tmp_dir"
     test_published_profile_dry_run "$tmp_dir"
+    test_mxfp4_profile_dry_run "$tmp_dir"
+    test_mxfp4_profile_validation "$tmp_dir"
+    test_mxfp4_profile_overrides
     test_profile_overrides_are_order_independent
+    test_general_execution_overrides_modify_profile
     test_unknown_profile_fails_before_host_checks "$tmp_dir"
     test_auto_backend_detection "$tmp_dir/auto-detection"
     test_amd_dry_run_contract "$tmp_dir"
     test_source_safety_contract
     test_mocked_full_lifecycle "$tmp_dir/mock"
     test_mocked_amd_lifecycle "$tmp_dir/mock-amd"
+    test_mocked_mxfp4_lifecycle "$tmp_dir/mock-mxfp4"
     test_amd_rejects_unsupported_default_image "$tmp_dir/unsupported-amd"
+    test_mxfp4_rejects_insufficient_aggregate_vram "$tmp_dir/mxfp4-vram"
     test_smoke_rejects_wrong_answer "$tmp_dir/wrong-smoke"
     echo "vLLM benchmark static tests passed"
 }
