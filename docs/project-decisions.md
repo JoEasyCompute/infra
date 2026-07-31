@@ -218,10 +218,23 @@ Current behavior:
   Ornith-1.0-397B revision, Harbor dataset snapshot
   `terminal-bench/terminal-bench-2-1@6`, 128K context, JSON response parsing,
   temperature/top-p 1.0, and 32 CPU / 49,152 MB task overrides
-- benchmark profiles are backend-independent and never select GPU indices or
-  tensor parallelism; explicit CLI settings override profile values regardless
-  of argument order and mark the run metadata as modified when effective
-  profile-controlled values differ
+- the experimental NVIDIA-only `ornith-397b-mxfp4-128k` profile pins the
+  community `olka-fi/Ornith-1.0-397B-MXFP4` revision
+  `04940815e4ddf15e2b7cc4710e81e3cecc25540b` and keeps the 128K context with
+  TP8/DCP4, FP8 KV cache with calculated scales, 0.95 memory utilization, one
+  vLLM sequence, eager mode, language-model-only serving, and Harbor
+  concurrency one
+- practical and published profiles remain backend-independent and leave GPU
+  topology operator-controlled; the MXFP4 profile is the deliberate exception
+  and requires NVIDIA, at least eight selected GPUs, TP equal to the selected
+  count, and DCP that divides TP
+- explicit CLI settings override profile values regardless of argument order
+  and mark run metadata as modified when effective profile-controlled values
+  differ; the MXFP4 profile additionally tracks its image, topology, KV,
+  sequence, execution-mode, concurrency, offload, and storage settings
+- the MXFP4 hardware path requires at least 256,000 MiB aggregate selected
+  NVIDIA memory and 300 GB free under the Docker root before downloads; these
+  checks reduce avoidable downloads but do not guarantee vLLM will fit
 - a bounded API readiness check and chat-completion smoke test gate the Harbor
   evaluation
 - the wrapper binds only to localhost, never kills an arbitrary port owner, and
@@ -241,6 +254,14 @@ and the current immutable Terminal-Bench 2.1 registry snapshot instead of
 guessing undisclosed inputs. The wrapper defaults to one attempt per task;
 operators can forward `--n-attempts 5` to Harbor when they want the disclosed
 five-run shape.
+
+The MXFP4 profile is a capacity experiment, not a published-score
+reproduction. Its approximately 226 GB checkpoint is a community conversion,
+and neither its quantization nor its vLLM settings are directly comparable
+with the publisher's BF16 result. CPU offload stays disabled by default; an
+operator may request `--cpu-offload-gb 2` as a modified fallback. The
+experimental label remains until the pinned image and checkpoint pass startup
+and the exact smoke response on a real eight-RTX-5090 host.
 
 The default Ornith BF16 model does not fit on one 32 GB R9700S. The documented
 AMD default uses at least four cards; one-card runs require a smaller or

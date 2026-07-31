@@ -367,8 +367,13 @@
     },
     {
       "category": "architecture",
-      "content": "test/vllm-benchmark-test.sh defaults to --backend auto. Auto selects NVIDIA only when nvidia-smi reports GPU indices, selects AMD only when rocminfo reports gfx agents and /dev/kfd plus /dev/dri exist, rejects mixed-vendor hosts, and fails clearly when neither backend is usable. Profiles remain backend-independent, and metadata records the resolved nvidia or amd backend. Explicit backend dry-runs remain hardware-free; default auto dry-runs perform read-only vendor detection.",
+      "content": "test/vllm-benchmark-test.sh defaults to --backend auto. Auto selects NVIDIA only when nvidia-smi reports GPU indices, selects AMD only when rocminfo reports gfx agents and /dev/kfd plus /dev/dri exist, rejects mixed-vendor hosts, and fails clearly when neither backend is usable. The practical and published profiles remain backend-independent; hardware-specific profiles may impose an explicit backend constraint. Metadata records the resolved nvidia or amd backend. Explicit backend dry-runs remain hardware-free; default auto dry-runs perform read-only vendor detection.",
       "timestamp": "2026-07-30T09:46:17Z"
+    },
+    {
+      "category": "architecture",
+      "content": "test/vllm-benchmark-test.sh provides an experimental NVIDIA-only ornith-397b-mxfp4-128k profile pinned to community model olka-fi/Ornith-1.0-397B-MXFP4 revision 04940815e4ddf15e2b7cc4710e81e3cecc25540b. The canonical eight-GPU configuration retains 128K context through TP8/DCP4, FP8 KV cache with calculated scales, 0.95 GPU memory utilization, one vLLM sequence, eager and language-model-only execution, Harbor concurrency one, and no CPU offload. Hardware runs require at least 256000 MiB aggregate selected VRAM and 300 GB Docker-root free space before downloads. This community quantization is not comparable with the publisher's BF16 result and remains experimental pending a real eight-RTX-5090 smoke run.",
+      "timestamp": "2026-07-31T00:00:00Z"
     }
   ],
   "directives": [
