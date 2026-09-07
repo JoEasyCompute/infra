@@ -22,6 +22,7 @@ LOG_DIR="${PROVISION_DIR}/logs"
 LOG_FILE="${LOG_DIR}/provision.log"
 JSONL_FILE="${LOG_DIR}/provision.jsonl"
 STATE_FILE="${STATE_DIR}/provision.state"
+CONFIG_FILE="${STATE_DIR}/provision.config"
 LOG_MAX_RUNS=5
 
 SCRIPT_BASE_INSTALL="${PROVISION_DIR}/amd-base-install.sh"
@@ -92,28 +93,95 @@ EOF
     exit 0
 }
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --non-interactive) NON_INTERACTIVE=true ;;
-        --with-compose)    WITH_COMPOSE=true ;;
-        --vg)              FORCE_VG="$2"; shift ;;
-        --disk)            FORCE_DISK="$2"; shift ;;
-        --runpod-storage-layout) RUNPOD_STORAGE_LAYOUT=true ;;
-        --freeze-gpu-stack) FREEZE_GPU_STACK=true ;;
-        --unfreeze-gpu-stack) UNFREEZE_GPU_STACK=true ;;
-        --reset-state)     RESET_STATE=true ;;
-        --resume)          RESUME=true ;;
-        --status)          SHOW_STATUS=true ;;
-        -h|--help) usage ;;
-        *) echo -e "${RED}[ERROR]${RESET} Unknown argument: $1" >&2; usage ;;
-    esac
-    shift
-done
+# Saved configuration is data only: never source or evaluate it as shell code.
+CONFIG_KEYS=(NON_INTERACTIVE WITH_COMPOSE FORCE_VG FORCE_DISK FREEZE_GPU_STACK UNFREEZE_GPU_STACK RUNPOD_STORAGE_LAYOUT)
 
-if [[ "$FREEZE_GPU_STACK" == true ]] && [[ "$UNFREEZE_GPU_STACK" == true ]]; then
-    echo -e "${RED}[ERROR]${RESET} --freeze-gpu-stack and --unfreeze-gpu-stack are mutually exclusive" >&2
-    exit 1
-fi
+validate_config_value() {
+    local key="$1" value="$2"
+    case "$key" in
+        NON_INTERACTIVE|WITH_COMPOSE|FREEZE_GPU_STACK|UNFREEZE_GPU_STACK|RUNPOD_STORAGE_LAYOUT)
+            [[ "$value" == true || "$value" == false ]] ;;
+        FORCE_VG)
+            [[ -z "$value" || ( "$value" =~ ^[a-zA-Z0-9+_.][a-zA-Z0-9+_.-]*$ && "$value" != . && "$value" != .. ) ]] ;;
+        FORCE_DISK)
+            [[ -z "$value" || "$value" =~ ^/dev/[a-zA-Z0-9_./+-]+$ ]] ;;
+        *) return 1 ;;
+    esac
+}
+
+load_config() {
+    local key value seen=" " count=0
+    if [[ ! -e "$CONFIG_FILE" && ! -L "$CONFIG_FILE" ]]; then
+        if [[ "$RESUME" == true || -f "$STATE_FILE" ]]; then
+            warn "No saved provisioning config; using defaults and current flags. Re-supply original storage/stack options for legacy runs."
+        fi
+        return 0
+    fi
+    if [[ -L "$CONFIG_FILE" || ! -f "$CONFIG_FILE" || "$(stat -c '%u:%a' "$CONFIG_FILE")" != 0:600 ]]; then
+        error "Saved config must be a root-owned regular file with mode 600: ${CONFIG_FILE}"
+        exit 1
+    fi
+    while IFS='=' read -r key value || [[ -n "$key$value" ]]; do
+        if [[ "$seen" == *" $key "* ]] || ! validate_config_value "$key" "$value"; then
+            error "Invalid or duplicate saved config key/value: ${key}"
+            exit 1
+        fi
+        printf -v "$key" '%s' "$value"
+        seen+="$key "
+        count=$((count + 1))
+    done < "$CONFIG_FILE"
+    if (( count != ${#CONFIG_KEYS[@]} )); then
+        error "Incomplete saved provisioning config: ${CONFIG_FILE}"
+        exit 1
+    fi
+    if [[ "$FREEZE_GPU_STACK" == true && "$UNFREEZE_GPU_STACK" == true ]]; then
+        error "Saved config has conflicting freeze/unfreeze options"
+        exit 1
+    fi
+}
+
+save_config() {
+    local key temporary
+    temporary=$(mktemp "${CONFIG_FILE}.XXXXXX")
+    chmod 600 "$temporary"
+    for key in "${CONFIG_KEYS[@]}"; do
+        printf '%s=%s\n' "$key" "${!key}" >> "$temporary"
+    done
+    mv -f "$temporary" "$CONFIG_FILE"
+}
+
+parse_args() {
+    local freeze_arg=false unfreeze_arg=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --non-interactive) NON_INTERACTIVE=true ;;
+            --with-compose)    WITH_COMPOSE=true ;;
+            --vg)
+                [[ $# -ge 2 ]] && validate_config_value FORCE_VG "$2" && [[ -n "$2" ]] || { echo "Invalid or missing --vg value" >&2; exit 1; }
+                FORCE_VG="$2"; shift ;;
+            --disk)
+                [[ $# -ge 2 ]] && validate_config_value FORCE_DISK "$2" && [[ -n "$2" ]] || { echo "Invalid or missing --disk value" >&2; exit 1; }
+                FORCE_DISK="$2"; shift ;;
+            --runpod-storage-layout) RUNPOD_STORAGE_LAYOUT=true ;;
+            --freeze-gpu-stack) FREEZE_GPU_STACK=true; UNFREEZE_GPU_STACK=false; freeze_arg=true ;;
+            --unfreeze-gpu-stack) UNFREEZE_GPU_STACK=true; FREEZE_GPU_STACK=false; unfreeze_arg=true ;;
+            --reset-state)     RESET_STATE=true ;;
+            --resume)          RESUME=true ;;
+            --status)          SHOW_STATUS=true ;;
+            -h|--help) usage ;;
+            *) echo -e "${RED}[ERROR]${RESET} Unknown argument: $1" >&2; usage ;;
+        esac
+        shift
+    done
+
+    if [[ "$freeze_arg" == true && "$unfreeze_arg" == true ]]; then
+        echo -e "${RED}[ERROR]${RESET} --freeze-gpu-stack and --unfreeze-gpu-stack are mutually exclusive" >&2
+        exit 1
+    fi
+}
+
+ORIGINAL_ARGS=("$@")
+parse_args "${ORIGINAL_ARGS[@]}"
 
 confirm() {
     local prompt="${1:-Continue?}"
@@ -133,6 +201,13 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 mkdir -p "${LOG_DIR}" "${STATE_DIR}"
+if [[ "$SHOW_STATUS" == false ]]; then
+    if [[ -L "$STATE_DIR" || "$(stat -c '%u:%a' "$STATE_DIR")" != 0:* ]]; then
+        echo "State directory must be root-owned and not a symlink: ${STATE_DIR}" >&2
+        exit 1
+    fi
+    chmod 700 "$STATE_DIR"
+fi
 
 _rotate_log() {
     local logfile="$1" max_runs="$2"
@@ -175,7 +250,8 @@ state_set() {
 
 stage_done() { [[ "$(state_get "$1")" == "complete" ]]; }
 
-if [[ "$RESET_STATE" == true ]]; then
+if [[ "$RESET_STATE" == true && "$SHOW_STATUS" == false ]]; then
+    rm -f "$CONFIG_FILE"
     rm -f "$STATE_FILE" "${STATE_DIR}/docker-install.state" "${STATE_DIR}/.provision_complete"
     if [[ -f "${RESUME_SERVICE_FILE}" ]]; then
         systemctl enable "${RESUME_SERVICE}.service" 2>/dev/null || true
@@ -216,6 +292,11 @@ if [[ "$SHOW_STATUS" == true ]]; then
     exit 0
 fi
 
+# Restore saved choices for automatic and manual continuations; explicit flags win.
+# Reset has removed the old config, leaving defaults plus this invocation's flags.
+load_config
+parse_args "${ORIGINAL_ARGS[@]}"
+
 header "Preflight checks"
 CURRENT_STAGE="PREFLIGHT"
 
@@ -223,10 +304,10 @@ missing=0
 for script in "$SCRIPT_BASE_INSTALL" "$SCRIPT_DOCKER_INSTALL"; do
     if [[ ! -f "$script" ]]; then
         error "Script not found: $script"
-        (( missing++ ))
+        missing=$((missing + 1))
     elif [[ ! -x "$script" ]]; then
         error "Script not executable: $script (run: chmod +x $script)"
-        (( missing++ ))
+        missing=$((missing + 1))
     else
         success "Found: $script"
     fi
@@ -264,6 +345,8 @@ mark_provision_complete() {
     systemctl daemon-reload
     success "Provisioning complete — resume service disabled"
 }
+
+save_config
 
 if [[ "$RESUME" == false ]] && [[ ! -f "${RESUME_SERVICE_FILE}" ]]; then
     install_resume_service
@@ -317,6 +400,7 @@ do_reboot() {
     info "Rebooting in 5 seconds..."
     sleep 5
     reboot
+    exit 0
 }
 
 validate_amd_stack() {

@@ -52,7 +52,7 @@ The script currently has explicit prepare steps for selected tests such as:
 
 - NCCL libraries and `nccl-tests`
 - CUDA sample binaries
-- the `test/code.sh` wrapper, which compiles and runs `test/code.cu`
+- the executable `test/code.sh` wrapper and readable `test/code.cu` source beside the suite; the wrapper rejects a missing source before CUDA setup
 - `nvbandwidth`
 - PyTorch runtime
 - `cuda_memtest`

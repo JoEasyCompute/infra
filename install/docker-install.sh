@@ -113,10 +113,10 @@ usage() {
 Usage: sudo $0 [OPTIONS]
 
 Options:
-  --non-interactive     No prompts; auto-select largest free disk, then largest
-                        free VG, then fall back to root partition
-  --disk /dev/sdX       Force use of a specific disk
-  --vg <vgname>         Force use of a specific LVM VG
+  --non-interactive     No prompts; auto-select the largest eligible blank disk,
+                        then largest free VG, then fall back to a root image
+  --disk /dev/sdX       Use only this blank, unused whole disk (exclusive with --vg)
+  --vg <vgname>         Use only this VG with free space (exclusive with --disk)
   --with-compose        Also install Docker Compose v2 (latest stable)
   --uninstall           Remove Docker, NVIDIA toolkit, Compose and undo mounts
   --reset-state         Clear phase state file and re-run all phases from scratch
@@ -144,8 +144,14 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --non-interactive)    NON_INTERACTIVE=true ;;
-        --disk)               FORCE_DISK="$2"; shift ;;
-        --vg)                 FORCE_VG="$2";   shift ;;
+        --disk|--vg)
+            if [[ $# -lt 2 || -z "$2" || "$2" == --* ]]; then
+                echo "[ERROR] $1 requires a value" >&2
+                exit 1
+            fi
+            if [[ "$1" == --disk ]]; then FORCE_DISK="$2"; else FORCE_VG="$2"; fi
+            shift
+            ;;
         --with-compose)       WITH_COMPOSE=true ;;
         --uninstall)          UNINSTALL=true ;;
         --reset-state)        RESET_STATE=true ;;
@@ -158,6 +164,11 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+if [[ -n "$FORCE_DISK" && -n "$FORCE_VG" ]]; then
+    echo "[ERROR] --disk and --vg are mutually exclusive" >&2
+    exit 1
+fi
 
 if [[ "$RUNPOD_STORAGE_LAYOUT" == true ]]; then
     CONTAINER_RUNTIME_MOUNT="${DOCKER_MOUNTPOINT}"
@@ -424,7 +435,7 @@ fi
 UBUNTU_CODENAME=$(lsb_release -cs 2>/dev/null || echo "unknown")
 success "OS: Ubuntu ${UBUNTU_CODENAME}"
 
-for cmd in curl gpg lsblk df awk sed python3; do
+for cmd in curl gpg lsblk blkid wipefs findmnt df awk sed python3; do
     if ! command -v "$cmd" &>/dev/null; then
         error "Required tool not found: $cmd"
         exit 1
@@ -449,6 +460,28 @@ free_gb_on_mount() {
 lvm_gib_to_int() {
     # vgs --units g returns values like "3626.98g" — strip the unit and floor to int
     echo "$1" | awk '{gsub(/[gG]/,""); printf "%d", $1}'
+}
+
+# Accept only positively inspected, unused whole disks. lsblk's dependency
+# tree includes both partitions and holders (for example RAID/LVM/crypt devices).
+# Probe signatures directly, bypassing blkid's cache, and fail closed on errors.
+disk_is_unused() {
+    local disk="$1" disk_type topology mounts signatures probe_status
+    test -b "$disk" || return 1
+    disk_type=$(lsblk -dnro TYPE -- "$disk") || return 1
+    [[ "$disk_type" == disk ]] || return 1
+    topology=$(lsblk -nro NAME -- "$disk") || return 1
+    [[ -n "$topology" && "$topology" != *$'\n'* ]] || return 1
+    mounts=$(lsblk -nro MOUNTPOINT -- "$disk") || return 1
+    [[ -z "$mounts" ]] || return 1
+    signatures=$(wipefs --no-act --noheadings --output TYPE -- "$disk") || return 1
+    [[ -z "$signatures" ]] || return 1
+    if signatures=$(blkid -p -- "$disk"); then
+        return 1
+    else
+        probe_status=$?
+    fi
+    [[ "$probe_status" -eq 2 && -z "$signatures" ]]
 }
 
 # GPG fingerprint verification helper
@@ -510,44 +543,74 @@ phase_disk_setup() {
         apt-get install -y xfsprogs
     fi
 
-    # Detect free disks
-    local free_disks=()
-    info "Scanning for free disks..."
-    while IFS= read -r disk; do
-        local children
-        children=$(lsblk -no NAME "/dev/${disk}" 2>/dev/null | tail -n +2 | wc -l)
-        if [[ "$children" -eq 0 ]]; then
-            local size size_gb
-            size=$(lsblk -bdno SIZE "/dev/${disk}" 2>/dev/null || echo 0)
-            size_gb=$(( size / 1024 / 1024 / 1024 ))
-            free_disks+=("/dev/${disk}:${size_gb}GB")
-            info "  Free disk: /dev/${disk} (${size_gb} GB)"
-        fi
-    done < <(lsblk -dno NAME,TYPE | awk '$2=="disk"{print $1}')
-
-    # Detect free LVM VGs
-    local free_vgs=()
-    if command -v vgs &>/dev/null; then
-        info "Scanning LVM VGs for free space..."
-        # Use vgs --units g for clean numeric GiB output — avoids PE-count ambiguity
-        # from vgdisplay which returns PE count in $5 not GiB
-        while IFS= read -r line; do
-            local vg_name free_str free_gb
-            vg_name=$(echo "$line" | awk '{print $1}')
-            free_str=$(echo "$line" | awk '{print $2}')
-            free_gb=$(lvm_gib_to_int "$free_str")
-            if (( free_gb > 0 )); then
-                free_vgs+=("${vg_name}:${free_gb}GB")
-                info "  VG '${vg_name}': ~${free_gb} GB free"
-            fi
-        done < <(vgs --noheadings --units g -o vg_name,vg_free 2>/dev/null | awk '{print $1, $2}')
-    fi
-
     local setup_method="none"
     local selected_disk="" selected_vg=""
+    local free_disks=() free_vgs=()
+
+    # Explicit choices are validated before discovery and never fall back.
+    if [[ -n "$FORCE_DISK" && -n "$FORCE_VG" ]]; then
+        error "--disk and --vg are mutually exclusive"
+        return 1
+    fi
+    if [[ -n "$FORCE_DISK" ]]; then
+        if ! disk_is_unused "$FORCE_DISK"; then
+            error "Refusing --disk ${FORCE_DISK}: not a verified blank, unused whole disk"
+            return 1
+        fi
+        selected_disk="$FORCE_DISK"
+        setup_method="disk"
+    elif [[ -n "$FORCE_VG" ]]; then
+        local vg_free
+        if ! vg_free=$(vgs --noheadings --units g --nosuffix -o vg_free -- "$FORCE_VG"); then
+            error "Cannot inspect requested VG ${FORCE_VG}"
+            return 1
+        fi
+        if ! awk 'NF { if (NF != 1 || $1 !~ /^[0-9]+([.][0-9]+)?$/ || $1 < 1) exit 1; rows++ } END { if (rows != 1) exit 1 }' <<< "$vg_free"; then
+            error "Requested VG ${FORCE_VG} has no usable free space or invalid inspection output"
+            return 1
+        fi
+        selected_vg="$FORCE_VG"
+        setup_method="lvm"
+    else
+        local disk_listing disk size size_gb
+        info "Scanning for blank, unused whole disks..."
+        if ! disk_listing=$(lsblk -dno NAME,TYPE); then
+            error "Cannot inspect block devices; refusing automatic storage selection"
+            return 1
+        fi
+        while IFS= read -r disk; do
+            [[ -n "$disk" ]] || continue
+            if disk_is_unused "/dev/${disk}"; then
+                size=$(lsblk -bdno SIZE "/dev/${disk}") || continue
+                [[ "$size" =~ ^[0-9]+$ ]] || continue
+                size_gb=$(( size / 1024 / 1024 / 1024 ))
+                (( size_gb > 0 )) || continue
+                free_disks+=("/dev/${disk}:${size_gb}GB")
+                info "  Blank disk: /dev/${disk} (${size_gb} GB)"
+            fi
+        done < <(awk '$2=="disk"{print $1}' <<< "$disk_listing")
+
+        if command -v vgs &>/dev/null; then
+            local vg_listing line vg_name free_str free_gb
+            info "Scanning LVM VGs for free space..."
+            if ! vg_listing=$(vgs --noheadings --units g -o vg_name,vg_free); then
+                error "Cannot inspect LVM free space; refusing automatic storage selection"
+                return 1
+            fi
+            while read -r vg_name free_str; do
+                [[ -n "$vg_name" ]] || continue
+                [[ "$free_str" =~ ^[0-9]+([.][0-9]+)?[gG]?$ ]] || continue
+                free_gb=$(lvm_gib_to_int "$free_str")
+                if (( free_gb > 0 )); then
+                    free_vgs+=("${vg_name}:${free_gb}GB")
+                    info "  VG '${vg_name}': ~${free_gb} GB free"
+                fi
+            done <<< "$vg_listing"
+        fi
+    fi
 
     # --- Disk selection ---
-    if [[ ${#free_disks[@]} -gt 0 ]]; then
+    if [[ "$setup_method" == "none" && ${#free_disks[@]} -gt 0 ]]; then
         if [[ "$NON_INTERACTIVE" == true ]] || [[ -n "$FORCE_DISK" ]]; then
             if [[ -n "$FORCE_DISK" ]]; then
                 selected_disk="$FORCE_DISK"
@@ -648,15 +711,13 @@ phase_disk_setup() {
     # --- Format and mount the shared XFS volume ---
     local device
     if [[ "$setup_method" == "disk" ]]; then
-        local existing
-        existing=$(lsblk -no NAME "${selected_disk}" | tail -n +2 | wc -l)
-        if (( existing > 0 )); then
-            warn "${selected_disk} has existing partitions:"
-            lsblk "${selected_disk}"
-            confirm "Wipe and reformat ${selected_disk}? ALL DATA LOST." || exit 1
+        # Recheck immediately before formatting in case device state changed.
+        if ! disk_is_unused "$selected_disk"; then
+            error "Refusing to format ${selected_disk}: disk is in use, has signatures, or inspection failed"
+            return 1
         fi
         info "Formatting ${selected_disk} as XFS (reflink=1, ftype=1)..."
-        mkfs.xfs -f \
+        mkfs.xfs \
             -L container_rt \
             -m reflink=1 \
             -i maxpct=25 \
@@ -667,14 +728,14 @@ phase_disk_setup() {
         local lv_name="container_rt"
         local lv_path="/dev/${selected_vg}/${lv_name}"
         if lvdisplay "${lv_path}" &>/dev/null; then
-            warn "LV ${lv_path} already exists"
-            confirm "Use existing LV (will reformat as XFS)?" || exit 1
+            error "LV ${lv_path} already exists; refusing to reformat. Inspect and recover its existing filesystem manually."
+            return 1
         else
             info "Creating LV using ${LVM_USE_PCT}% of free space in ${selected_vg}..."
-            lvcreate -l "${LVM_USE_PCT}%FREE" -n "${lv_name}" "${selected_vg}"
+            lvcreate -l "${LVM_USE_PCT}%FREE" -n "${lv_name}" "${selected_vg}" || return 1
         fi
         info "Formatting ${lv_path} as XFS (reflink=1, ftype=1)..."
-        mkfs.xfs -f \
+        mkfs.xfs \
             -L container_rt \
             -m reflink=1 \
             -i maxpct=25 \

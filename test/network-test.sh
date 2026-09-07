@@ -600,11 +600,17 @@ run_mtu_probe() {
 run_bandwidth() {
     local target="$1"
     local duration="$2"
+    local failed=0
 
     log STAGE "BANDWIDTH"
 
     if ! command_exists iperf3; then
         log ERROR "iperf3 not available"
+        return 1
+    fi
+
+    if ! command_exists jq; then
+        log ERROR "jq not available; cannot validate bandwidth results"
         return 1
     fi
 
@@ -615,18 +621,22 @@ run_bandwidth() {
 
     if [[ $? -eq 0 ]]; then
         local bps
-        bps=$(echo "$result" | jq -r '.end.sum_sent.bits_per_second // .end.sum_received.bits_per_second // 0' 2>/dev/null)
-
-        if [[ -n "$bps" && "$bps" != "0" && "$bps" != "null" ]]; then
+        if bps=$(echo "$result" | jq -er '
+            .end.sum_sent.bits_per_second // .end.sum_received.bits_per_second
+            | select(type == "number" and . > 0 and isfinite)' 2>/dev/null); then
             local gbps
-            gbps=$(echo "scale=2; $bps / 1000000000" | bc)
+            gbps=$(awk -v bps="$bps" 'BEGIN {printf "%.2f", bps / 1000000000}')
             log PASS "Single stream: ${gbps} Gbps"
             log_json "bandwidth_single" "target" "$target" "gbps" "$gbps" "duration_s" "$duration"
         else
-            log WARN "Could not parse bandwidth result"
+            log FAIL "Single stream result has no valid positive throughput"
+            log_json "bandwidth_single" "target" "$target" "status" "failed" "reason" "invalid_throughput"
+            failed=1
         fi
     else
         log FAIL "iperf3 single stream test failed"
+        log_json "bandwidth_single" "target" "$target" "status" "failed" "reason" "iperf3_failed"
+        failed=1
         echo "$result" | head -5 | tee -a "${LOG_FILE}"
     fi
 
@@ -636,16 +646,22 @@ run_bandwidth() {
 
     if [[ $? -eq 0 ]]; then
         local bps
-        bps=$(echo "$result" | jq -r '.end.sum_sent.bits_per_second // .end.sum_received.bits_per_second // 0' 2>/dev/null)
-
-        if [[ -n "$bps" && "$bps" != "0" && "$bps" != "null" ]]; then
+        if bps=$(echo "$result" | jq -er '
+            .end.sum_sent.bits_per_second // .end.sum_received.bits_per_second
+            | select(type == "number" and . > 0 and isfinite)' 2>/dev/null); then
             local gbps
-            gbps=$(echo "scale=2; $bps / 1000000000" | bc)
+            gbps=$(awk -v bps="$bps" 'BEGIN {printf "%.2f", bps / 1000000000}')
             log PASS "4-stream: ${gbps} Gbps"
             log_json "bandwidth_4stream" "target" "$target" "gbps" "$gbps" "duration_s" "$duration"
+        else
+            log FAIL "4-stream result has no valid positive throughput"
+            log_json "bandwidth_4stream" "target" "$target" "status" "failed" "reason" "invalid_throughput"
+            failed=1
         fi
     else
         log FAIL "iperf3 multi-stream test failed"
+        log_json "bandwidth_4stream" "target" "$target" "status" "failed" "reason" "iperf3_failed"
+        failed=1
     fi
 
     # Bidirectional test
@@ -667,6 +683,9 @@ run_bandwidth() {
     else
         log WARN "Bidirectional test failed (may not be supported by server version)"
     fi
+
+    # Bidirectional testing is optional for compatibility with older servers.
+    return "$failed"
 }
 
 #-------------------------------------------------------------------------------
@@ -703,7 +722,9 @@ run_stress() {
     else
         log FAIL "Stress test failed"
         log_json "stress_test" "target" "$target" "duration_s" "$duration" "status" "failed"
+        return 1
     fi
+    return 0
 }
 
 #-------------------------------------------------------------------------------
@@ -731,6 +752,7 @@ run_server() {
 #-------------------------------------------------------------------------------
 run_client() {
     local target="$1"
+    local failed=0
 
     header "NETWORK TEST - CLIENT MODE"
 
@@ -740,19 +762,25 @@ run_client() {
     log_json "test_start" "mode" "client" "target" "$target" "port" "$PORT" "duration" "$DURATION" "stress" "$STRESS_MODE"
 
     # Install dependencies
-    install_iperf3 || exit 1
+    if ! install_iperf3; then
+        log_json "test_complete" "status" "failed" "reason" "iperf3_unavailable"
+        return 1
+    fi
     install_hping3
 
     # Run test stages
     run_discovery
     run_interface_health
-    run_connectivity "$target" || exit 1
+    if ! run_connectivity "$target"; then
+        log_json "test_complete" "status" "failed" "reason" "connectivity_failed"
+        return 1
+    fi
     run_latency "$target"
     run_mtu_probe "$target"
-    run_bandwidth "$target" "$DURATION"
+    run_bandwidth "$target" "$DURATION" || failed=1
 
     if [[ "$STRESS_MODE" == true ]]; then
-        run_stress "$target"
+        run_stress "$target" || failed=1
     fi
 
     # Final interface error check
@@ -762,10 +790,16 @@ run_client() {
     report_interface_errors "$INTERFACE"
 
     echo "" | tee -a "${LOG_FILE}"
-    log INFO "Test completed"
+    if [[ "$failed" -eq 0 ]]; then
+        log INFO "Test completed successfully"
+        log_json "test_complete" "status" "success"
+    else
+        log FAIL "Test completed with required test failures"
+        log_json "test_complete" "status" "failed"
+    fi
     log INFO "Human log: ${LOG_FILE}"
     log INFO "JSONL log: ${JSONL_FILE}"
-    log_json "test_complete" "status" "success"
+    return "$failed"
 }
 
 #-------------------------------------------------------------------------------

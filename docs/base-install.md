@@ -1,5 +1,7 @@
 # base-install.sh
 
+
+For the complete staged workflow, deployment bundle, saved options, and reboot recovery, see [provision.md](provision.md).
 GPU node base installation script for vast.ai and production deployments.
 Installs the full NVIDIA/CUDA stack on a fresh Ubuntu node by default, with an
 optional `--no-gpu-stack` mode that skips the NVIDIA driver, CUDA toolkit,

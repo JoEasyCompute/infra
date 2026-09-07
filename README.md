@@ -98,9 +98,12 @@ Shared runtime location used by the orchestrator:
 ├── base-install.sh
 ├── docker-install.sh
 ├── fulltest.sh
+├── code.sh
+├── code.cu
 ├── provision.sh
 ├── state/
 │   ├── provision.state
+│   ├── provision.config
 │   ├── docker-install.state
 │   └── .provision_complete
 └── logs/
@@ -169,6 +172,7 @@ Shared runtime location used by the AMD orchestrator:
 ├── provision-amd.sh
 ├── state/
 │   ├── provision.state
+│   ├── provision.config
 │   ├── docker-install.state
 │   └── .provision_complete
 └── logs/
@@ -225,14 +229,16 @@ The GPU test scripts accept repeated `-test` / `--exclude <test>` flags, so you 
 
 ```bash
 sudo mkdir -p /opt/provision
-sudo cp install/base-install.sh install/docker-install.sh install/provision.sh install/nvidia-stack-hold.sh test/fulltest.sh test/code.sh /opt/provision/
+sudo cp install/base-install.sh install/docker-install.sh install/provision.sh install/nvidia-stack-hold.sh test/fulltest.sh test/code.sh test/code.cu /opt/provision/
 sudo chmod +x /opt/provision/*.sh
 
 sudo /opt/provision/provision.sh --non-interactive --with-compose
 sudo /opt/provision/provision.sh --status
 ```
 
-Use this when you want the provisioning flow to resume automatically across reboots.
+Use this when you want the provisioning flow to resume automatically across reboots. Both provisioners save selected options in `state/provision.config`, so storage selection, Compose, and RunPod layout survive a reboot. See [docs/provision.md](docs/provision.md) for resume, overrides, and reset behavior.
+
+NVIDIA deployment requires `code.sh` and its source `code.cu` beside `fulltest.sh`; provisioning checks the complete bundle before installing drivers.
 On Ubuntu 26.04, `base-install.sh` automatically uses the `ubuntu2604` CUDA repo codename.
 Stage 1 also applies the managed GPU fallback policy in `/etc/systemd/system.conf` and `/etc/sysctl.d/99-gpu-fallback.conf`.
 That policy shortens systemd stop/abort timeouts and makes kernel oops or hung-task conditions trigger panic/reboot recovery, so it is best suited to unattended compute nodes rather than live-debug hosts.
@@ -243,7 +249,7 @@ The orchestrator also passes through `--freeze-gpu-stack` and `--unfreeze-gpu-st
 
 ```bash
 sudo mkdir -p /opt/provision
-sudo cp install/base-install.sh install/docker-install.sh install/provision.sh install/nvidia-stack-hold.sh test/fulltest.sh test/code.sh /opt/provision/
+sudo cp install/base-install.sh install/docker-install.sh install/provision.sh install/nvidia-stack-hold.sh test/fulltest.sh test/code.sh test/code.cu /opt/provision/
 sudo chmod +x /opt/provision/*.sh
 
 sudo /opt/provision/provision.sh --with-compose
@@ -336,9 +342,9 @@ Use `amd-stack-pin.sh --status` to inspect the active pin and `amd-stack-pin.sh 
 
 Current top-level behavior:
 
-- validates that `base-install.sh`, `docker-install.sh`, and `fulltest.sh` exist under `/opt/provision`
+- validates executable `base-install.sh`, `docker-install.sh`, `fulltest.sh`, and `code.sh`, plus readable `code.cu`, under `/opt/provision`
 - installs a one-shot `provision-resume.service`
-- tracks stage state in `/opt/provision/state/provision.state`
+- tracks stage state in `/opt/provision/state/provision.state` and saves selected options in `/opt/provision/state/provision.config`
 - supports:
   - `--non-interactive`
   - `--with-compose`
@@ -396,7 +402,7 @@ Current top-level behavior:
 
 - validates that `amd-base-install.sh` and `docker-install.sh` exist under `/opt/provision-amd`
 - installs a one-shot `provision-amd-resume.service`
-- tracks stage state in `/opt/provision-amd/state/provision.state`
+- tracks stage state in `/opt/provision-amd/state/provision.state` and saves selected options in `/opt/provision-amd/state/provision.config`
 - supports:
   - `--non-interactive`
   - `--with-compose`
@@ -576,10 +582,31 @@ When using the orchestrated `/opt/provision-amd` flow, expect:
 - orchestrator logs under `/opt/provision-amd/logs/`
 - stage state under `/opt/provision-amd/state/`
 
+## Safe Development Checks
+
+Run these checks from the repository root before deploying changes:
+
+```bash
+bash test/docker-storage-safety-test.sh
+bash test/docker-storage-convert-test.sh
+bash test/provision-resume-test.sh
+bash test/network-result-test.sh
+bash test/code-wrapper-test.sh
+bash test/docker-storage-layout-static.sh
+bash test/docker-storage-layout-convert-static.sh
+bash test/fulltest-python-runtime-test.sh
+bash test/fulltest-hardware-health-test.sh
+bash test/vllm-benchmark-static-test.sh
+python3 test/network-batch.sh --help
+```
+
+These regression suites use temporary fixtures and mocked host commands. They do not replace Ubuntu installation, reboot, storage-mount, or GPU acceptance checks on a suitable host.
+
 ## Detailed Documentation
 
 Script reference guides now live under [docs/](docs):
 
+- [docs/provision.md](docs/provision.md)
 - [docs/base-install.md](docs/base-install.md)
 - [docs/docker-install.md](docs/docker-install.md)
 - [docs/fulltest.md](docs/fulltest.md)
@@ -624,4 +651,3 @@ Documentation work that would still add value:
 - add a short troubleshooting section for common provisioning failures
 - add a dedicated docs page for `gpucheck/` inventory scripts
 - add a docs page for `monitor/` usage and deployment
-- add a dedicated detailed doc for `install/provision-amd.sh`

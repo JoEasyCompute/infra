@@ -39,11 +39,13 @@ Supports: RTX 4090 / RTX 5090, A4000, A100, H100 on Ubuntu 22.04 / 24.04.
 ## Installation
 
 ```bash
-chmod +x test/fulltest.sh
+chmod +x test/fulltest.sh test/code.sh
 
 # First run — clones repos and builds binaries into ./build/
 ./test/fulltest.sh
 ```
+
+Deploy `fulltest.sh`, executable `code.sh`, and readable `code.cu` together in the same directory. For the orchestrated bundle and reboot behavior, see [provision.md](provision.md). The provisioner rejects an incomplete bundle before stage 1; the standalone CUDA wrapper also rejects a missing source even if an older binary exists in `build/`.
 
 All cloned repos and compiled binaries are placed under `./build/` next to the script. Nothing is written to system directories except NCCL and apt packages.
 

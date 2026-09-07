@@ -1,5 +1,7 @@
 # amd-base-install.sh — AMD GPU Node Installation Guide
 
+
+For the complete staged workflow, deployment bundle, saved options, and reboot recovery, see [provision.md](provision.md).
 **Version:** 2.0 (2026-03-15)  
 **Supported GPUs:** Any ROCm-compatible AMD GPU  
 **Supported OS:** Ubuntu 22.04 LTS, Ubuntu 24.04 LTS, Ubuntu 26.04 LTS preview lane (x86_64)

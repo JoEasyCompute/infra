@@ -269,7 +269,15 @@ Key events:
 | `bandwidth_4stream` | target, gbps, duration_s |
 | `bandwidth_bidir` | target, send_gbps, recv_gbps, duration_s |
 | `interface_error_delta` | interface, counter, before, after, delta |
-| `test_complete` | status |
+| `test_complete` | status (`success` or `failed`) |
+
+## Exit Status and Completion
+
+In client mode, both single-stream and four-stream bandwidth tests must complete and report valid positive throughput. A failed command, malformed result, or zero throughput fails the client. Requested `--stress` failures also fail the client. Failed required checks return a nonzero exit status and emit `test_complete` with `status: "failed"`; a successful client returns zero and emits `status: "success"`.
+
+Bidirectional testing remains optional: its failures are warnings, including servers without `--bidir` support. Diagnostic latency, MTU, and interface remarks do not impose a link-speed acceptance threshold. Apply your fleet's throughput threshold separately after checking the exit status and completion result. Local-only mode remains a diagnostic report.
+
+The hardware-free regression suite is `bash test/network-result-test.sh` from the repository root.
 
 ## Interpreting Results
 
@@ -342,7 +350,7 @@ done
 
 ### Automated Validation
 
-Parse JSONL for automated pass/fail:
+Check the client exit status and the latest run’s `test_complete` status before evaluating bandwidth thresholds. A numeric bandwidth event from an earlier or partially failed run is not a pass. For a successfully completed run:
 
 ```bash
 # Check if bandwidth met threshold (e.g., 9 Gbps for 10G link)
