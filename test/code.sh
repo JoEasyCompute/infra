@@ -99,6 +99,12 @@ fi
 seconds="${1:-30}"
 device_id="${2:-0}"
 
+if [[ ! -f "$SRC" || ! -r "$SRC" ]]; then
+    echo "ERROR: CUDA source file not found or not readable: $SRC" >&2
+    echo "Deploy code.cu alongside code.sh before running this test." >&2
+    exit 1
+fi
+
 mkdir -p "${BUILD_DIR}"
 
 nvcc_path="$(find_nvcc)" || {

@@ -2,10 +2,10 @@
 
 ## Overview
 
-`docker-install.sh` is a production-grade installer for Docker CE and the NVIDIA Container Toolkit on Ubuntu systems. It is designed to be safe to run on fresh nodes, partially provisioned nodes, and nodes being reprovisioned — handling all of the following automatically:
+`docker-install.sh` is an installer for Docker CE and the NVIDIA Container Toolkit on Ubuntu systems. It is designed to be safe to run on fresh nodes, partially provisioned nodes, and nodes being reprovisioned — handling all of the following automatically:
 
 - Provisioning a shared XFS volume (with reflink and project quota support) for both Docker and containerd
-- Migrating any existing data before mounting, so re-provisioning never causes data loss
+- Migrating existing runtime data when creating the managed storage layout
 - Installing and configuring Docker CE with sensible production defaults
 - Optionally installing Docker Compose v2 with checksum verification
 - Installing the NVIDIA Container Toolkit with GPG key verification
@@ -104,7 +104,7 @@ If the script detects an existing fstab entry for the UUID that is **missing** `
 |---|---|
 | OS | Ubuntu 20.04, 22.04, or 24.04 |
 | Privileges | Must be run as root (`sudo`) |
-| Required tools | `curl`, `gpg`, `lsblk`, `df`, `awk`, `sed`, `python3` |
+| Required tools | `curl`, `gpg`, `lsblk`, `blkid`, `wipefs`, `findmnt`, `df`, `awk`, `sed`, `python3` |
 | Auto-installed | `xfsprogs` (installed automatically in Phase 1 if missing) |
 | Recommended | `rsync` (used for data migration; falls back to `cp -ax` if absent) |
 | Python | 3.6+ (used for JSON generation and log rotation) |
@@ -136,9 +136,9 @@ sudo /opt/provision/docker-install.sh [OPTIONS]
 
 | Option | Description |
 |---|---|
-| `--non-interactive` | No prompts; auto-selects best disk/VG, auto-confirms all decisions |
-| `--disk /dev/sdX` | Force use of a specific disk for the container runtime volume |
-| `--vg <vgname>` | Force use of a specific LVM volume group for the container runtime volume |
+| `--non-interactive` | No prompts; auto-selects eligible blank storage only when no explicit disk/VG is supplied |
+| `--disk /dev/sdX` | Select a specific blank whole disk; reject unsafe/unavailable choices without fallback; mutually exclusive with `--vg` |
+| `--vg <vgname>` | Select a specific VG before disk autodetection; reject unavailable choices without fallback; mutually exclusive with `--disk` |
 | `--with-compose` | Also install Docker Compose v2 (latest stable, checksum-verified) |
 | `--uninstall` | Full removal — Docker, toolkit, Compose, bind mounts, and volume |
 | `--reset-state` | Clear phase state file and re-run all phases from scratch |
@@ -199,6 +199,10 @@ sudo /opt/provision/docker-storage-layout-convert.sh --to default --yes
 
 The converter preserves the existing fstab mount source, including `UUID=...`, `/dev/...`, or loopback image entries. It backs up `/etc/fstab` and `/etc/docker/daemon.json`, stops Docker and containerd, reshapes the data directories on the same XFS volume, rewrites only the relevant fstab entries, remounts the selected layout, updates Docker's `data-root`, and restarts services unless `--no-start` is passed.
 
+The reverse conversion first creates the Docker subdirectory inside the volume while it is still mounted at `/var/lib/docker`. Only after moving Docker entries within that filesystem does it remount the volume at `/data/container-runtime`. Data is never staged underneath that future mountpoint on the root filesystem.
+
+The converter checks destination conflicts before moving entries, including dangling symlinks. An existing reserved `docker` staging path prevents reverse conversion; inspect and resolve the reported conflict first. `--dry-run` previews the operations without rearranging files. Backups cover configuration files, not a rollback copy of Docker data; if an operation fails, inspect mounts and the reported directory state before retrying.
+
 During conversion:
 
 | Direction | Docker data-root after conversion | containerd source after conversion |
@@ -224,7 +228,7 @@ docker-install.sh
         │       ├─► Check if runtime volume already mounted
         │       │     YES → verify bind mounts active + skip format
         │       ├─► Auto-install xfsprogs if missing
-        │       ├─► Scan for free disks (unpartitioned, unmounted)
+        │       ├─► Scan for blank disks (no partitions, mounts, holders, or signatures)
         │       ├─► Scan LVM VGs for free space (via vgs --units g)
         │       ├─► Run storage decision tree (see below)
         │       ├─► Format selected device/image: mkfs.xfs -m reflink=1 -i maxpct=25
@@ -299,47 +303,35 @@ docker-install.sh
 
 ## Storage Decision Logic (Phase 1 — DISK_SETUP)
 
+Explicit `--disk` and `--vg` options are mutually exclusive and take precedence over autodetection. A rejected explicit selection stops the install; it does not choose another disk, VG, or loopback image.
+
+A disk candidate must be a whole block disk with no partitions/dependents, mounts, holders, or detected filesystem/RAID/LVM signatures. Inspection failures reject that candidate. These checks apply to explicit disk choices as well as automatic ones and are repeated before formatting. A filesystem directly on a whole disk is occupied storage even when it has no partition table and is unmounted.
+
 ```
-Is the selected runtime volume already mounted?
-    YES → Verify the selected layout's mountpoints are active
-          Skip format + mount → return
-     NO ↓
+Runtime volume already mounted?
+    Verify existing layout and preserve it; do not format.
 
-Auto-install xfsprogs if mkfs.xfs not found
+Explicit disk or VG supplied?
+    Validate the selected storage; fail if unavailable or unsafe.
+    Do not fall through to automatic selection.
 
-Are there any free disks? (no partitions, not mounted)
-    YES →
-        Non-interactive or --disk given:
-            --disk specified → use that disk
-            otherwise       → auto-select the largest free disk
-        Interactive:
-            Show numbered list of free disks + sizes
-            User selects one (or skips to LVM check)
-        → mkfs.xfs with reflink=1
-        → fstab entry with noatime,nofail,prjquota
-     NO ↓
+Otherwise:
+    Offer/select an eligible blank disk.
+    If none selected, offer/select a VG with free capacity.
+    If neither is available, offer a loopback image on root.
 
-Is there free space in any LVM VG? (detected via vgs --units g)
-    YES →
-        Non-interactive or --vg given:
-            --vg specified → use that VG
-            otherwise      → auto-select VG with most free space
-        Interactive:
-            Show numbered list of VGs with free space and projected allocation
-            User selects one (or skips to root fallback)
-        → lvcreate using 80% of free VG extents
-        → mkfs.xfs with reflink=1
-        → fstab entry with noatime,nofail,prjquota
-     NO ↓
-
-No dedicated storage available — create loopback image on root:
-    → Print warning + df -h /
-    → Hard fail if root has < 20 GB free (not enough to create a usable image)
-    → Compute image size = 80% of root free space (in whole GB)
-    → Warn NOT recommended for production GPU/ML workloads
-    → Require explicit confirmation (auto-confirm in non-interactive)
-    → Call _provision_loopback_image <size_gb> (see below)
+Dedicated disk:
+    Recheck blank-device eligibility, then create XFS.
+LVM:
+    Refuse an existing container_rt LV; never auto-reformat it.
+    Create a new LV using 80% of free extents, then create XFS.
+Root fallback:
+    Require at least 20 GB free; allocate 80% of free space to an XFS image.
 ```
+
+If `container_rt` already exists but is not mounted at the expected location, inspect and restore its intended mount instead of resetting state to trigger formatting. `--reset-state` clears phase progress; it does not make existing data disposable. Provisioner options survive reboot in `state/provision.config`; see [provision.md](provision.md).
+
+Regression coverage: `bash test/docker-storage-safety-test.sh` and `bash test/docker-storage-convert-test.sh` run with temporary fixtures and mocked host commands, without formatting or mounting real storage.
 
 ### Data Migration
 

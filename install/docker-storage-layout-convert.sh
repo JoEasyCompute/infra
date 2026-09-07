@@ -291,30 +291,37 @@ PYEOF
 move_children() {
     local src_dir="$1" dest_dir="$2"
     shift 2
-    local excludes=("$@")
-
-    run mkdir -p "$dest_dir"
 
     local moved=0
+    local paths=()
     shopt -s dotglob nullglob
     for path in "$src_dir"/*; do
         local base skip=false
         base=$(basename "$path")
-        for excluded in "${excludes[@]}"; do
+        for excluded in "$@"; do
             if [[ "$base" == "$excluded" ]]; then
                 skip=true
                 break
             fi
         done
         [[ "$skip" == true ]] && continue
-        if [[ -e "${dest_dir}/${base}" ]]; then
+        if [[ -e "${dest_dir}/${base}" || -L "${dest_dir}/${base}" ]]; then
             error "Refusing to overwrite existing target: ${dest_dir}/${base}"
             exit 1
         fi
-        run mv "$path" "$dest_dir/"
+        paths+=("$path")
         moved=$((moved + 1))
     done
     shopt -u dotglob nullglob
+
+    # Validate every target before moving anything, so a later collision cannot
+    # leave an earlier entry moved out of Docker's current data root.
+    run mkdir -p "$dest_dir"
+    if (( moved > 0 )); then
+        for path in "${paths[@]}"; do
+            run mv "$path" "$dest_dir/"
+        done
+    fi
     info "Moved ${moved} top-level entries from ${src_dir} to ${dest_dir}"
 }
 
@@ -386,7 +393,14 @@ convert_runpod_to_default() {
     backup_file "$DAEMON_JSON"
     stop_services
 
-    move_children "$DOCKER_MOUNTPOINT" "$DEFAULT_DOCKER_DATA_DIR" "containerd" "docker" "lost+found"
+    # Rearrange the mounted volume in place. Writing to the future mountpoint
+    # would put Docker data on the host filesystem and hide it after remounting.
+    local staged_docker_dir="${DOCKER_MOUNTPOINT}/docker"
+    if [[ -e "$staged_docker_dir" || -L "$staged_docker_dir" ]]; then
+        error "Refusing to use existing staging directory: ${staged_docker_dir}"
+        exit 1
+    fi
+    move_children "$DOCKER_MOUNTPOINT" "$staged_docker_dir" "containerd" "docker" "lost+found"
     run mkdir -p "$RUNPOD_CONTAINERD_DATA_DIR"
 
     umount_if_mounted "$CONTAINERD_MOUNTPOINT"

@@ -143,7 +143,8 @@ These are tracked as future improvements, not current behavior.
 
 Current behavior:
 
-- `test/code.sh` compiles `test/code.cu` with `nvcc` when needed and runs the resulting binary
+- `test/code.sh` requires readable `test/code.cu` beside it, compiles with `nvcc` when needed, and runs the resulting binary
+- NVIDIA provisioning validates both the wrapper and source before stage 1; deployment instructions copy both files
 - `test/fulltest.sh` and `test/gpu-fulltest-v2.sh` include a `code` test that loops across every visible GPU in order
 - the suites respect `--gpu` remapping by running the wrapper against logical device IDs `0..N-1`
 - `CUDA_CODE_SECONDS` controls the per-GPU runtime inside the suites and defaults to `15`

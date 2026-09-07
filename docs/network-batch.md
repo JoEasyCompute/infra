@@ -23,6 +23,10 @@ It is implemented in Python 3 and wraps:
 
 ---
 
+## Failure Reporting
+
+The batch helper treats a nonzero remote client exit as a failed batch. Deploy the updated `network-test.sh` to every node: required single-stream/four-stream failures, invalid or zero throughput, and requested stress failures now produce nonzero client exits and `test_complete` status `failed`. Optional bidirectional failures remain warnings. See [network-test.md](network-test.md) for result semantics and fleet-specific throughput thresholds.
+
 ## Requirements
 
 | Requirement | Notes |
