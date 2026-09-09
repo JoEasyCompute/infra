@@ -237,7 +237,13 @@ must be done manually afterwards.
 | `ethtool` | NIC feature, link, and offload inspection |
 | `iperf3` | Network bandwidth testing (also used by `network-test.sh`); the installer preseeds the package to start its daemon automatically so apt does not prompt during install |
 
-The bootstrap phase also installs `debconf-utils` so `iperf3` can be preseeded before apt reaches the package's post-install prompt.
+The bootstrap phase also installs `debconf-utils` and runs with
+`DEBIAN_FRONTEND=noninteractive`. Before the main package transaction,
+`base-install.sh` preseeds the standard English (UK) keyboard and UTF-8
+console settings, as well as the `iperf3` daemon choice. This prevents
+`keyboard-configuration` or `console-setup` from opening a terminal dialog on
+hosts whose debconf state is incomplete. Change the keyboard after provisioning
+with the normal Ubuntu keyboard tools if the host uses a different layout.
 
 `uv` is installed by `base-install.sh` via Astral's standalone installer and
 placed in `/usr/local/bin` so it is available on the system PATH without

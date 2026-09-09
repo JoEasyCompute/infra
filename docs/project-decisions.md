@@ -166,6 +166,15 @@ Current behavior:
 
 This keeps the normal workflow (`base-install.sh` first, then `fulltest.sh`) aligned while preserving a standalone `fulltest.sh` path for hosts that already have a usable Python runtime.
 
+### Host GPU training and correctness validation
+
+- Stable `fulltest.sh` runs five FP32 DDP training steps with gradient and parameter agreement, replacing its forward-only PyTorch workload.
+- The default `numerics` lane compares FP32, FP16 and supported native BF16 against CPU float64 references from identical quantised inputs.
+- `load-cycles` and `nccl-extended` are opt-in. They exercise idle/load transitions and additional NCCL collectives without increasing the default stress duration.
+- New workloads reuse the managed PyTorch/NCCL setup and stay embedded in `fulltest.sh`, preserving standalone deployment. Docker GPU testing is out of scope.
+- The experimental `gpu-fulltest-v2.sh` is unchanged; these additions do not promote it to the stable lane.
+- Local CPU/mock regressions are distinct from physical GPU acceptance; new tolerances and workloads require validation on supported fleet hardware.
+
 ### 13. Deep persistent GPU health diagnostics are opt-in
 
 Current behavior:
