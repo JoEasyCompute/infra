@@ -195,6 +195,7 @@ This installs the AMDGPU DKMS driver, ROCm stack, and post-install environment s
 ## Quick Start
 
 The NVIDIA and AMD base-install scripts also install a small operator tool bundle for day-to-day shell work: `fzf`, `jq`, `ripgrep`, `yq`, `fd`, `bat`, `usbutils`, `ethtool`, and `iperf3` (with compatibility symlinks where Ubuntu packages expose `fdfind` / `batcat`; `yq` is installed from the official GitHub release binary, not apt).
+The NVIDIA base installer seeds the default English (UK) keyboard/console debconf answers before package installation and keeps apt noninteractive, so a host with incomplete debconf state does not stop at the `keyboard-configuration` screen.
 On the NVIDIA path, `base-install.sh` currently supports driver 575, 580, 595, and 610, with CUDA toolkit options 12.9, 13.0, and 13.3.
 If you only want the host tooling and not the NVIDIA stack yet, `base-install.sh --no-gpu-stack` skips the driver, CUDA toolkit, DCGM, and gpu-burn steps.
 Both `base-install.sh` and `amd-base-install.sh` also install a managed boot-policy GRUB drop-in that appends `pcie_aspm=off`, `pci=noaer`, `pci=realloc=on`, `pcie_aspm.policy=performance`, and `nvme_core.default_ps_max_latency_us=0`.
@@ -428,7 +429,8 @@ This is the main NVIDIA validation suite. It covers:
 - CUDA sample builds
 - nvbandwidth
 - DCGM diagnostics
-- PyTorch distributed checks
+- PyTorch FP32 training with backward/optimiser steps and rank consistency checks
+- FP32/FP16/native BF16 numerical correctness against CPU float64 references
 - VRAM memtest
 - sustained compute stress
 - 12V-2x6 / 12VHPWR connector early-warning detection during sustained stress
@@ -440,6 +442,17 @@ The deeper counter-based checks remain opt-in:
 ```bash
 ./test/fulltest.sh pcie-errors memory-health fabric-health
 ```
+
+Training and numerical correctness run by default. Idle-to-load cycling and
+additional NCCL collectives are opt-in, using the same selected GPU scope:
+
+```bash
+./test/fulltest.sh --gpu 0,1 pytorch numerics
+./test/fulltest.sh --gpu 0,1 load-cycles nccl-extended
+```
+
+The extended checks run directly on the host; no Docker test is added. See
+[docs/fulltest.md](docs/fulltest.md) for timings, tolerances, and prerequisites.
 
 For the stable `test/fulltest.sh` path, PyTorch checks prefer the
 `base-install.sh` managed Python 3.11 runtime and rebuild stale
@@ -596,6 +609,10 @@ bash test/docker-storage-layout-static.sh
 bash test/docker-storage-layout-convert-static.sh
 bash test/fulltest-python-runtime-test.sh
 bash test/fulltest-hardware-health-test.sh
+bash test/fulltest-training-test.sh
+bash test/fulltest-numerics-test.sh
+bash test/fulltest-load-cycles-test.sh
+bash test/fulltest-extended-test.sh
 bash test/vllm-benchmark-static-test.sh
 python3 test/network-batch.sh --help
 ```

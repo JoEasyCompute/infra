@@ -6,8 +6,8 @@
 #   Tests: preflight, ecc, pcie, clocks, nccl, cuda-samples, nvbandwidth,
 #          dcgm, pytorch, code, memtest, stress, node-stress,
 #          post-stress-recovery, gpu-policy, pcie-errors, memory-health,
-#          fabric-health
-#   If no tests specified, all are run in the order above.
+#          fabric-health, numerics, load-cycles, nccl-extended
+#   If no tests specified, DEFAULT_TESTS runs; deep diagnostics remain opt-in.
 # =============================================================================
 
 set -o pipefail
@@ -1668,6 +1668,41 @@ test_nccl() {
 # Test 2: CUDA Samples
 # ─────────────────────────────────────────────────────────────────────────────
 
+test_nccl_extended() {
+    if [ "$NUM_GPUS" -lt 2 ]; then
+        record_not_run "Extended NCCL Collectives" "requires at least two selected GPUs"
+        return 0
+    fi
+    command -v timeout >/dev/null 2>&1 || {
+        log "ERROR: timeout is required for bounded NCCL tests (GNU coreutils)."
+        return 1
+    }
+    install_nccl_lib || return 1
+    install_nccl_tests_bin || return 1
+    local name perf rc=0
+    # Older cached builds may contain all_reduce_perf only.
+    if [ ! -x "$BUILD_DIR/nccl-tests/build/all_gather_perf" ] || \
+       [ ! -x "$BUILD_DIR/nccl-tests/build/reduce_scatter_perf" ]; then
+        ensure_repo_rebuild_allowed "$BUILD_DIR/nccl-tests" "nccl-tests" "$BUILD_DIR/nccl-tests/build" || return 1
+        in_dir "$BUILD_DIR/nccl-tests" make -j"$(nproc)" "CUDA_HOME=$CUDA_HOME_DIR" \
+            2>&1 | tee -a "$LOG_FILE" || return 1
+    fi
+    for name in all_gather reduce_scatter; do
+        perf="$BUILD_DIR/nccl-tests/build/${name}_perf"
+        [ -x "$perf" ] || { log "ERROR: Missing executable: $perf"; return 1; }
+        log "  NCCL $name: selected GPUs=$NUM_GPUS, sizes=8B..64MiB, correctness enabled"
+        timeout --kill-after=10s 180s env NCCL_IB_DISABLE=1 NCCL_NET_GDR_LEVEL=0 \
+            NCCL_NVLS_ENABLE=0 "$perf" -b 8 -e 64M -f 2 -g "$NUM_GPUS" -n 10 -w 2 -c 1 \
+            2>&1 | tee -a "$LOG_FILE"
+        rc=${PIPESTATUS[0]}
+        if [ "$rc" -ne 0 ]; then
+            log "ERROR: NCCL $name failed (exit $rc; 124 indicates watchdog timeout)."
+            return "$rc"
+        fi
+    done
+    return 0
+}
+
 test_cuda_samples() {
     ensure_repo_clone_allowed "$BUILD_DIR/cuda-samples" "cuda-samples" || return 1
     [ ! -d "$BUILD_DIR/cuda-samples" ] && \
@@ -1917,7 +1952,7 @@ test_pytorch() {
     local prepare_rc=0
     prepare_pytorch_runtime || prepare_rc=$?
     if [ "$prepare_rc" -eq 2 ]; then
-        record_not_run "PyTorch Multi-GPU Benchmark" \
+        record_not_run "PyTorch Distributed Training Correctness" \
             "$PYTORCH_RUNTIME_SKIP_REASON"
         return 0
     fi
@@ -1935,27 +1970,80 @@ test_pytorch() {
     }
     cat > "$script" << 'PYEOF'
 import os
+from datetime import timedelta
 import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-dist.init_process_group(backend='nccl')
 local_rank = int(os.environ["LOCAL_RANK"])
 torch.cuda.set_device(local_rank)
+device = torch.device(f"cuda:{local_rank}")
+dist.init_process_group(backend="nccl", timeout=timedelta(seconds=120))
+rank = dist.get_rank()
 
-model = nn.Linear(10000, 10000).cuda(local_rank)
-model = DDP(model, device_ids=[local_rank])
-x = torch.randn(1000, 10000, device=f"cuda:{local_rank}")
 
-for _ in range(100):
-    _ = model(x)
+def require_all(condition, message):
+    # Every rank reaches the same collective before any rank raises.
+    valid = torch.tensor(int(bool(condition)), device=device, dtype=torch.int32)
+    dist.all_reduce(valid, op=dist.ReduceOp.MIN)
+    if valid.item() != 1:
+        raise RuntimeError(f"DDP training validation failed on rank {rank}: {message}")
 
-torch.cuda.synchronize()
-if local_rank == 0:
-    world = dist.get_world_size()
-    print(f"PyTorch multi-GPU DDP test completed on {world} GPU(s).")
-dist.destroy_process_group()
+
+def require_rank_agreement(values, message):
+    flat = torch.cat([value.detach().reshape(-1) for value in values])
+    reference = flat.clone()
+    dist.broadcast(reference, src=0)
+    require_all(torch.allclose(flat, reference, rtol=1e-5, atol=1e-6), message)
+
+
+try:
+    torch.manual_seed(2026)
+    model = nn.Sequential(nn.Linear(128, 64), nn.ReLU(), nn.Linear(64, 16)).to(
+        device=device, dtype=torch.float32
+    )
+    model = DDP(model, device_ids=[local_rank])
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    criterion = nn.MSELoss()
+    # Different rank inputs make gradient synchronization observable.
+    torch.manual_seed(2027 + rank)
+    x = torch.randn(32, 128, device=device, dtype=torch.float32)
+    target = torch.randn(32, 16, device=device, dtype=torch.float32)
+    initial = [parameter.detach().clone() for parameter in model.parameters()]
+
+    for step in range(5):
+        optimizer.zero_grad(set_to_none=True)
+        loss = criterion(model(x), target)
+        require_all(torch.isfinite(loss).item(), f"step {step}: non-finite loss")
+        loss.backward()
+        gradients_valid = True
+        for parameter in model.parameters():
+            if parameter.grad is None or not torch.isfinite(parameter.grad).all().item():
+                gradients_valid = False
+        require_all(gradients_valid, f"step {step}: missing or non-finite gradients")
+        require_rank_agreement(
+            [parameter.grad for parameter in model.parameters()],
+            f"step {step}: gradients differ from rank 0",
+        )
+        optimizer.step()
+        require_all(
+            all(torch.isfinite(parameter).all().item() for parameter in model.parameters()),
+            f"step {step}: non-finite parameters",
+        )
+        require_rank_agreement(list(model.parameters()), f"step {step}: parameters differ from rank 0")
+
+    require_all(
+        any(not torch.equal(before, after) for before, after in zip(initial, model.parameters())),
+        "parameters did not update",
+    )
+    torch.cuda.synchronize()
+    dist.barrier()
+    if rank == 0:
+        print(f"PyTorch multi-GPU DDP FP32 training completed on {dist.get_world_size()} GPU(s): "
+              "5 optimizer steps; finite loss/gradients/parameters; synchronized gradients and parameters.")
+finally:
+    dist.destroy_process_group()
 PYEOF
 
     if [ ! -f "$script" ] || [ ! -s "$script" ]; then
@@ -1994,6 +2082,96 @@ PYEOF
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 6: CUDA int32 stress
 # ─────────────────────────────────────────────────────────────────────────────
+
+test_numerics() {
+    local prepare_rc=0
+    prepare_pytorch_runtime || prepare_rc=$?
+    if [ "$prepare_rc" -eq 2 ]; then
+        record_not_run "GPU Numerical Correctness" "$PYTORCH_RUNTIME_SKIP_REASON"
+        return 0
+    fi
+    [ "$prepare_rc" -eq 0 ] || return "$prepare_rc"
+
+    local script
+    script=$(mktemp /tmp/_gpu_numerics_XXXXXX.py) || return 1
+    cat > "$script" << 'PYEOF'
+import math
+import torch
+
+
+def validate_values(actual, reference, atol, rtol):
+    """Mixed absolute/relative error stays bounded around a zero reference."""
+    max_abs = max_normalized = 0.0
+    for observed, expected in zip(actual, reference):
+        if not math.isfinite(observed) or not math.isfinite(expected):
+            return math.inf, math.inf, False
+        error = abs(observed - expected)
+        max_abs = max(max_abs, error)
+        max_normalized = max(max_normalized, error / (atol + rtol * abs(expected)))
+    return max_abs, max_normalized, max_normalized <= 1.0
+
+
+def main():
+    if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
+        raise RuntimeError("No selected CUDA GPUs available for numerical validation")
+    torch.set_num_threads(1)
+    # Keep FP32 reference comparison meaningful, even on TF32-capable hardware.
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+    generator = torch.Generator(device="cpu").manual_seed(20260909)
+    size = 128
+    a = torch.randn(size, size, generator=generator, dtype=torch.float64) / 4
+    b = torch.randn(size, size, generator=generator, dtype=torch.float64) / 4
+    half = torch.randn(size, size // 2, generator=generator, dtype=torch.float64) / 4
+    paired = torch.randn(size // 2, size, generator=generator, dtype=torch.float64) / 4
+    patterns = [
+        ("random", a, b),
+        ("identity", a, torch.eye(size, dtype=torch.float64)),
+        ("cancellation", torch.cat((half, half), dim=1), torch.cat((paired, -paired), dim=0)),
+        ("scaled", a * 16, b / 16),
+    ]
+    failed = False
+    for gpu in range(torch.cuda.device_count()):
+        torch.cuda.set_device(gpu)
+        print(f"GPU logical={gpu} name={torch.cuda.get_device_name(gpu)}", flush=True)
+        dtypes = [("FP32", torch.float32, 2e-5, 2e-5),
+                  ("FP16", torch.float16, 2e-3, 2e-3)]
+        try:
+            native_bf16 = torch.cuda.is_bf16_supported(including_emulation=False)
+        except TypeError:
+            # Older PyTorch lacks the keyword; NVIDIA native BF16 starts at SM80.
+            native_bf16 = torch.cuda.get_device_capability(gpu)[0] >= 8
+        if native_bf16:
+            dtypes.append(("BF16", torch.bfloat16, 2e-2, 2e-2))
+        else:
+            print(f"GPU logical={gpu} BF16 SKIP: native BF16 unsupported", flush=True)
+        for name, dtype, atol, rtol in dtypes:
+            for pattern, left, right in patterns:
+                # Quantize once on CPU; both implementations receive identical inputs.
+                left_q, right_q = left.to(dtype), right.to(dtype)
+                reference = left_q.to(torch.float64) @ right_q.to(torch.float64)
+                actual = (left_q.to(f"cuda:{gpu}") @ right_q.to(f"cuda:{gpu}")).to(device="cpu", dtype=torch.float64)
+                max_abs, normalized, passed = validate_values(
+                    actual.flatten().tolist(), reference.flatten().tolist(), atol, rtol)
+                print(f"GPU logical={gpu} {name} {pattern}: {'PASS' if passed else 'FAIL'} "
+                      f"max_abs={max_abs:.6g} max_normalized={normalized:.6g} "
+                      f"atol={atol:g} rtol={rtol:g} normalized_limit=1", flush=True)
+                failed |= not passed
+    if failed:
+        raise RuntimeError("GPU numerical correctness disagreement or non-finite result")
+
+
+if __name__ == "__main__":
+    main()
+PYEOF
+    local rc=0
+    "${PYTORCH_VENV}/bin/python" "$script" 2>&1 | tee -a "$LOG_FILE"
+    rc=${PIPESTATUS[0]}
+    rm -f "$script"
+    return "$rc"
+}
 
 test_cuda_code() {
     local code_script="$SCRIPT_DIR/code.sh"
@@ -2908,6 +3086,143 @@ test_post_stress_recovery() {
     return "$rc"
 }
 
+test_load_cycles() {
+    local cycles="${GPU_LOAD_CYCLES:-5}" idle="${GPU_LOAD_IDLE_SECONDS:-5}" load="${GPU_LOAD_SECONDS:-10}"
+    local value rc=0 script output budget
+    for value in "$cycles" "$idle" "$load"; do
+        if [[ ! "$value" =~ ^[1-9][0-9]{0,2}$ ]]; then
+            log "  ERROR: GPU_LOAD_CYCLES / GPU_LOAD_IDLE_SECONDS / GPU_LOAD_SECONDS must be positive integers."
+            return 1
+        fi
+    done
+    if (( cycles > 100 || idle > 300 || load > 300 )); then
+        log "  ERROR: Load-cycle limits are 100 cycles and 300 seconds per stage."
+        return 1
+    fi
+    command -v timeout >/dev/null 2>&1 || { log "  ERROR: GNU timeout is required for load cycles."; return 1; }
+    prepare_pytorch_runtime || rc=$?
+    if [ "$rc" -eq 2 ]; then
+        record_not_run "GPU Load Cycles" "$PYTORCH_RUNTIME_SKIP_REASON"
+        return 0
+    fi
+    [ "$rc" -eq 0 ] || return "$rc"
+    script=$(mktemp "${TMPDIR:-/tmp}/fulltest-load-cycles.XXXXXX") || return 1
+    output=$(mktemp "${TMPDIR:-/tmp}/fulltest-load-cycles-output.XXXXXX") || { rm -f "$script"; return 1; }
+    cat > "$script" <<'PYLOAD'
+import re
+import shlex
+import subprocess
+import sys
+import time
+
+cycles, idle, load = map(int, sys.argv[1:4])
+smi_args = shlex.split(sys.argv[4])
+started = time.time()
+
+def snapshot(stage, expected=None):
+    result = subprocess.run(['nvidia-smi', *smi_args, '--query-gpu=uuid',
+                             '--format=csv,noheader'], check=True,
+                            capture_output=True, text=True, timeout=10)
+    ids = sorted(line.strip() for line in result.stdout.splitlines() if line.strip())
+    if not ids or len(set(ids)) != len(ids) or any(not x.startswith('GPU-') for x in ids):
+        raise RuntimeError(f'{stage}: invalid or empty selected GPU inventory: {ids}')
+    if expected is not None and ids != expected:
+        raise RuntimeError(f'{stage}: selected GPU inventory changed: {expected} -> {ids}')
+    print(f'{stage}: selected UUIDs {ids}', flush=True)
+    return ids
+
+def pci_addresses(text):
+    # NVIDIA uses eight-digit domains; journal messages commonly use four.
+    # Xid messages omit the function, so compare domain/bus/device triples.
+    return {tuple(int(part, 16) for part in match)
+            for match in re.findall(r'\b([0-9a-fA-F]{4,8}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2})(?:\.[0-7])?\b', text)}
+
+def kernel_scan():
+    try:
+        result = subprocess.run(['journalctl', '-k', '--since', f'@{started:.6f}',
+                                 '--no-pager', '-o', 'short-iso'],
+                                capture_output=True, text=True, timeout=15)
+        if result.returncode or re.search(r'permission|not seeing|no journal files', result.stderr, re.I):
+            print('REMARK: load-cycle kernel scan unavailable: ' + result.stderr.strip(), flush=True)
+            return
+        errors = []
+        for line in result.stdout.splitlines():
+            gpu_error = re.search(r'\bXid\b|fallen off the bus', line, re.I)
+            fatal_pcie = re.search(r'(?:PCIe|PCI|AER).*\bfatal\b',
+                                   re.sub(r'\bnon[\s-]*fatal\b', '', line, flags=re.I), re.I)
+            if not (gpu_error or fatal_pcie):
+                continue
+            addresses = pci_addresses(line)
+            uuids = set(re.findall(r'GPU-[A-Za-z0-9-]+', line, re.I))
+            if addresses & selected_bdfs or {x.lower() for x in uuids} & {x.lower() for x in expected}:
+                errors.append(line)
+            elif not addresses and not uuids:
+                print('REMARK: unattributed load-cycle GPU/PCIe event; inspect kernel log: ' + line, flush=True)
+        if errors:
+            raise RuntimeError('New kernel GPU/PCIe errors:\n' + '\n'.join(errors[-40:]))
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        print(f'REMARK: load-cycle kernel scan unavailable: {exc}', flush=True)
+
+try:
+    expected = snapshot('initial')
+    pci_result = subprocess.run(['nvidia-smi', *smi_args, '--query-gpu=pci.bus_id',
+                                 '--format=csv,noheader'], check=True,
+                                capture_output=True, text=True, timeout=10)
+    selected_bdfs = pci_addresses(pci_result.stdout)
+    if len(selected_bdfs) != len(expected):
+        raise RuntimeError('Cannot identify PCI addresses of all selected GPUs')
+    import torch
+    if not torch.cuda.is_available() or torch.cuda.device_count() != len(expected):
+        raise RuntimeError('PyTorch selected GPU count does not match nvidia-smi')
+    torch.backends.cuda.matmul.allow_tf32 = False
+    buffers = []
+    for index in range(len(expected)):
+        with torch.cuda.device(index):
+            a = torch.full((1024, 1024), 0.01, device=f'cuda:{index}', dtype=torch.float32)
+            buffers.append((a, a.clone(), torch.empty_like(a)))
+    for index in range(len(expected)):
+        torch.cuda.synchronize(index)
+    for cycle in range(1, cycles + 1):
+        snapshot(f'cycle {cycle} before idle', expected)
+        time.sleep(idle)
+        snapshot(f'cycle {cycle} before load', expected)
+        deadline = time.monotonic() + load
+        iterations = 0
+        while iterations == 0 or time.monotonic() < deadline:
+            # Launch every selected GPU before waiting on any device.
+            for index, (a, b, out) in enumerate(buffers):
+                with torch.cuda.device(index):
+                    torch.mm(a, b, out=out)
+            for index in range(len(expected)):
+                torch.cuda.synchronize(index)
+            iterations += 1
+        for index, (_, _, out) in enumerate(buffers):
+            if not torch.isfinite(out).all().item():
+                raise RuntimeError(f'cycle {cycle}: non-finite GPU {index} output')
+        snapshot(f'cycle {cycle} after load', expected)
+        kernel_scan()
+    snapshot('final', expected)
+    kernel_scan()
+    print(f'Completed {cycles} idle/load cycles with finite FP32 outputs.', flush=True)
+except Exception as exc:
+    print(f'ERROR: load cycles: {exc}', flush=True)
+    sys.exit(1)
+PYLOAD
+    budget=$((cycles * (idle + load) + 120))
+    log "  Running $cycles GPU idle/load cycles (${idle}s idle / ${load}s load; ${budget}s timeout)."
+    timeout --kill-after=10 "${budget}s" "$PYTORCH_VENV/bin/python" -u "$script" \
+        "$cycles" "$idle" "$load" "$SMI_FILTER" > "$output" 2>&1 || rc=$?
+    cat "$output" | tee -a "$LOG_FILE"
+    while IFS= read -r value; do
+        [[ "$value" == REMARK:* ]] && record_remark "GPU Load Cycles: ${value#REMARK: }"
+    done < "$output"
+    rm -f "$script" "$output"
+    if [ "$rc" -ne 0 ]; then
+        log "  ERROR: GPU load cycles failed (exit $rc; 124/137 indicates timeout/forced termination)."
+    fi
+    return "$rc"
+}
+
 test_gpu_policy() {
     local label="GPU Policy"
     local strict="${GPU_POLICY_STRICT:-0}"
@@ -3062,7 +3377,7 @@ usage() {
     cat << EOF
 Usage: $(basename "$0") [test...] [--burn-duration <s>] [--node-stress-minutes <m>] [--clean] [--list] [--help]
 
-Available tests (run in this order if none specified):
+Available tests (default suite excludes tests marked optional or opt-in):
   preflight     Idle thermal baseline, persistence mode, driver state
   ecc           ECC error check (DC GPUs: fail on errors; GeForce: skip gracefully)
   pcie          PCIe link width/gen check — detects silent link degradation
@@ -3071,7 +3386,8 @@ Available tests (run in this order if none specified):
   cuda-samples  deviceQuery + p2pBandwidthLatencyTest
   nvbandwidth   Host<->device and device<->device memory bandwidth
   dcgm          DCGM diagnostics (skipped if dcgmi not installed)
-  pytorch       PyTorch multi-GPU DDP benchmark
+  pytorch       FP32 DDP training: backward, optimizer, gradient/parameter agreement
+  numerics      FP32/FP16/native BF16 correctness against CPU float64 reference
   code          CUDA int32 compute stress (code.cu) — loops across all visible GPUs
   memtest       cuda_memtest VRAM integrity (10 passes per GPU)
   stress        Sustained compute stress: gpu-fryer / gpu-burn / PyTorch
@@ -3081,6 +3397,8 @@ Available tests (run in this order if none specified):
   pcie-errors   Opt-in PCIe replay-counter delta and kernel AER check
   memory-health Opt-in ECC, retired-page, and row-remapper health check
   fabric-health Opt-in NVLink/NVSwitch state and error-counter delta check
+  load-cycles   Opt-in idle/load cycling with GPU identity and new-error checks
+  nccl-extended Opt-in all-gather/reduce-scatter correctness (2+ selected GPUs)
 
 Options:
   --gpu <index[,index...]>   Target specific GPU(s) by index — single (3) or comma-separated (2,4,5)
@@ -3093,7 +3411,7 @@ Options:
   --help, -h                 Show this help
 
 Examples:
-  ./fulltest.sh                              # run all tests on all GPUs
+  ./fulltest.sh                              # run default tests on all GPUs
   ./fulltest.sh --gpu 3                      # run all tests on GPU 3 only
   ./fulltest.sh --gpu 2,4,5                  # run all tests on GPUs 2, 4, and 5
   ./fulltest.sh --gpu 2,4,5 memtest stress   # memtest + stress on GPUs 2, 4, 5
@@ -3109,13 +3427,15 @@ Examples:
   ./fulltest.sh post-stress-recovery          # recovery check after stress
   GPU_POLICY_REQUIRE_PERSISTENCE=1 ./fulltest.sh gpu-policy
   ./fulltest.sh pcie-errors memory-health fabric-health
+  ./fulltest.sh --gpu 0,1 pytorch numerics    # training and numerical correctness
+  ./fulltest.sh load-cycles nccl-extended    # opt-in transition and collective checks
   ./fulltest.sh --clean                      # wipe build/ and exit
   ./fulltest.sh --clean nccl                 # clean then run nccl
 EOF
 }
 
-ALL_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch code memtest stress node-stress post-stress-recovery gpu-policy pcie-errors memory-health fabric-health)
-DEFAULT_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch code memtest stress node-stress post-stress-recovery)
+ALL_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch numerics code memtest stress node-stress post-stress-recovery gpu-policy pcie-errors memory-health fabric-health load-cycles nccl-extended)
+DEFAULT_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch numerics code memtest stress node-stress post-stress-recovery)
 SELECTED_TESTS=()
 EXCLUDED_TESTS=()
 
@@ -3206,7 +3526,7 @@ while [ "$i" -lt "${#args[@]}" ]; do
             fi
             NODE_STRESS_MINUTES="$val"
             ;;
-        preflight|ecc|pcie|clocks|nccl|cuda-samples|nvbandwidth|dcgm|pytorch|code|memtest|stress|node-stress|post-stress-recovery|gpu-policy|pcie-errors|memory-health|fabric-health)
+        preflight|ecc|pcie|clocks|nccl|cuda-samples|nvbandwidth|dcgm|pytorch|numerics|code|memtest|stress|node-stress|post-stress-recovery|gpu-policy|pcie-errors|memory-health|fabric-health|load-cycles|nccl-extended)
             SELECTED_TESTS+=("$arg") ;;
         -*)
             excluded="${arg#-}"
@@ -3268,7 +3588,10 @@ for test in "${SELECTED_TESTS[@]}"; do
                 skip_test "DCGM Diagnostics" "dcgmi not found — install DCGM if needed (https://developer.nvidia.com/dcgm)"
             fi
             ;;
-        pytorch)      run_test "PyTorch Multi-GPU Benchmark"                           test_pytorch     ;;
+        pytorch)      run_test "PyTorch Distributed Training Correctness"             test_pytorch     ;;
+        numerics)     run_test "GPU Numerical Correctness"                          test_numerics    ;;
+        nccl-extended) run_test "Extended NCCL Collectives"                         test_nccl_extended ;;
+        load-cycles)  run_test "GPU Idle-to-Load Cycles"                            test_load_cycles ;;
         code)         run_test "CUDA Int32 Compute Stress (code.cu)"                   test_cuda_code   ;;
         memtest)      run_test "cuda_memtest (GPU Memory Stress)"                      test_memtest     ;;
         stress)

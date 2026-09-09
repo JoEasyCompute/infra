@@ -440,9 +440,29 @@ install_base_packages() {
     info "Bootstrapping prerequisites..."
     sudo apt-get update -q \
         || error "apt-get update failed"
-    sudo apt-get install -y \
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
         software-properties-common apt-transport-https ca-certificates curl gnupg debconf-utils \
         || error "Bootstrap package install failed"
+
+    # keyboard-configuration and console-setup can open a debconf dialog when
+    # they are first installed on a host with incomplete locale state. Seed the
+    # standard US layout before the main package transaction so apt never steals
+    # the operator's terminal for this unrelated question.
+    if command -v debconf-set-selections &>/dev/null; then
+        cat <<'EOF' | sudo debconf-set-selections
+keyboard-configuration keyboard-configuration/layout select English (UK)
+keyboard-configuration keyboard-configuration/model select Generic 105-key PC (intl.)
+keyboard-configuration keyboard-configuration/variant select English (UK)
+keyboard-configuration keyboard-configuration/options select
+keyboard-configuration keyboard-configuration/ctrl_alt_bksp boolean false
+console-setup console-setup/charmap select UTF-8
+console-setup console-setup/fontface select Fixed
+console-setup console-setup/fontsize select 8x16
+EOF
+        success "Preseeded keyboard and console debconf settings"
+    else
+        warn "debconf-set-selections not found — keyboard packages may prompt during install"
+    fi
 
     if [[ "${SKIP_GPU_STACK}" == false ]]; then
         info "Adding graphics-drivers PPA..."

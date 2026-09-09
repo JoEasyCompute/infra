@@ -426,13 +426,13 @@ generation-specific error counters are reported under `NOT BEING RUN`.
 
 ---
 
-### `pytorch` — Multi-GPU DDP Benchmark
+### `pytorch` — Distributed Training Correctness
 
-Installs PyTorch (wheel auto-selected by CUDA version) and runs a multi-GPU DistributedDataParallel benchmark via `torchrun`.
+Installs PyTorch (wheel auto-selected by CUDA version) and runs a DistributedDataParallel training check via `torchrun`, with one process per selected GPU. This remains a default test.
 
-Runs 100 forward passes of a 10,000×10,000 linear layer across all GPUs in scope using NCCL as the collective backend.
+Runs five FP32 SGD steps using a 128→64→16 network and batches of 32. Each rank has distinct deterministic inputs. Every step computes loss, runs backward, checks finite gradients, performs the optimiser update, and checks finite parameters. Gradients and parameters must agree with rank 0 (`rtol=1e-5`, `atol=1e-6`), and parameters must change from their initial values. The CUDA device is selected before NCCL initialisation; collective timeout is 120 seconds.
 
-**Fails if:** PyTorch install fails, `torchrun` not found, NCCL process group init fails, or any forward pass errors.
+**Fails if:** runtime preparation or any training operation fails, gradients are missing/non-finite, parameters diverge between ranks, or no update occurs. On one GPU this validates local training; cross-GPU synchronisation requires at least two selected GPUs.
 
 **Runtime contract:** The lane prefers the benchmark Python 3.11 runtime provisioned by `base-install.sh` (via `uv` or the installed `/opt/infra/python` tree). If `base-install.sh` has not run, `fulltest.sh` falls back to a supported system Python 3.10-3.12 and creates its own isolated `build/pytorch-venv`. Existing PyTorch venvs are rebuilt when their base interpreter does not match the selected runtime, so reruns do not keep stale Python or wheel families alive.
 
@@ -456,6 +456,56 @@ The shared runtime installs only `torch`, then verifies that the venv can import
 **Notes:** On Ubuntu 24.04+, `--break-system-packages` is added to pip installs automatically (PEP 668 compliance).
 
 ---
+
+### `numerics` — Numerical Correctness
+
+Default test using the same managed PyTorch environment. For each selected GPU, compare 128×128 matrix products in FP32, FP16, and native BF16 against CPU float64 results computed from identical dtype-quantised inputs. Patterns cover seeded random inputs, identity, cancellation, and reciprocal input scaling. TF32 and reduced-precision reductions are disabled for this check.
+
+Each element must satisfy `abs(actual-reference) <= atol + rtol*abs(reference)`. Both tolerances are `2e-5` for FP32, `2e-3` for FP16, and `2e-2` for BF16. Logs show GPU, precision, pattern, maximum absolute error, normalised error, and tolerance. Non-finite values or disagreement fail; unsupported native BF16 skips only that precision. An unavailable supported Python runtime follows the existing `NOT BEING RUN` convention. These are correctness thresholds, not performance targets; real GPU validation is required across the supported fleet.
+
+```bash
+./test/fulltest.sh --gpu 0,1 pytorch numerics
+./test/fulltest.sh -numerics                  # omit numerical checks from default run
+```
+
+### `nccl-extended` — Additional Collectives (Opt-in)
+
+Run all-gather and reduce-scatter from the existing NCCL tests build, with correctness checking enabled (`-c 1`). Each uses 8-byte to 64-MiB messages, doubling sizes, ten measured iterations and two warmups, plus a 180-second process watchdog with ten seconds of termination grace. The existing single-node PCIe transport settings are reused. A failed collective, build failure, or timeout fails the test; fewer than two selected GPUs is reported as `NOT BEING RUN`.
+
+```bash
+./test/fulltest.sh --gpu 0,1 nccl-extended
+```
+
+The [upstream NCCL tests documentation](https://github.com/NVIDIA/nccl-tests) describes correctness checking and shared collective options. This test requires GNU `timeout` from coreutils on the target Ubuntu host.
+
+### `load-cycles` — Idle-to-Load Transitions (Opt-in)
+
+Alternates idle intervals and FP32 1024×1024 GEMM bursts on all selected GPUs. Each burst launches work on every GPU before synchronising, then checks finite output. The selected GPU UUID inventory must remain unchanged before/after the stages. New Xid, fallen-off-bus, and fatal PCIe messages attributed to a selected GPU's UUID or PCI address fail within the bounded kernel-log window. Non-Fatal PCIe messages do not trigger the fatal classifier, and events attributed to unselected devices do not fail the selected run. Unattributed events and unavailable journal access are recorded as remarks for inspection.
+
+| Environment variable | Default | Accepted values |
+|---|---|---|
+| `GPU_LOAD_CYCLES` | `5` | Integers 1–100 |
+| `GPU_LOAD_IDLE_SECONDS` | `5` | Integers 1–300 |
+| `GPU_LOAD_SECONDS` | `10` | Integers 1–300 |
+
+Default workload time is approximately 75 seconds plus inspection overhead. GNU `timeout` bounds execution to `cycles × (idle + load) + 120` seconds, with ten seconds of termination grace; runtime installation/preparation occurs before that watchdog. Individual driver and journal calls have ten/fifteen-second timeouts. No GPU reset, clock changes, or power-limit changes are performed. This exercises transitions but does not guarantee any particular power state or replace long burn-in.
+
+```bash
+./test/fulltest.sh --gpu 0,1 load-cycles
+GPU_LOAD_CYCLES=10 GPU_LOAD_IDLE_SECONDS=10 GPU_LOAD_SECONDS=20 \
+    ./test/fulltest.sh --gpu 0,1 load-cycles
+```
+
+### Regression checks for training and extended GPU tests
+
+```bash
+bash test/fulltest-training-test.sh
+bash test/fulltest-numerics-test.sh
+bash test/fulltest-load-cycles-test.sh
+bash test/fulltest-extended-test.sh
+```
+
+The suites check the generated Python, numerical validator, CLI inclusion/exclusion, runtime routing, failure propagation, mocked inventories and collective arguments. Where local PyTorch is installed, the training regression also executes two CPU/Gloo ranks and injects missing backward/update operations, non-finite loss and rank divergence. Without PyTorch it explicitly skips those cases. Passing these development checks does not establish correctness on physical CUDA GPUs; validate one GPU and a multi-GPU subset before fleet rollout.
 
 ### `code` — CUDA Int32 Compute Stress
 
