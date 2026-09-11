@@ -152,7 +152,10 @@ Re-run on one GPU, compare slots/risers, and run `pcie` plus `nvbandwidth` to
 separate link negotiation from data-path reliability. The PCIe error lane also
 compares Linux AER device counters around host-to-device traffic when NVIDIA's
 replay counter is unavailable, and only evaluates kernel events from the
-current boot and current test interval.
+entire current boot, including events before this test started. Previous boots
+are excluded. `PARTIAL` means available checks completed but telemetry was
+missing; it does not certify PCIe health. Unavailable journal access is also
+reported as incomplete coverage, not as a clean journal.
 
 ---
 

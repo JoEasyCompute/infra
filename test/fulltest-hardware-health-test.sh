@@ -75,10 +75,46 @@ test_pcie_unavailable_is_not_pass() {
     load_fulltest_defs "$tmp_dir"
     silence_fulltest_logging
     capture_pcie_replay_snapshot() { return 2; }
+    capture_pcie_aer_snapshot() { return 2; }
+    prepare_cuda_sample_binary() { CUDA_SAMPLE_BIN=true; }
+    scan_pcie_kernel_errors() { return 0; }
     run_test 'PCIe Error Delta' test_pcie_errors
     [ "${#RESULTS_PASS[@]}" -eq 0 ] || fail "unavailable PCIe test was passed"
     [ "${#RESULTS_FAIL[@]}" -eq 0 ] || fail "unsupported telemetry was failed"
-    [ "${#RESULTS_NOT_RUN[@]}" -eq 1 ] || fail "missing not-run result"
+    [ "${#RESULTS_NOT_RUN[@]}" -eq 0 ] || fail "completed workload was marked not-run"
+    [ "${#RESULTS_PARTIAL[@]}" -eq 1 ] || fail "missing partial-coverage result"
+    log() { printf '%s\n' "$*"; }
+    local summary
+    summary=$(print_summary)
+    assert_contains "$summary" 'NO FAILURES DETECTED' 'partial summary'
+    [[ "$summary" != *'ALL RUN TESTS PASSED'* ]] || fail "partial coverage claimed all tests passed"
+    silence_fulltest_logging
+    scan_pcie_kernel_errors() { return 1; }
+    run_test 'PCIe Error Delta' test_pcie_errors
+    [ "${#RESULTS_FAIL[@]}" -eq 1 ] || fail "journal error did not fail without counters"
+    scan_pcie_kernel_errors() { return 2; }
+    prepare_cuda_sample_binary() { return 1; }
+    run_test 'PCIe Error Delta' test_pcie_errors
+    [ "${#RESULTS_NOT_RUN[@]}" -eq 1 ] || fail "unavailable workload and journal must be not-run"
+}
+
+test_pcie_scan_includes_earlier_current_boot_errors() {
+    local tmp_dir="$1"
+    load_fulltest_defs "$tmp_dir"
+    silence_fulltest_logging
+    journalctl() {
+        [[ " $* " == *' -b 0 '* ]] || return 1
+        if [[ " $* " != *' --since '* ]]; then
+            echo 'nvidia 0000:01:00.0: AER: aer_layer=Physical Layer, aer_agent=Receiver ID'
+        fi
+    }
+    local rc=0
+    scan_pcie_kernel_errors 123 || rc=$?
+    [ "$rc" -eq 1 ] || fail "earlier current-boot receiver error was missed"
+    journalctl() { return 1; }
+    rc=0
+    scan_pcie_kernel_errors || rc=$?
+    [ "$rc" -eq 2 ] || fail "inaccessible journal was reported clean"
 }
 
 test_counter_delta_only_flags_increases() {
@@ -285,6 +321,7 @@ main() {
     ( test_opt_in_names_are_not_default "$tmp_dir/names" )
     ( test_pcie_replay_query_and_errors "$tmp_dir/replay" )
     ( test_pcie_unavailable_is_not_pass "$tmp_dir/unavailable" )
+    ( test_pcie_scan_includes_earlier_current_boot_errors "$tmp_dir/current-boot" )
     ( test_counter_delta_only_flags_increases "$tmp_dir/counters" )
     ( test_memory_health_classification "$tmp_dir/memory" )
     ( test_nvlink_status_and_error_parsing "$tmp_dir/nvlink" )
