@@ -481,7 +481,10 @@ scan_pcie_kernel_errors() {
         log "  NOTE: Bounded kernel log scan unavailable (journalctl missing)."
         return 0
     fi
-    if ! kernel_log=$(journalctl -k --since "@$since_ts" 2>/dev/null); then
+    # Restrict event scanning to the current boot and this test interval.
+    # Previous-boot AER/GHES messages describe historical hardware state and
+    # must not fail a post-reseat validation run.
+    if ! kernel_log=$(journalctl -k -b 0 --since "@$since_ts" 2>/dev/null); then
         record_remark "PCIe Error Delta: bounded kernel log scan unavailable (journal access failed)."
         log "  NOTE: Bounded kernel log scan unavailable (journal access failed)."
         return 0
@@ -489,7 +492,7 @@ scan_pcie_kernel_errors() {
 
     local fatal_lines
     fatal_lines=$(echo "$kernel_log" \
-        | grep -Ei 'PCIe Bus Error.*severity=(Uncorrected|Fatal)|AER:.*(Uncorrected|Fatal)|DPC:.*containment|uncorrectable.*PCIe|fatal.*PCIe' \
+        | grep -Ei 'PCIe Bus Error.*severity=(Uncorrected|Fatal)|AER:.*(Uncorrected|Fatal)|AER:.*(Physical Layer|Receiver Error)|Hardware Error.*PCIe|DPC:.*containment|uncorrectable.*PCIe|fatal.*PCIe' \
         | tail -40 || true)
     if [ -n "$fatal_lines" ]; then
         log "  ERROR: Kernel log contains fatal/uncorrectable PCIe events:"

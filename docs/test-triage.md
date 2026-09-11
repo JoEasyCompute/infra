@@ -151,7 +151,8 @@ available kernel logs report a fatal/uncorrectable PCIe event.
 Re-run on one GPU, compare slots/risers, and run `pcie` plus `nvbandwidth` to
 separate link negotiation from data-path reliability. The PCIe error lane also
 compares Linux AER device counters around host-to-device traffic when NVIDIA's
-replay counter is unavailable.
+replay counter is unavailable, and only evaluates kernel events from the
+current boot and current test interval.
 
 ---
 

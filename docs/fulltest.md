@@ -300,11 +300,12 @@ host-to-device traffic), and captures the counters again. Existing historical
 counts do not fail; any increase during the measured traffic interval does.
 
 The test also scans available kernel logs for fatal or uncorrectable PCIe/AER
-events. If the host boots with `pci=noaer`, AER sysfs counters are unavailable,
-or kernel logs are inaccessible, that limitation is recorded while any
-available replay/AER checks continue. If neither replay nor AER counters are
-available, the test is reported as `NOT BEING RUN`; this is not counted as a
-pass.
+events from the current boot and current test interval. Previous-boot events
+are historical and do not fail a post-reseat validation run. If the host boots
+with `pci=noaer`, AER sysfs counters are unavailable, or kernel logs are
+inaccessible, that limitation is recorded while any available replay/AER
+checks continue. If neither replay nor AER counters are available, the test
+is reported as `NOT BEING RUN`; this is not counted as a pass.
 
 ```bash
 ./test/fulltest.sh pcie-errors
