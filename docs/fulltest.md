@@ -305,12 +305,28 @@ are historical and do not fail a post-reseat validation run. If the host boots
 with `pci=noaer`, native AER reporting is limited; firmware-reported errors may
 still appear in the journal. Available checks continue when counters or the
 journal are unavailable. A completed workload or journal scan with missing
-coverage is reported as `PARTIAL`, separately from passed and not-run tests.
+coverage is reported as `PARTIAL PASS`, separately from passed and not-run tests.
 The summary says `NO FAILURES DETECTED` with partial coverage, not that all
 tests passed. `NOT BEING RUN` means neither the workload nor journal scan
 could run. Detected errors take precedence over partial coverage. Counter
 deltas still cover only the traffic interval; journal scanning covers the
 whole host's current boot. Partial coverage remains a non-failing exit status.
+
+Repeated `CANNOT Access Peer` lines are replaced on the console by one fallback
+memory-copy note; the full sample output remains in the timestamped log. Other
+output and actual errors remain visible. The partial-pass result and final
+summary explicitly show which checks completed:
+
+```text
+[ PARTIAL PASS ] PCIe Error Delta — coverage incomplete
+  Traffic test: completed
+  Current-boot journal: no matching PCIe/AER errors found
+  Replay counters: unavailable
+  Linux AER counters: unavailable
+```
+
+If journal access fails, its result says `unavailable`, never `no matching
+errors found`. A partial pass does not certify complete PCIe health.
 
 ```bash
 ./test/fulltest.sh pcie-errors

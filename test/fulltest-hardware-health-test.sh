@@ -87,6 +87,9 @@ test_pcie_unavailable_is_not_pass() {
     local summary
     summary=$(print_summary)
     assert_contains "$summary" 'NO FAILURES DETECTED' 'partial summary'
+    assert_contains "$summary" 'Current-boot journal: no matching PCIe/AER errors found' 'journal summary'
+    assert_contains "$summary" 'Traffic test: completed' 'traffic summary'
+    assert_contains "$summary" 'Replay counters: unavailable' 'counter summary'
     [[ "$summary" != *'ALL RUN TESTS PASSED'* ]] || fail "partial coverage claimed all tests passed"
     silence_fulltest_logging
     scan_pcie_kernel_errors() { return 1; }
@@ -96,6 +99,21 @@ test_pcie_unavailable_is_not_pass() {
     prepare_cuda_sample_binary() { return 1; }
     run_test 'PCIe Error Delta' test_pcie_errors
     [ "${#RESULTS_NOT_RUN[@]}" -eq 1 ] || fail "unavailable workload and journal must be not-run"
+}
+
+test_pcie_console_filter() {
+    local tmp_dir="$1"
+    load_fulltest_defs "$tmp_dir"
+    local output
+    output=$(printf '%s\n' 'Device=0 CANNOT Access Peer Device=1' \
+        'Device=1 CANNOT Access Peer Device=0' 'CUDA error: actual failure' \
+        | tee "$tmp_dir/raw.log" | filter_pcie_traffic_console)
+    [[ "$output" != *'CANNOT Access Peer'* ]] || fail "peer messages not suppressed"
+    [ "$(printf '%s\n' "$output" | grep -c 'NOTE: Direct GPU')" -eq 1 ] || fail "fallback note not consolidated"
+    assert_contains "$output" 'CUDA error: actual failure' 'real error retained'
+    assert_contains "$(cat "$tmp_dir/raw.log")" 'Device=0 CANNOT Access Peer' 'raw log preserved'
+    describe_pcie_partial_result completed 2 false false
+    assert_contains "$RESULT_PARTIAL_DETAIL" 'Current-boot journal: unavailable' 'missing journal'
 }
 
 test_pcie_scan_includes_earlier_current_boot_errors() {
@@ -321,6 +339,7 @@ main() {
     ( test_opt_in_names_are_not_default "$tmp_dir/names" )
     ( test_pcie_replay_query_and_errors "$tmp_dir/replay" )
     ( test_pcie_unavailable_is_not_pass "$tmp_dir/unavailable" )
+    ( test_pcie_console_filter "$tmp_dir/console" )
     ( test_pcie_scan_includes_earlier_current_boot_errors "$tmp_dir/current-boot" )
     ( test_counter_delta_only_flags_increases "$tmp_dir/counters" )
     ( test_memory_health_classification "$tmp_dir/memory" )
