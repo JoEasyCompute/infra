@@ -423,9 +423,12 @@ capture_pcie_replay_snapshot() {
     local found=false
 
     : > "$output_file"
-    replay_lines=$(nvidia-smi $SMI_FILTER \
+    if ! replay_lines=$(nvidia-smi $SMI_FILTER \
         --query-gpu=index,pcie.replay_counter \
-        --format=csv,noheader,nounits 2>/dev/null) || return 2
+        --format=csv,noheader,nounits 2>&1); then
+            log "  NOTE: PCIe replay query unavailable: $replay_lines"
+        return 2
+    fi
 
     local gpu_idx replay_counter
     while IFS=, read -r gpu_idx replay_counter; do
@@ -434,9 +437,33 @@ capture_pcie_replay_snapshot() {
         if [[ "$gpu_idx" =~ ^[0-9]+$ ]] && [[ "$replay_counter" =~ ^[0-9]+$ ]]; then
             echo "gpu=$gpu_idx|pcie.replay_counter=$replay_counter" >> "$output_file"
             found=true
+        else
+            log "  NOTE: PCIe replay counter unavailable or invalid: $gpu_idx, $replay_counter"
+            return 2
         fi
     done <<< "$replay_lines"
 
+    $found || return 2
+}
+
+capture_pcie_aer_snapshot() {
+    local output_file="$1"
+    local bus_lines gpu_idx bus_id bdf path kind total value found=false
+    : > "$output_file"
+    bus_lines=$(nvidia-smi $SMI_FILTER --query-gpu=index,pci.bus_id --format=csv,noheader 2>/dev/null) || return 2
+    while IFS=, read -r gpu_idx bus_id; do
+        gpu_idx=$(echo "$gpu_idx" | xargs)
+        bus_id=$(echo "$bus_id" | xargs | tr 'A-F' 'a-f')
+        bdf="${bus_id#0000:}"
+        path="/sys/bus/pci/devices/0000:${bdf}"
+        for kind in aer_dev_correctable aer_dev_nonfatal aer_dev_fatal; do
+            [ -r "$path/$kind" ] || continue
+            total=$(awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+$/) sum += $i } END { print sum + 0 }' "$path/$kind")
+            value="${total:-0}"
+            echo "gpu=$gpu_idx|$kind=$value" >> "$output_file"
+            found=true
+        done
+    done <<< "$bus_lines"
     $found || return 2
 }
 
@@ -814,7 +841,10 @@ run_test() {
     log "========================================"
     local rc=0
     log_run "$@" || rc=$?
-    if [ "$rc" -eq 0 ]; then
+    if [ "$rc" -eq 77 ]; then
+        # Test already recorded why it could not run.
+        log "[ NOT RUN ] $name"
+    elif [ "$rc" -eq 0 ]; then
         log "[ PASS ] $name"
         RESULTS_PASS+=("$name")
     else
@@ -1246,29 +1276,33 @@ test_pcie_errors() {
 
     local before_file="$tmp_dir/before.metrics"
     local after_file="$tmp_dir/after.metrics"
+    local aer_before="$tmp_dir/aer-before.metrics"
+    local aer_after="$tmp_dir/aer-after.metrics"
     local start_ts
     local capture_rc=0
     local rc=0
 
     start_ts=$(date +%s)
     capture_pcie_replay_snapshot "$before_file" || capture_rc=$?
-    if [ "$capture_rc" -eq 2 ]; then
-        record_not_run "PCIe Error Delta" \
-            "pcie.replay_counter is unavailable on the installed driver/GPU"
-        return 0
-    fi
+    local have_replay=true have_aer=true
+    if [ "$capture_rc" -eq 2 ]; then have_replay=false; fi
     if [ "$capture_rc" -ne 0 ]; then
-        log "ERROR: Failed to capture baseline PCIe replay counters."
-        return "$capture_rc"
+        have_replay=false
     fi
-
-    log "  Baseline PCIe replay counters:"
-    sed 's/^/    /' "$before_file" | tee -a "$LOG_FILE"
+    if $have_replay; then
+        log "  Baseline PCIe replay counters:"; sed 's/^/    /' "$before_file" | tee -a "$LOG_FILE"
+    fi
+    capture_pcie_aer_snapshot "$aer_before" || have_aer=false
+    $have_aer && { log "  Baseline Linux PCIe AER counters:"; sed 's/^/    /' "$aer_before" | tee -a "$LOG_FILE"; }
+    if ! $have_replay && ! $have_aer; then
+        record_not_run "PCIe Error Delta" "PCIe replay and Linux AER counters unavailable"
+        return 77
+    fi
 
     if ! prepare_cuda_sample_binary "p2pBandwidthLatencyTest"; then
         record_not_run "PCIe Error Delta" \
             "CUDA p2pBandwidthLatencyTest could not be prepared"
-        return 0
+        return 77
     fi
     log "  Running CUDA p2pBandwidthLatencyTest to exercise PCIe traffic..."
     if ! "$CUDA_SAMPLE_BIN" 2>&1 | tee -a "$LOG_FILE"; then
@@ -1276,24 +1310,21 @@ test_pcie_errors() {
         return 1
     fi
 
-    capture_rc=0
-    capture_pcie_replay_snapshot "$after_file" || capture_rc=$?
-    if [ "$capture_rc" -ne 0 ]; then
-        log "ERROR: Failed to capture post-traffic PCIe replay counters."
-        return 1
+    if $have_replay; then
+        capture_pcie_replay_snapshot "$after_file" || { log "ERROR: Failed to capture post-traffic PCIe replay counters."; rc=1; }
+        if [ -s "$after_file" ]; then
+            local delta_output delta_rc=0
+            delta_output=$(compare_metric_snapshots "$before_file" "$after_file") || delta_rc=$?
+            if [ "$delta_rc" -ne 0 ]; then log "  ERROR: PCIe replay counters increased during the traffic interval:"; log "$delta_output"; rc=1; else log "  PCIe replay counters did not increase."; fi
+        fi
     fi
-
-    log "  Post-traffic PCIe replay counters:"
-    sed 's/^/    /' "$after_file" | tee -a "$LOG_FILE"
-
-    local delta_output delta_rc=0
-    delta_output=$(compare_metric_snapshots "$before_file" "$after_file") || delta_rc=$?
-    if [ "$delta_rc" -ne 0 ]; then
-        log "  ERROR: PCIe replay counters increased during the traffic interval:"
-        log "$delta_output"
-        rc=1
-    else
-        log "  PCIe replay counters did not increase."
+    if $have_aer; then
+        capture_pcie_aer_snapshot "$aer_after" || { log "ERROR: Failed to capture post-traffic Linux PCIe AER counters."; rc=1; }
+        if [ -s "$aer_after" ]; then
+            local aer_delta aer_rc=0
+            aer_delta=$(compare_metric_snapshots "$aer_before" "$aer_after") || aer_rc=$?
+            if [ "$aer_rc" -ne 0 ]; then log "  ERROR: Linux PCIe AER counters increased during the traffic interval:"; log "$aer_delta"; rc=1; else log "  Linux PCIe AER counters did not increase."; fi
+        fi
     fi
 
     scan_pcie_kernel_errors "$start_ts" || rc=1

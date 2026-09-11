@@ -149,7 +149,9 @@ test fails only when the counter grows during its measured traffic interval or
 available kernel logs report a fatal/uncorrectable PCIe event.
 
 Re-run on one GPU, compare slots/risers, and run `pcie` plus `nvbandwidth` to
-separate link negotiation from data-path reliability.
+separate link negotiation from data-path reliability. The PCIe error lane also
+compares Linux AER device counters around host-to-device traffic when NVIDIA's
+replay counter is unavailable.
 
 ---
 

@@ -37,12 +37,48 @@ test_opt_in_names_are_not_default() {
     load_fulltest_defs "$tmp_dir"
 
     local name
-    for name in pcie-errors memory-health fabric-health; do
+    for name in memory-health fabric-health; do
         is_valid_test_name "$name" || fail "$name is not accepted by the CLI"
         if printf '%s\n' "${DEFAULT_TESTS[@]}" | grep -Fxq "$name"; then
             fail "$name must remain opt-in"
         fi
     done
+    [ "${DEFAULT_TESTS[${#DEFAULT_TESTS[@]}-1]}" = pcie-errors ] \
+        || fail "pcie-errors must be the final default test"
+}
+
+test_pcie_replay_query_and_errors() {
+    local tmp_dir="$1"
+    load_fulltest_defs "$tmp_dir"
+    silence_fulltest_logging
+    nvidia-smi() {
+        [[ "$*" == *'--query-gpu=index,pcie.replay_counter'* ]] || return 2
+        printf '0, 12\n1, 9\n'
+    }
+    capture_pcie_replay_snapshot "$tmp_dir/snapshot" \
+        || fail "valid replay query was rejected"
+    assert_contains "$(cat "$tmp_dir/snapshot")" 'gpu=1|' "second GPU captured"
+
+    nvidia-smi() { printf '0, 12\n1, N/A\n'; }
+    local rc=0
+    capture_pcie_replay_snapshot "$tmp_dir/snapshot" || rc=$?
+    [ "$rc" -eq 2 ] || fail "partial telemetry must not count as complete"
+
+    nvidia-smi() { echo 'Unable to determine device handle' >&2; return 1; }
+    rc=0
+    capture_pcie_replay_snapshot "$tmp_dir/snapshot" || rc=$?
+    [ "$rc" -eq 2 ] || fail "query failure must be recorded as not-run"
+}
+
+test_pcie_unavailable_is_not_pass() {
+    local tmp_dir="$1"
+    load_fulltest_defs "$tmp_dir"
+    silence_fulltest_logging
+    capture_pcie_replay_snapshot() { return 2; }
+    run_test 'PCIe Error Delta' test_pcie_errors
+    [ "${#RESULTS_PASS[@]}" -eq 0 ] || fail "unavailable PCIe test was passed"
+    [ "${#RESULTS_FAIL[@]}" -eq 0 ] || fail "unsupported telemetry was failed"
+    [ "${#RESULTS_NOT_RUN[@]}" -eq 1 ] || fail "missing not-run result"
 }
 
 test_counter_delta_only_flags_increases() {
@@ -247,6 +283,8 @@ main() {
     trap "rm -rf '$tmp_dir'" EXIT
 
     ( test_opt_in_names_are_not_default "$tmp_dir/names" )
+    ( test_pcie_replay_query_and_errors "$tmp_dir/replay" )
+    ( test_pcie_unavailable_is_not_pass "$tmp_dir/unavailable" )
     ( test_counter_delta_only_flags_increases "$tmp_dir/counters" )
     ( test_memory_health_classification "$tmp_dir/memory" )
     ( test_nvlink_status_and_error_parsing "$tmp_dir/nvlink" )

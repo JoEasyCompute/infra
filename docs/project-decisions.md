@@ -179,12 +179,12 @@ This keeps the normal workflow (`base-install.sh` first, then `fulltest.sh`) ali
 
 Current behavior:
 
-- `pcie-errors` compares PCIe replay counters around a CUDA P2P traffic interval and scans available kernel logs for fatal/uncorrectable PCIe events
+- `pcie-errors` compares PCIe replay and Linux AER device counters around a CUDA host/device traffic interval and scans available kernel logs for fatal/uncorrectable PCIe events
 - `memory-health` inspects ECC, retired-page, row-remapper, and newer repair-state fields without clearing counters
 - `fabric-health` uses DCGM to compare NVLink/NVSwitch state and generation-specific error counters around P2P traffic
 - cumulative historical counts do not fail by themselves; new counter growth and hard pending/failure states do
-- unsupported hardware, missing DCGM, and unavailable counters are reported as `NOT BEING RUN`
-- all three tests are selectable but excluded from `DEFAULT_TESTS`
+- unsupported hardware, missing DCGM, and unavailable counters are reported as `NOT BEING RUN` and are never counted as passes
+- `memory-health` and `fabric-health` remain opt-in; `pcie-errors` is the final entry in `DEFAULT_TESTS`
 
 This keeps routine provisioning runtime unchanged while giving operators
 targeted diagnostics for suspected PCIe, persistent memory, or fabric faults.
