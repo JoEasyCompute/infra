@@ -1233,7 +1233,7 @@ PYEOF
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Optional test: PCIe replay-counter delta + kernel AER scan
+# Test: PCIe replay-counter delta + kernel AER scan
 # ─────────────────────────────────────────────────────────────────────────────
 
 test_pcie_errors() {
@@ -3394,7 +3394,7 @@ Available tests (default suite excludes tests marked optional or opt-in):
   node-stress   Node-wide stress: stress-ng CPU + RAM plus GPU burn
   post-stress-recovery  GPU recheck after stress: recovery, logs, throttle clear
   gpu-policy    Optional policy check: persistence / power limit / idle temp
-  pcie-errors   Opt-in PCIe replay-counter delta and kernel AER check
+  pcie-errors   PCIe replay-counter delta and kernel AER check (last in default suite)
   memory-health Opt-in ECC, retired-page, and row-remapper health check
   fabric-health Opt-in NVLink/NVSwitch state and error-counter delta check
   load-cycles   Opt-in idle/load cycling with GPU identity and new-error checks
@@ -3435,7 +3435,7 @@ EOF
 }
 
 ALL_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch numerics code memtest stress node-stress post-stress-recovery gpu-policy pcie-errors memory-health fabric-health load-cycles nccl-extended)
-DEFAULT_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch numerics code memtest stress node-stress post-stress-recovery)
+DEFAULT_TESTS=(preflight ecc pcie clocks nccl cuda-samples nvbandwidth dcgm pytorch numerics code memtest stress node-stress post-stress-recovery pcie-errors)
 SELECTED_TESTS=()
 EXCLUDED_TESTS=()
 
