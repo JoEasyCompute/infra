@@ -64,6 +64,7 @@ mkdir -p "$BUILD_DIR" 2>/dev/null || {
 
 RESULTS_PASS=()
 RESULTS_PARTIAL=()
+RESULT_PARTIAL_DETAIL=""
 RESULTS_FAIL=()
 RESULTS_SKIP=()
 RESULTS_NOT_RUN=()
@@ -836,6 +837,7 @@ function trim(value) {
 
 run_test() {
     local name="$1"; shift
+    RESULT_PARTIAL_DETAIL=""
     log ""
     log "========================================"
     log "Running: $name"
@@ -843,8 +845,10 @@ run_test() {
     local rc=0
     log_run "$@" || rc=$?
     if [ "$rc" -eq 78 ]; then
-        log "[ PARTIAL ] $name — completed available checks; coverage incomplete"
-        RESULTS_PARTIAL+=("$name")
+        log "[ PARTIAL PASS ] $name — coverage incomplete"
+        [ -z "$RESULT_PARTIAL_DETAIL" ] || log "$RESULT_PARTIAL_DETAIL"
+        RESULTS_PARTIAL+=("$name — coverage incomplete
+$RESULT_PARTIAL_DETAIL")
     elif [ "$rc" -eq 77 ]; then
         # Test already recorded why it could not run.
         log "[ NOT RUN ] $name"
@@ -1270,6 +1274,28 @@ PYEOF
 # Test: PCIe replay-counter delta + kernel AER scan
 # ─────────────────────────────────────────────────────────────────────────────
 
+filter_pcie_traffic_console() {
+    awk '
+        /^Device=[0-9]+ CANNOT Access Peer Device=[0-9]+$/ {
+            if (!noted++) print "  NOTE: Direct GPU peer access unavailable for some pairs; using fallback memory copies."
+            next
+        }
+        { print }
+    '
+}
+
+describe_pcie_partial_result() {
+    local traffic="$1" journal_rc="$2" replay="$3" aer="$4"
+    local journal="unavailable" replay_text="unavailable" aer_text="unavailable"
+    [ "$journal_rc" -ne 0 ] || journal="no matching PCIe/AER errors found"
+    [ "$replay" != true ] || replay_text="checked; no increase"
+    [ "$aer" != true ] || aer_text="checked; no increase"
+    RESULT_PARTIAL_DETAIL="  Traffic test: $traffic
+  Current-boot journal: $journal
+  Replay counters: $replay_text
+  Linux AER counters: $aer_text"
+}
+
 test_pcie_errors() {
     local tmp_dir
     tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/fulltest-pcie-errors.XXXXXX") || return 1
@@ -1308,10 +1334,11 @@ test_pcie_errors() {
             record_not_run "PCIe Error Delta" "traffic test and current-boot journal unavailable"
             return 77
         fi
+        describe_pcie_partial_result "unavailable" "$journal_rc" false false
         return 78
     fi
     log "  Running CUDA p2pBandwidthLatencyTest to exercise PCIe traffic..."
-    if ! "$CUDA_SAMPLE_BIN" 2>&1 | tee -a "$LOG_FILE"; then
+    if ! "$CUDA_SAMPLE_BIN" 2>&1 | tee -a "$LOG_FILE" | filter_pcie_traffic_console; then
         log "ERROR: CUDA p2pBandwidthLatencyTest failed during PCIe error-delta test."
         scan_pcie_kernel_errors || true
         return 1
@@ -1338,7 +1365,7 @@ test_pcie_errors() {
     scan_pcie_kernel_errors || journal_rc=$?
     [ "$journal_rc" -eq 1 ] && rc=1
     if [ "$rc" -eq 0 ] && { ! $have_replay || ! $have_aer || [ "$journal_rc" -eq 2 ]; }; then
-        record_remark "PCIe Error Delta: traffic completed; replay counters=$have_replay, Linux AER counters=$have_aer, journal scan exit=$journal_rc (0=clean, 2=unavailable)."
+        describe_pcie_partial_result "completed" "$journal_rc" "$have_replay" "$have_aer"
         return 78
     fi
     return "$rc"
@@ -3374,8 +3401,8 @@ print_summary() {
     local partial_count=${#RESULTS_PARTIAL[@]}
 
     if [ "$partial_count" -gt 0 ]; then
-        log "  PARTIAL COVERAGE ($partial_count):"
-        for r in "${RESULTS_PARTIAL[@]}"; do log "    !  $r — available checks completed; coverage incomplete"; done
+        log "  PARTIAL PASS / INCOMPLETE COVERAGE ($partial_count):"
+        for r in "${RESULTS_PARTIAL[@]}"; do log "    !  $r"; done
         log ""
     fi
 
