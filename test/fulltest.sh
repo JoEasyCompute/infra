@@ -1298,14 +1298,18 @@ test_pcie_errors() {
     capture_pcie_aer_snapshot "$aer_before" || have_aer=false
     $have_aer && { log "  Baseline Linux PCIe AER counters:"; sed 's/^/    /' "$aer_before" | tee -a "$LOG_FILE"; }
     if ! $have_replay && ! $have_aer; then
-        record_not_run "PCIe Error Delta" "PCIe replay and Linux AER counters unavailable"
-        return 77
+        record_remark "PCIe Error Delta: replay and Linux AER counters unavailable; current-boot kernel log scan will still run."
+        log "  NOTE: PCIe replay and Linux AER counters unavailable; continuing with current-boot kernel log scan."
     fi
 
     if ! prepare_cuda_sample_binary "p2pBandwidthLatencyTest"; then
         record_not_run "PCIe Error Delta" \
             "CUDA p2pBandwidthLatencyTest could not be prepared"
-        return 77
+        scan_pcie_kernel_errors "$start_ts" || return 1
+        if ! $have_replay && ! $have_aer; then
+            return 77
+        fi
+        return "$rc"
     fi
     log "  Running CUDA p2pBandwidthLatencyTest to exercise PCIe traffic..."
     if ! "$CUDA_SAMPLE_BIN" 2>&1 | tee -a "$LOG_FILE"; then
@@ -1331,6 +1335,10 @@ test_pcie_errors() {
     fi
 
     scan_pcie_kernel_errors "$start_ts" || rc=1
+    if ! $have_replay && ! $have_aer && [ "$rc" -eq 0 ]; then
+        record_not_run "PCIe Error Delta" "PCIe replay and Linux AER counters unavailable"
+        return 77
+    fi
     return "$rc"
 }
 
