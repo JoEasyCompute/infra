@@ -201,7 +201,7 @@ When specified:
 
 ## Tests
 
-Default tests run in a fixed order when none are specified. `pcie-errors`,
+Default tests run in a fixed order when none are specified.
 `memory-health`, `fabric-health`, and `gpu-policy` are opt-in and run only when
 named explicitly. `pcie-errors` is the final test in the default suite.
 
@@ -300,12 +300,17 @@ host-to-device traffic), and captures the counters again. Existing historical
 counts do not fail; any increase during the measured traffic interval does.
 
 The test also scans available kernel logs for fatal or uncorrectable PCIe/AER
-events from the current boot and current test interval. Previous-boot events
+events from the entire current boot, including events before the test started. Previous-boot events
 are historical and do not fail a post-reseat validation run. If the host boots
-with `pci=noaer`, AER sysfs counters are unavailable, or kernel logs are
-inaccessible, that limitation is recorded while any available replay/AER
-checks continue. If neither replay nor AER counters are available, the test
-is reported as `NOT BEING RUN`; this is not counted as a pass.
+with `pci=noaer`, native AER reporting is limited; firmware-reported errors may
+still appear in the journal. Available checks continue when counters or the
+journal are unavailable. A completed workload or journal scan with missing
+coverage is reported as `PARTIAL`, separately from passed and not-run tests.
+The summary says `NO FAILURES DETECTED` with partial coverage, not that all
+tests passed. `NOT BEING RUN` means neither the workload nor journal scan
+could run. Detected errors take precedence over partial coverage. Counter
+deltas still cover only the traffic interval; journal scanning covers the
+whole host's current boot. Partial coverage remains a non-failing exit status.
 
 ```bash
 ./test/fulltest.sh pcie-errors

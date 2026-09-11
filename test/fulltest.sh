@@ -63,6 +63,7 @@ mkdir -p "$BUILD_DIR" 2>/dev/null || {
 } | tee "$LOG_FILE"
 
 RESULTS_PASS=()
+RESULTS_PARTIAL=()
 RESULTS_FAIL=()
 RESULTS_SKIP=()
 RESULTS_NOT_RUN=()
@@ -468,26 +469,23 @@ capture_pcie_aer_snapshot() {
 }
 
 scan_pcie_kernel_errors() {
-    local since_ts="$1"
     local kernel_log=""
 
     if grep -Fqw 'pci=noaer' /proc/cmdline 2>/dev/null; then
-        record_remark "PCIe Error Delta: kernel AER reporting is disabled by pci=noaer; replay-counter delta remains authoritative for this run."
+        record_remark "PCIe Error Delta: pci=noaer limits native AER reporting; firmware-reported errors may still appear in the journal."
         log "  NOTE: pci=noaer is active; kernel AER events may not be available."
     fi
 
     if ! command -v journalctl >/dev/null 2>&1; then
         record_remark "PCIe Error Delta: bounded kernel log scan unavailable (journalctl missing)."
         log "  NOTE: Bounded kernel log scan unavailable (journalctl missing)."
-        return 0
+        return 2
     fi
-    # Restrict event scanning to the current boot and this test interval.
-    # Previous-boot AER/GHES messages describe historical hardware state and
-    # must not fail a post-reseat validation run.
-    if ! kernel_log=$(journalctl -k -b 0 --since "@$since_ts" 2>/dev/null); then
+    # Include all events since the current boot, excluding previous boots.
+    if ! kernel_log=$(journalctl -k -b 0 --no-pager 2>/dev/null); then
         record_remark "PCIe Error Delta: bounded kernel log scan unavailable (journal access failed)."
         log "  NOTE: Bounded kernel log scan unavailable (journal access failed)."
-        return 0
+        return 2
     fi
 
     local fatal_lines
@@ -495,12 +493,12 @@ scan_pcie_kernel_errors() {
         | grep -Ei 'PCIe Bus Error.*severity=(Uncorrected|Fatal)|AER:.*(Uncorrected|Fatal)|AER:.*(Physical Layer|Receiver Error)|Hardware Error.*PCIe|DPC:.*containment|uncorrectable.*PCIe|fatal.*PCIe' \
         | tail -40 || true)
     if [ -n "$fatal_lines" ]; then
-        log "  ERROR: Kernel log contains fatal/uncorrectable PCIe events:"
+        log "  ERROR: Current-boot kernel log contains matching PCIe/AER hardware errors:"
         log "$fatal_lines"
         return 1
     fi
 
-    log "  No fatal or uncorrectable PCIe events found in available kernel logs."
+    log "  No matching PCIe/AER hardware errors found in the available current-boot kernel log."
 }
 
 capture_nvlink_error_snapshot() {
@@ -844,7 +842,10 @@ run_test() {
     log "========================================"
     local rc=0
     log_run "$@" || rc=$?
-    if [ "$rc" -eq 77 ]; then
+    if [ "$rc" -eq 78 ]; then
+        log "[ PARTIAL ] $name — completed available checks; coverage incomplete"
+        RESULTS_PARTIAL+=("$name")
+    elif [ "$rc" -eq 77 ]; then
         # Test already recorded why it could not run.
         log "[ NOT RUN ] $name"
     elif [ "$rc" -eq 0 ]; then
@@ -1272,20 +1273,16 @@ PYEOF
 test_pcie_errors() {
     local tmp_dir
     tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/fulltest-pcie-errors.XXXXXX") || return 1
-    cleanup_pcie_errors() {
-        rm -rf "$tmp_dir"
-    }
-    trap cleanup_pcie_errors RETURN
+    # Clear the RETURN trap before leaving so later functions cannot inherit it.
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
 
     local before_file="$tmp_dir/before.metrics"
     local after_file="$tmp_dir/after.metrics"
     local aer_before="$tmp_dir/aer-before.metrics"
     local aer_after="$tmp_dir/aer-after.metrics"
-    local start_ts
     local capture_rc=0
     local rc=0
 
-    start_ts=$(date +%s)
     capture_pcie_replay_snapshot "$before_file" || capture_rc=$?
     local have_replay=true have_aer=true
     if [ "$capture_rc" -eq 2 ]; then have_replay=false; fi
@@ -1303,17 +1300,20 @@ test_pcie_errors() {
     fi
 
     if ! prepare_cuda_sample_binary "p2pBandwidthLatencyTest"; then
-        record_not_run "PCIe Error Delta" \
-            "CUDA p2pBandwidthLatencyTest could not be prepared"
-        scan_pcie_kernel_errors "$start_ts" || return 1
-        if ! $have_replay && ! $have_aer; then
+        record_remark "PCIe Error Delta: CUDA traffic test could not be prepared; counter deltas were not tested."
+        local journal_rc=0
+        scan_pcie_kernel_errors || journal_rc=$?
+        [ "$journal_rc" -eq 1 ] && return 1
+        if [ "$journal_rc" -eq 2 ]; then
+            record_not_run "PCIe Error Delta" "traffic test and current-boot journal unavailable"
             return 77
         fi
-        return "$rc"
+        return 78
     fi
     log "  Running CUDA p2pBandwidthLatencyTest to exercise PCIe traffic..."
     if ! "$CUDA_SAMPLE_BIN" 2>&1 | tee -a "$LOG_FILE"; then
         log "ERROR: CUDA p2pBandwidthLatencyTest failed during PCIe error-delta test."
+        scan_pcie_kernel_errors || true
         return 1
     fi
 
@@ -1334,10 +1334,12 @@ test_pcie_errors() {
         fi
     fi
 
-    scan_pcie_kernel_errors "$start_ts" || rc=1
-    if ! $have_replay && ! $have_aer && [ "$rc" -eq 0 ]; then
-        record_not_run "PCIe Error Delta" "PCIe replay and Linux AER counters unavailable"
-        return 77
+    local journal_rc=0
+    scan_pcie_kernel_errors || journal_rc=$?
+    [ "$journal_rc" -eq 1 ] && rc=1
+    if [ "$rc" -eq 0 ] && { ! $have_replay || ! $have_aer || [ "$journal_rc" -eq 2 ]; }; then
+        record_remark "PCIe Error Delta: traffic completed; replay counters=$have_replay, Linux AER counters=$have_aer, journal scan exit=$journal_rc (0=clean, 2=unavailable)."
+        return 78
     fi
     return "$rc"
 }
@@ -3369,6 +3371,13 @@ print_summary() {
     local skip_count=${#RESULTS_SKIP[@]}
     local not_run_count=${#RESULTS_NOT_RUN[@]}
     local remark_count=${#RESULTS_REMARK[@]}
+    local partial_count=${#RESULTS_PARTIAL[@]}
+
+    if [ "$partial_count" -gt 0 ]; then
+        log "  PARTIAL COVERAGE ($partial_count):"
+        for r in "${RESULTS_PARTIAL[@]}"; do log "    !  $r — available checks completed; coverage incomplete"; done
+        log ""
+    fi
 
     if [ "$pass_count" -gt 0 ]; then
         log "  PASSED ($pass_count):"
@@ -3392,9 +3401,13 @@ print_summary() {
         log "========================================"
         log "  RESULT: $fail_count test(s) FAILED"
         log "========================================"
+    elif [ "$partial_count" -gt 0 ]; then
+        log "========================================"
+        log "  RESULT: NO FAILURES DETECTED; $partial_count test(s) WITH PARTIAL COVERAGE; $not_run_count test(s) NOT BEING RUN"
+        log "========================================"
     elif [ "$not_run_count" -gt 0 ]; then
         log "========================================"
-        log "  RESULT: ALL RUN TESTS PASSED; $not_run_count test(s) NOT BEING RUN"
+        log "  RESULT: $pass_count test(s) PASSED; $not_run_count test(s) NOT BEING RUN"
         log "========================================"
     else
         log "========================================"
