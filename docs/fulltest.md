@@ -203,7 +203,7 @@ When specified:
 
 Default tests run in a fixed order when none are specified. `pcie-errors`,
 `memory-health`, `fabric-health`, and `gpu-policy` are opt-in and run only when
-named explicitly.
+named explicitly. `pcie-errors` is the final test in the default suite.
 
 ---
 
@@ -292,17 +292,19 @@ sudo sh -c 'echo performance > /sys/module/pcie_aspm/parameters/policy'
 
 ---
 
-### `pcie-errors` — PCIe Error Delta *(opt-in)*
+### `pcie-errors` — PCIe Error Delta
 
-Captures each scoped GPU's cumulative PCIe replay counter, runs the CUDA
-`p2pBandwidthLatencyTest`, and captures the counter again. Existing historical
+Captures each scoped GPU's cumulative PCIe replay counter and Linux PCIe AER
+device counters, runs the CUDA `p2pBandwidthLatencyTest` (including
+host-to-device traffic), and captures the counters again. Existing historical
 counts do not fail; any increase during the measured traffic interval does.
 
 The test also scans available kernel logs for fatal or uncorrectable PCIe/AER
-events. If the host boots with `pci=noaer`, or kernel logs are inaccessible,
-that limitation is recorded as a remark while replay-counter comparison still
-runs. If the installed driver does not expose `pcie.replay_counter`, the test
-is reported as `NOT BEING RUN`.
+events. If the host boots with `pci=noaer`, AER sysfs counters are unavailable,
+or kernel logs are inaccessible, that limitation is recorded while any
+available replay/AER checks continue. If neither replay nor AER counters are
+available, the test is reported as `NOT BEING RUN`; this is not counted as a
+pass.
 
 ```bash
 ./test/fulltest.sh pcie-errors
