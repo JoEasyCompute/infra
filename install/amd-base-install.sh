@@ -625,7 +625,7 @@ install_rocm_repos() {
     local ROCM_DRIVER_REPO_URL=""
 
     if [[ "${ROCM_VERSION}" == "10.0.0" ]]; then
-        DRIVER_KEYRING="/etc/apt/keyrings/amdrocm.gpg"
+        DRIVER_KEYRING="/etc/apt/keyrings/rocm.gpg"
         ROCM_KEYRING="/etc/apt/keyrings/amdrocm.gpg"
         ROCM_KEY_URL="https://stable.repo.amd.com/rocm/gpg/packages.gpg"
         ROCM_REPO_URL="deb [arch=amd64 signed-by=${ROCM_KEYRING}] https://stable.repo.amd.com/rocm/core/packages/ubuntu${UBUNTU_VERSION_ID/./} stable main"
@@ -647,6 +647,17 @@ install_rocm_repos() {
         | sudo tee "${ROCM_KEYRING}" > /dev/null \
         || error "Failed to install AMD ROCm GPG key"
     success "GPG key installed -> ${ROCM_KEYRING}"
+
+    # The AMDGPU driver repository uses the repo.radeon.com signing key;
+    # ROCm 10 uses the separate stable.repo.amd.com key above.
+    if [[ "${ROCM_VERSION}" == "10.0.0" ]]; then
+        info "Downloading AMDGPU driver repository GPG key..."
+        wget -q -O - "https://repo.radeon.com/rocm.gpg.key" \
+            | gpg --dearmor \
+            | sudo tee "${DRIVER_KEYRING}" > /dev/null \
+            || error "Failed to install AMDGPU repository GPG key"
+        success "GPG key installed -> ${DRIVER_KEYRING}"
+    fi
 
     # AMDGPU driver repo (provides amdgpu-dkms)
     # NOTE: this URL uses the build number (e.g. 30.30), NOT the ROCm version.
