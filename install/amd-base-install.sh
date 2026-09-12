@@ -9,7 +9,7 @@
 # ═══════════════════════════════════════════════════════════════
 #
 # Notes:
-#   * ROCm 7.2 is the current production release.
+#   * ROCm 10.0.0 / AMDGPU 31.50 is an opt-in current production release.
 #   * Ubuntu 22.04 requires kernel 5.15+ (stock LTS kernel is fine).
 #   * Ubuntu 24.04 requires kernel 6.8+ (stock noble HWE kernel is fine).
 #   * Ubuntu 26.04 is a preview lane that uses AMD's 31.30 preview repos.
@@ -64,7 +64,7 @@ usage() {
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-  --rocm    <7.13|7.2|7.1>   ROCm version to install (26.04 uses 7.13 preview)
+  --rocm    <10.0.0|7.13|7.2.4|7.2|7.1>   ROCm version to install
   --yes                      Non-interactive mode, use defaults (7.13 on 26.04; 7.2 otherwise)
   --freeze-gpu-stack         Accepted for orchestration symmetry; AMD uses repo pinning instead of apt holds
   --unfreeze-gpu-stack       Accepted for orchestration symmetry; AMD uses repo pinning instead of apt holds
@@ -75,6 +75,8 @@ Examples:
   $(basename "$0")                   # Interactive install
   $(basename "$0") --rocm 7.13       # 26.04 preview lane
   $(basename "$0") --freeze-gpu-stack # Accepted, but AMD stack control is repo-pin based
+  $(basename "$0") --rocm 7.2.4      # Latest verified production release
+  $(basename "$0") --rocm 10.0.0     # Current production release (AMDGPU 31.50)
   $(basename "$0") --rocm 7.2        # Explicit ROCm version
   $(basename "$0") --yes             # Non-interactive with defaults
   $(basename "$0") --uninstall       # Interactive uninstall
@@ -204,7 +206,7 @@ preflight_checks() {
     #   Ubuntu 22.04: supported kernels are 5.15.x (GA) and 6.8.x (HWE).
     #                 Kernels 6.11+ are NOT yet supported and will fail to build.
     #   Ubuntu 24.04: supported kernel is 6.8.x (GA).
-    #                 Kernels 6.11+ are NOT yet supported and will fail to build.
+    #                 ROCm 7.2.4 also supports 6.17.x HWE on Ubuntu 24.04.4.
     #   Ubuntu 26.04: preview lane; follow AMD 31.30 release guidance.
     # Source: https://rocm.docs.amd.com/projects/install-on-linux/en/latest/reference/system-requirements.html
     local kver; kver=$(uname -r)
@@ -234,12 +236,19 @@ preflight_checks() {
             (( warnings++ )) || true
         fi
     elif [[ "${UBUNTU_VERSION_ID}" == "24.04" ]]; then
-        # 24.04 GA kernel is 6.8. Kernels above 6.8 (e.g. 6.11 HWE) are unsupported.
-        if (( knum == 608 )); then
+        # ROCm 7.2.4 additionally qualifies Ubuntu 24.04.4 HWE kernel 6.17.
+        # https://rocm.docs.amd.com/projects/install-on-linux/en/docs-7.2.4/reference/system-requirements.html
+        if [[ "${ROCM_VERSION}" == "7.2.4" ]] && (( knum == 617 )); then
+            success "Kernel ${kver}: supported for ROCm ${ROCM_VERSION} on Ubuntu 24.04.4"
+        elif (( knum == 608 )); then
             success "Kernel ${kver}: supported for ROCm ${ROCM_VERSION} on Ubuntu 24.04"
         elif (( knum > 608 )); then
-            warn "Kernel ${kver} is NEWER than supported range for ROCm 7.x on Ubuntu 24.04"
-            warn "amdgpu-dkms WILL LIKELY FAIL TO BUILD. Supported kernel: 6.8.x (GA)"
+            warn "Kernel ${kver} is outside the qualified kernels for ROCm ${ROCM_VERSION} on Ubuntu 24.04"
+            if [[ "${ROCM_VERSION}" == "7.2.4" ]]; then
+                warn "Supported kernels: 6.8.x (GA), 6.17.x (HWE on Ubuntu 24.04.4)"
+            else
+                warn "amdgpu-dkms WILL LIKELY FAIL TO BUILD. Supported kernel: 6.8.x (GA)"
+            fi
             warn "Fix: revert to GA kernel or pin it:"
             warn "  sudo apt install linux-image-6.8.0-generic linux-headers-6.8.0-generic"
             warn "  Then reboot and select 6.8 in GRUB before re-running this script."
@@ -311,9 +320,9 @@ select_rocm_version() {
 
     if [[ -n "${ROCM_VERSION}" ]]; then
         case "${ROCM_VERSION}" in
-            "7.2"|"7.1") success "ROCm version (--rocm arg): ${ROCM_VERSION}"; return ;;
+            "10.0.0"|"7.2.4"|"7.2"|"7.1") success "ROCm version (--rocm arg): ${ROCM_VERSION}"; return ;;
             "7.13") error "ROCm 7.13 is only supported on Ubuntu 26.04 in the preview lane" ;;
-            *) error "Invalid --rocm: ${ROCM_VERSION}. Valid: 7.1, 7.2" ;;
+            *) error "Invalid --rocm: ${ROCM_VERSION}. Valid: 7.1, 7.2, 7.2.4, 10.0.0" ;;
         esac
     fi
     if [[ "${NON_INTERACTIVE}" == true ]]; then
@@ -321,12 +330,16 @@ select_rocm_version() {
     fi
     echo ""
     echo -e "${BOLD}Select ROCm Version:${NC}"
-    echo "  1) 7.2  -- current production release [default]"
+    echo "  1) 7.2  -- production release [default]"
     echo "  2) 7.1  -- previous stable"
+    echo "  3) 7.2.4 -- latest verified production release"
+    echo "  4) 10.0.0 -- current production release (AMDGPU 31.50)"
     echo ""
-    read -rp "Enter choice [1-2, default=1]: " rocm_choice
+    read -rp "Enter choice [1-4, default=1]: " rocm_choice
     case "${rocm_choice}" in
         2) ROCM_VERSION="7.1" ;;
+        3) ROCM_VERSION="7.2.4" ;;
+        4) ROCM_VERSION="10.0.0" ;;
         *) ROCM_VERSION="7.2" ;;
     esac
     success "ROCm version: ${ROCM_VERSION}"
@@ -586,12 +599,15 @@ install_rocm_repos() {
     # The amdgpu driver repo uses a build number (e.g. 30.30), NOT the ROCm
     # version string. The ROCm apt repo DOES use the ROCm version string.
     # Mapping:
+    #   ROCm 7.2.4 -> amdgpu 30.30.4
     #   ROCm 7.2  -> amdgpu 30.30
     #   ROCm 7.1  -> amdgpu 30.20.1
     #   ROCm 7.13 -> amdgpu 31.30 (preview lane / Ubuntu 26.04)
     # Source: https://repo.radeon.com/amdgpu/ (directory listing)
     local AMDGPU_BUILD_VERSION
     case "${ROCM_VERSION}" in
+        "10.0.0") AMDGPU_BUILD_VERSION="31.50" ;;
+        "7.2.4") AMDGPU_BUILD_VERSION="30.30.4" ;;
         "7.2") AMDGPU_BUILD_VERSION="30.30" ;;
         "7.1") AMDGPU_BUILD_VERSION="30.20.1" ;;
         "7.13") AMDGPU_BUILD_VERSION="31.30" ;;
@@ -608,7 +624,13 @@ install_rocm_repos() {
     local ROCM_KEY_URL="https://repo.radeon.com/rocm/rocm.gpg.key"
     local ROCM_DRIVER_REPO_URL=""
 
-    if [[ "${UBUNTU_VERSION_ID}" == "26.04" ]]; then
+    if [[ "${ROCM_VERSION}" == "10.0.0" ]]; then
+        DRIVER_KEYRING="/etc/apt/keyrings/amdrocm.gpg"
+        ROCM_KEYRING="/etc/apt/keyrings/amdrocm.gpg"
+        ROCM_KEY_URL="https://stable.repo.amd.com/rocm/gpg/packages.gpg"
+        ROCM_REPO_URL="deb [arch=amd64 signed-by=${ROCM_KEYRING}] https://stable.repo.amd.com/rocm/core/packages/ubuntu${UBUNTU_VERSION_ID/./} stable main"
+        ROCM_DRIVER_REPO_URL="deb [arch=amd64 signed-by=${DRIVER_KEYRING}] https://repo.radeon.com/amdgpu/${AMDGPU_BUILD_VERSION}/ubuntu ${UBUNTU_CODENAME} main"
+    elif [[ "${UBUNTU_VERSION_ID}" == "26.04" ]]; then
         DRIVER_KEYRING="/etc/apt/keyrings/amdrocm.gpg"
         ROCM_KEYRING="/etc/apt/keyrings/amdrocm.gpg"
         ROCM_KEY_URL="https://repo.amd.com/rocm/packages/gpg/rocm.gpg"
@@ -635,7 +657,11 @@ install_rocm_repos() {
     # ROCm software repo
     # NOTE: the 26.04 preview lane uses repo.amd.com; 22.04 / 24.04 retain the
     # existing repo.radeon.com package layout for the current production stack.
-    if [[ "${UBUNTU_VERSION_ID}" == "26.04" ]]; then
+    if [[ "${ROCM_VERSION}" == "10.0.0" ]]; then
+        info "Adding ROCm 10.0.0 repository..."
+        echo "${ROCM_REPO_URL}" | sudo tee /etc/apt/sources.list.d/rocm.list > /dev/null
+        printf "Package: *\nPin: release o=stable.repo.amd.com\nPin-Priority: 600\n" | sudo tee /etc/apt/preferences.d/rocm-pin-600 > /dev/null
+    elif [[ "${UBUNTU_VERSION_ID}" == "26.04" ]]; then
         info "Adding ROCm software repository (${ROCM_VERSION} preview)..."
         echo "${ROCM_REPO_URL}" \
             | sudo tee /etc/apt/sources.list.d/rocm.list > /dev/null
@@ -666,6 +692,9 @@ install_amd_stack() {
     success "amdgpu-dkms installed"
 
     local rocm_pkg="rocm"
+    if [[ "${ROCM_VERSION}" == "10.0.0" ]]; then
+        rocm_pkg="amdrocm10.0"
+    fi
     if [[ "${UBUNTU_VERSION_ID}" == "26.04" ]]; then
         rocm_pkg="amdrocm7.13"
     fi
@@ -692,8 +721,12 @@ configure_rocm_path() {
     section "ROCm PATH Configuration"
 
     # Set for current session so rocm-smi / rocminfo work in validate_install
-    export PATH="/opt/rocm/bin:${PATH}"
-    export LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH:-}"
+    local rocm_root="/opt/rocm"
+    if [[ "${ROCM_VERSION}" == "10.0.0" ]]; then
+        rocm_root="/opt/rocm/core-10.0"
+    fi
+    export PATH="${rocm_root}/bin:${PATH}"
+    export LD_LIBRARY_PATH="${rocm_root}/lib:${LD_LIBRARY_PATH:-}"
 
     # Persist across all future logins via /etc/profile.d/
     sudo tee /etc/profile.d/rocm.sh > /dev/null << 'PROFEOF'
@@ -1219,10 +1252,9 @@ main() {
     if [[ "${UNINSTALL}" == true ]]; then
         uninstall_node
     else
-        preflight_checks
-
         section "Version Selection"
         select_rocm_version
+        preflight_checks
         confirm_install
 
         install_base_packages
