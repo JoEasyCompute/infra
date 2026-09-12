@@ -652,10 +652,19 @@ install_rocm_repos() {
     # ROCm 10 uses the separate stable.repo.amd.com key above.
     if [[ "${ROCM_VERSION}" == "10.0.0" ]]; then
         info "Downloading AMDGPU driver repository GPG key..."
-        wget -q -O - "https://repo.radeon.com/rocm.gpg.key" \
-            | gpg --dearmor \
-            | sudo tee "${DRIVER_KEYRING}" > /dev/null \
-            || error "Failed to install AMDGPU repository GPG key"
+        local key_tmp_dir
+        key_tmp_dir=$(mktemp -d)
+        if ! GNUPGHOME="${key_tmp_dir}" gpg --batch --keyserver hkps://keyserver.ubuntu.com \
+            --recv-keys 9386B48A1A693C5C >/dev/null 2>&1; then
+            rm -rf "${key_tmp_dir}"
+            error "Failed to retrieve AMDGPU repository GPG key 9386B48A1A693C5C"
+        fi
+        if ! GNUPGHOME="${key_tmp_dir}" gpg --batch --export 9386B48A1A693C5C \
+            | sudo tee "${DRIVER_KEYRING}" > /dev/null; then
+            rm -rf "${key_tmp_dir}"
+            error "Failed to install AMDGPU repository GPG key"
+        fi
+        rm -rf "${key_tmp_dir}"
         success "GPG key installed -> ${DRIVER_KEYRING}"
     fi
 
