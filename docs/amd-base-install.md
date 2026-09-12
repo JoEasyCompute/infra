@@ -73,8 +73,10 @@ This is the most common source of `amdgpu-dkms` build failures. AMD's DKMS drive
 | Ubuntu | Supported kernels | Unsupported (DKMS build fails) |
 |--------|-------------------|-------------------------------|
 | 22.04 | 5.15.x (GA) ✅  6.8.x (HWE) ✅ | 6.11+ ❌ |
-| 24.04 | 6.8.x (GA) ✅ | 6.11+ HWE ❌ |
+| 24.04 | 6.8.x (GA); ROCm 7.2.4 also supports 6.17.x HWE on 24.04.4 | Other kernels outside the selected release’s qualified set |
 | 26.04 | Preview lane: follow AMD 31.30 guidance | Preview kernels outside the documented lane |
+
+For the 7.2.4 option, see [AMD’s versioned system requirements](https://rocm.docs.amd.com/projects/install-on-linux/en/docs-7.2.4/reference/system-requirements.html): Ubuntu 22.04.5 or 24.04.4.
 
 The script checks your running kernel in preflight and warns with the exact fix command if you are outside the supported range.
 
@@ -87,7 +89,7 @@ sudo reboot
 # select 6.8 kernel in GRUB, then re-run the script
 ```
 
-**Ubuntu 24.04 on 6.11+ HWE:** pin back to GA kernel:
+**Ubuntu 24.04 on an unqualified HWE kernel:** pin back to GA kernel:
 ```bash
 sudo apt install linux-image-6.8.0-generic linux-headers-6.8.0-generic
 sudo reboot
@@ -103,6 +105,12 @@ sudo reboot
 ```bash
 # Interactive install (prompts for ROCm version)
 sudo bash install/amd-base-install.sh
+
+# Current production release (Ubuntu 22.04 / 24.04)
+sudo bash install/amd-base-install.sh --rocm 10.0.0 --yes
+
+# Older verified production release (Ubuntu 22.04 / 24.04)
+sudo bash install/amd-base-install.sh --rocm 7.2.4 --yes
 
 # Explicit ROCm version
 sudo bash install/amd-base-install.sh --rocm 7.2
@@ -125,9 +133,13 @@ sudo bash install/amd-stack-pin.sh --reset
 
 | Option | ROCm | AMDGPU driver build | Notes |
 |--------|------|---------------------|-------|
-| `--rocm 7.2` | 7.2 | 30.30 | Default, current production |
+| `--rocm 10.0.0` | 10.0.0 | 31.50 | Current production pair; Ubuntu 22.04/24.04, menu choice 4 |
+| `--rocm 7.2.4` | 7.2.4 | 30.30.4 | Previous verified production update; menu choice 3 |
+| `--rocm 7.2` | 7.2 | 30.30 | Default production lane |
 | `--rocm 7.1` | 7.1 | 30.20.1 | Previous stable |
 | `--rocm 7.13` | 7.13 | 31.30 | Ubuntu 26.04 preview lane |
+
+ROCm 10.0.0 and AMDGPU 31.50 are AMD’s current package-manager production pair. The installer uses AMD’s `stable.repo.amd.com` repository and `amdrocm10.0` package for this option. Existing defaults and the Ubuntu 26.04 preview lane are unchanged.
 
 **Important — two separate versioning schemes:** The `amdgpu` driver repo uses a build number (e.g. `30.30`) that does not match the ROCm version string. The script maps these automatically. When a new ROCm release comes out, check `https://repo.radeon.com/amdgpu/` for the correct build number and update the mapping table in `install_rocm_repos()`.
 
@@ -139,12 +151,12 @@ sudo bash install/amd-stack-pin.sh --reset
 Reads `/etc/os-release`, confirms Ubuntu, maps version to apt codename (`jammy` / `noble` / `resolute`). Errors on unsupported versions.
 
 ### Step 2 — Pre-flight Checks
-Runs before any changes are made. Checks in order: sudo access, x86_64 architecture, 15 GB+ free on `/usr`, HTTPS connectivity to `repo.radeon.com` (hard fail) and `github.com` (soft warn), Secure Boot state, existing conflicting AMDGPU/ROCm packages, **kernel version** (see above), kernel headers availability in apt cache, AMD GPU presence in `lspci`.
+Runs after version selection so kernel checks use the selected release. Checks in order: sudo access, x86_64 architecture, 15 GB+ free on `/usr`, HTTPS connectivity to `repo.radeon.com` (hard fail) and `github.com` (soft warn), Secure Boot state, existing conflicting AMDGPU/ROCm packages, **kernel version** (see above), kernel headers availability in apt cache, AMD GPU presence in `lspci`.
 
 The GPU not appearing in `lspci` is a warning, not a hard failure — the driver will install fine without the card physically present and will bind to it after reboot.
 
 ### Step 3 — ROCm Version Selection
-Interactive menu or `--rocm` argument. Defaults to 7.2 in non-interactive mode on 22.04/24.04 and 7.13 preview on 26.04.
+Interactive menu or `--rocm` argument. Menu choice 4 selects ROCm 10.0.0 on Ubuntu 22.04/24.04. Defaults to 7.2 in non-interactive mode on 22.04/24.04 and 7.13 preview on 26.04.
 
 If you are running Ubuntu 26.04, the installer auto-selects the preview lane even when you do not pass `--rocm`.
 
@@ -361,12 +373,12 @@ The `--uninstall` path performs a full clean removal and restores the system to 
 | User groups | `render`, `video` required | Not required |
 | PATH config | `/etc/profile.d/rocm.sh` | `/etc/profile.d/cuda.sh` |
 | Install root | `/opt/rocm/` | `/usr/local/cuda/` |
-| Version selector | `--rocm <7.2\|7.1>` | `--driver <575\|580\|595\|610>` + `--cuda <12-9\|13\|13.3>` |
+| Version selector | `--rocm <10.0.0\|7.2.4\|7.2\|7.1\|7.13>` | `--driver <575\|580\|595\|610>` + `--cuda <12-9\|13\|13.3>` |
 | Repo URL scheme | Two separate schemes (ROCm version + AMDGPU build number) | Single CUDA keyring |
 | Monitoring | `rocm-smi`, `rocminfo` | `nvidia-smi`, DCGM |
 | Bandwidth test | `rocm-bandwidth-test` | `nvbandwidth` |
 | ML arch env var | `PYTORCH_ROCM_ARCH` (auto-detected) | Not needed (CUDA auto-detects) |
-| Kernel upper bound | Must be ≤ 6.8 (newer kernels break DKMS build) | No upper bound |
+| Kernel compatibility | Release-specific; 7.2.4 includes 6.17 HWE on Ubuntu 24.04.4 | No upper bound |
 
 ---
 
