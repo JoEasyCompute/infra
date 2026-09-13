@@ -102,6 +102,53 @@ sudo reboot
 
 ## Usage
 
+As the final configuration step before the reboot prompt, the installer adds the
+same managed SSH public key used by the NVIDIA installer to the invoking user's
+`authorized_keys`, then disables SSH password and keyboard-interactive login.
+Run via `sudo` from the intended non-root login account. Key and effective SSH
+configuration checks must pass before `ssh` is reloaded; a failed application
+restores the previous configuration. Existing SSH sessions remain open. A GPU
+cleanup-only run exits before this final step.
+
+The policy is a managed block at the beginning of `/etc/ssh/sshd_config`:
+`PubkeyAuthentication yes`, `PasswordAuthentication no`, and
+`KbdInteractiveAuthentication no`. Existing authorized keys are preserved.
+Conflicting effective SSH settings stop the change. After installation, connect
+from your workstation using the corresponding private key, for example:
+
+```bash
+ssh -i ~/.ssh/EZC-HydraHost ezc@SERVER_IP
+```
+
+### Updating an existing installation
+
+Run with the desired `--rocm` version. The installer reports installed GPU
+packages and updates compatible APT installations in place. Held AMD packages
+must be explicitly unheld. Remove runfile/manual installations with their
+original uninstaller before switching to this APT installer.
+
+Moving between legacy ROCm and the new `amdrocm` package family (for example,
+7.2 to 10.0.0) requires cleanup and a reboot before installation. The interactive
+installer shows an APT removal simulation and asks before removing GPU packages.
+APT can also remove dependent packages; review the displayed plan. This does not
+invoke the full host `--uninstall` flow.
+
+For an explicitly authorized non-interactive replacement:
+
+```bash
+sudo bash install/amd-base-install.sh --rocm 10.0.0 --replace-gpu-stack --yes
+sudo reboot
+# After reconnecting, from the repository root:
+sudo bash install/amd-base-install.sh --rocm 10.0.0 --yes
+```
+
+The cleanup run stops and prints reboot/rerun instructions. A saved boot ID blocks
+reinstallation on the same boot. `--yes` alone does not authorize migration
+cleanup. Stop GPU jobs and containers before updating. Reboot after a driver
+update even if `rocm-smi` still works: the loaded module can be the previous one.
+Rerun with the same `--rocm` selection after reboot if validation or ML setup was
+deferred.
+
 ```bash
 # Interactive install (prompts for ROCm version)
 sudo bash install/amd-base-install.sh
