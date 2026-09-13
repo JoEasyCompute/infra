@@ -56,6 +56,9 @@ apt_get() {
 ROCM_VERSION=""
 NON_INTERACTIVE=false
 UNINSTALL=false
+REPLACE_GPU_STACK=false
+GPU_DRIVER_CHANGED=false
+AMD_REINSTALL_MARKER="/var/lib/amd-node-install/reinstall-boot-id"
 FREEZE_GPU_STACK=false
 UNFREEZE_GPU_STACK=false
 
@@ -66,6 +69,7 @@ Usage: $(basename "$0") [OPTIONS]
 Options:
   --rocm    <10.0.0|7.13|7.2.4|7.2|7.1>   ROCm version to install
   --yes                      Non-interactive mode, use defaults (7.13 on 26.04; 7.2 otherwise)
+  --replace-gpu-stack        Remove installed AMD GPU packages, then stop for reboot before reinstall
   --freeze-gpu-stack         Accepted for orchestration symmetry; AMD uses repo pinning instead of apt holds
   --unfreeze-gpu-stack       Accepted for orchestration symmetry; AMD uses repo pinning instead of apt holds
   --uninstall                Full clean removal -- restores system to post-OS-install state
@@ -96,6 +100,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --rocm)      ROCM_VERSION="$2"; shift 2 ;;
         --yes)       NON_INTERACTIVE=true; shift ;;
+        --replace-gpu-stack) REPLACE_GPU_STACK=true; shift ;;
         --freeze-gpu-stack) FREEZE_GPU_STACK=true; shift ;;
         --unfreeze-gpu-stack) UNFREEZE_GPU_STACK=true; shift ;;
         --uninstall) UNINSTALL=true; shift ;;
@@ -189,17 +194,7 @@ preflight_checks() {
         success "Secure Boot: disabled (OK)"
     fi
 
-    # Existing AMDGPU / ROCm packages
-    if dpkg -l 2>/dev/null | grep -qP '^ii\s+(amdgpu|amdrocm|amdgpu-install|rocm|hip-)'; then
-        warn "Existing AMDGPU/ROCm packages found -- may conflict:"
-        dpkg -l 2>/dev/null | grep -P '^ii\s+(amdgpu|amdrocm|amdgpu-install|rocm|hip-)' | awk '{printf "    %s %s\n", $2, $3}' || true
-        if [[ "${NON_INTERACTIVE}" == false ]]; then
-            read -rp "  Continue anyway? [y/N]: " purge_confirm
-            [[ "${purge_confirm,,}" == "y" ]] || error "Aborted."
-        fi
-    else
-        success "No conflicting AMDGPU/ROCm packages"
-    fi
+    # Existing GPU packages are handled by prepare_amd_upgrade after confirmation.
 
     # Kernel version check -- amdgpu-dkms only builds successfully against
     # kernels that AMD has qualified. For ROCm 7.x:
@@ -582,9 +577,7 @@ configure_gcc_alternatives() {
 # ================================================================
 # STEP 7 -- AMD ROCm GPG key + repos
 # ================================================================
-install_rocm_repos() {
-    section "AMD ROCm Repository & Signing Key"
-
+clear_amd_repo_files() {
     # Remove any stale repo files from a previous (possibly failed) run.
     # This prevents apt from using an old/wrong URL on the apt-get update below.
     if [[ -f /etc/apt/sources.list.d/amdgpu.list ]] || [[ -f /etc/apt/sources.list.d/rocm.list ]]; then
@@ -592,9 +585,13 @@ install_rocm_repos() {
         sudo rm -f /etc/apt/sources.list.d/amdgpu.list \
                    /etc/apt/sources.list.d/rocm.list \
                    /etc/apt/preferences.d/rocm-pin-600
-        apt_get update -q 2>/dev/null || true   # flush stale cache; errors OK here
         success "Stale repo files removed"
     fi
+}
+
+install_rocm_repos() {
+    section "AMD ROCm Repository & Signing Key"
+    clear_amd_repo_files
 
     # The amdgpu driver repo uses a build number (e.g. 30.30), NOT the ROCm
     # version string. The ROCm apt repo DOES use the ROCm version string.
@@ -703,21 +700,107 @@ install_rocm_repos() {
 # ================================================================
 # STEP 8 -- AMDGPU DKMS driver + ROCm stack
 # ================================================================
+amd_installed_packages() {
+    dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package} ${Version}\n' 2>/dev/null \
+        | awk '$1 ~ /^[ih]i/ && $2 ~ /^(amdgpu|amdrocm|rocm|hip-|hsa-|miopen|rocblas|rocfft|rocprim|rocrand|rocsolver|rocsparse|rocthrust|comgr|hipblas|hipcub|hipfft|hiprtc|hipsparse)/ { print }'
+}
+
+amd_driver_version() {
+    dpkg-query -W -f='${Status} ${Version}\n' amdgpu-dkms 2>/dev/null \
+        | awk '$1 == "install" && $3 == "installed" { print $4 }'
+}
+
+prepare_amd_upgrade() {
+    local installed migration=false answer boot_id old_boot pkg held held_pkg
+    local packages=()
+    if [[ -f "${AMD_REINSTALL_MARKER}" ]]; then
+        boot_id=$(cat /proc/sys/kernel/random/boot_id) || error "Cannot determine current boot ID"
+        old_boot=$(cat "${AMD_REINSTALL_MARKER}") || error "Cannot read AMD reinstall state"
+        [[ "${boot_id}" != "${old_boot}" ]] \
+            || error "GPU cleanup already completed on this boot. Run sudo reboot, then rerun this installer with --rocm ${ROCM_VERSION}."
+        sudo rm -f "${AMD_REINSTALL_MARKER}" || error "Cannot clear AMD reinstall state"
+        info "Reboot after GPU cleanup confirmed; continuing installation."
+    fi
+    installed=$(amd_installed_packages) || error "Cannot inspect installed AMD packages"
+    if [[ -z "${installed}" ]]; then
+        if command -v rocminfo >/dev/null 2>&1; then
+            error "ROCm tools exist without installed AMD packages. Remove the previous runfile/manual installation with its original uninstaller, reboot, then rerun with --rocm ${ROCM_VERSION}."
+        fi
+        info "No installed AMD GPU packages; fresh installation."
+        return
+    fi
+    info "Installed AMD GPU packages (name / version):"
+    printf '%s\n' "${installed}"
+    info "Requested ROCm: ${ROCM_VERSION}"
+    held=$(apt-mark showhold) || error "Cannot inspect APT package holds"
+    while read -r held_pkg; do
+        [[ -n "${held_pkg}" ]] || continue
+        if printf '%s\n' "${installed}" | awk -v name="${held_pkg}" '$2 == name { found=1 } END { exit !found }'; then
+            error "AMD package ${held_pkg} is held. Review and unhold it explicitly before updating or replacing the GPU stack."
+        fi
+    done <<< "${held}"
+    # AMD's new amdrocm package layout must not be mixed with legacy ROCm.
+    if [[ "${ROCM_VERSION}" == "10.0.0" ]]; then
+        if printf '%s\n' "${installed}" | awk '$2 ~ /^(rocm|hip-|hsa-|amdrocm.*7\.)/ { found=1 } END { exit !found }'; then migration=true; fi
+    elif printf '%s\n' "${installed}" | awk '$2 ~ /^amdrocm/ { found=1 } END { exit !found }'; then
+        # The existing preview lane can be updated in place within 7.13.
+        if [[ "${ROCM_VERSION}" != "7.13" ]] || printf '%s\n' "${installed}" | awk '$2 ~ /^amdrocm/ && $3 !~ /^7\.13[.-]/ { found=1 } END { exit !found }'; then migration=true; fi
+    fi
+    if [[ "${migration}" == true && "${REPLACE_GPU_STACK}" == false ]]; then
+        warn "Changing ROCm package families requires GPU package removal, a reboot, and a second installer run."
+        if [[ "${NON_INTERACTIVE}" == true ]]; then
+            error "Rerun with --replace-gpu-stack to authorize GPU package removal; --yes alone does not authorize migration cleanup."
+        fi
+        read -rp "Remove the listed GPU packages now and stop for reboot? [y/N]: " answer
+        [[ "${answer,,}" == y ]] || error "Upgrade cancelled; installed packages retained."
+        REPLACE_GPU_STACK=true
+    fi
+    if [[ "${REPLACE_GPU_STACK}" == true ]]; then
+        while read -r pkg; do packages+=("${pkg}"); done < <(printf '%s\n' "${installed}" | awk '{ print $2 }')
+        warn "Stop GPU jobs and containers before continuing. This removes only the listed GPU packages; APT may also remove dependent packages."
+        apt_get --simulate purge "${packages[@]}" || error "GPU package removal simulation failed"
+        if [[ "${NON_INTERACTIVE}" == false ]]; then
+            read -rp "Apply this removal plan, then stop for reboot before reinstalling? [y/N]: " answer
+            [[ "${answer,,}" == y ]] || error "Upgrade cancelled."
+        fi
+        boot_id=$(cat /proc/sys/kernel/random/boot_id) || error "Cannot determine boot ID"
+        sudo mkdir -p "$(dirname "${AMD_REINSTALL_MARKER}")" || error "Cannot create reinstall state directory"
+        apt_get purge -y "${packages[@]}" || error "GPU cleanup failed; fix package errors before retrying."
+        printf '%s\n' "${boot_id}" | sudo tee "${AMD_REINSTALL_MARKER}" >/dev/null || error "Cannot save reboot requirement"
+        warn "GPU cleanup complete. Reboot REQUIRED before reinstalling; installation stops here."
+        printf 'Run: sudo reboot\nAfter reconnecting, run: sudo bash %q --rocm %q\n' "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")" "${ROCM_VERSION}"
+        exit 0
+    fi
+    info "Updating the selected GPU stack in place. A changed kernel driver requires reboot even if rocm-smi still works."
+}
+
+amd_reboot_required() {
+    [[ "${GPU_DRIVER_CHANGED}" == true ]] && return 0
+    local loaded disk
+    loaded=$(cat /sys/module/amdgpu/version 2>/dev/null) || return 0
+    disk=$(modinfo -F version amdgpu 2>/dev/null) || return 0
+    [[ -z "${loaded}" || "${loaded}" != "${disk}" ]]
+}
+
 install_amd_stack() {
     section "AMDGPU Driver + ROCm Stack"
+    local driver_before driver_after
+    driver_before=$(amd_driver_version)
+    local rocm_pkg="rocm"
+    if [[ "${ROCM_VERSION}" == "10.0.0" ]]; then
+        rocm_pkg="amdrocm10.0"
+    elif [[ "${UBUNTU_VERSION_ID}" == "26.04" ]]; then
+        rocm_pkg="amdrocm7.13"
+    fi
+    apt_get --simulate install amdgpu-dkms "${rocm_pkg}" \
+        || error "APT cannot resolve the GPU stack update. Review conflicts before changing packages."
     info "Installing amdgpu-dkms kernel driver..."
     apt_get install -V -y \
         amdgpu-dkms \
         || error "amdgpu-dkms install failed -- check kernel headers and DKMS"
     success "amdgpu-dkms installed"
-
-    local rocm_pkg="rocm"
-    if [[ "${ROCM_VERSION}" == "10.0.0" ]]; then
-        rocm_pkg="amdrocm10.0"
-    fi
-    if [[ "${UBUNTU_VERSION_ID}" == "26.04" ]]; then
-        rocm_pkg="amdrocm7.13"
-    fi
+    driver_after=$(amd_driver_version)
+    [[ "${driver_before}" == "${driver_after}" ]] || GPU_DRIVER_CHANGED=true
 
     info "Installing ROCm ${ROCM_VERSION} stack..."
     # 'rocm' / 'amdrocm7.13' pulls in: HIP runtime, OpenCL, rocm-smi, rocminfo,
@@ -1012,7 +1095,8 @@ offer_reboot() {
     echo -e "    rocm-bandwidth-test -a     # PCIe/inter-GPU bandwidth"
     echo ""
 
-    if ! (command -v rocm-smi &>/dev/null && rocm-smi &>/dev/null 2>/dev/null); then
+    if amd_reboot_required; then
+        warn "Reboot required to activate the installed AMDGPU driver. After reboot, rerun this installer with --rocm ${ROCM_VERSION} if validation or ML architecture setup was deferred."
         if [[ "${NON_INTERACTIVE}" == true ]]; then
             info "Non-interactive -- reboot manually to activate AMDGPU kernel module."
         else
@@ -1266,6 +1350,87 @@ uninstall_node() {
 # ================================================================
 # Main
 # ================================================================
+# Disable SSH password authentication only after installing the login user's key.
+finalize_ssh_access() {
+    section "Final Step -- SSH Key Authentication"
+    local target_user target_home target_group ssh_dir keys key_tmp config_tmp backup effective peer
+    local config="/etc/ssh/sshd_config"
+    local access_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG3WsgbyzKCqXrdZJyWiRA/SHPC1nGAfs6bvnj7K/PZ9 ezc@local'
+    target_user="${SUDO_USER:-${USER:-}}"
+    [[ -n "${target_user}" && "${target_user}" != root ]] \
+        || error "SSH password login was not changed. Run the installer via sudo from the intended non-root login account."
+    target_home=$(getent passwd "${target_user}" | awk -F: '{print $6}')
+    [[ "${target_home}" == /* && -d "${target_home}" ]] || error "Cannot resolve the SSH user's home directory"
+    target_group=$(id -gn "${target_user}") || error "Cannot resolve the SSH user's group"
+    [[ -x /usr/sbin/sshd && -f "${config}" ]] || error "OpenSSH server is required before disabling password login"
+    sudo /usr/sbin/sshd -t || error "Existing SSH configuration is invalid; password login was not changed"
+    ssh_dir="${target_home}/.ssh"
+    keys="${ssh_dir}/authorized_keys"
+    key_tmp=$(mktemp) || error "Cannot create key staging file"
+    if [[ -f "${keys}" ]]; then
+        sudo cat "${keys}" > "${key_tmp}" || { rm -f "${key_tmp}"; error "Cannot read authorized_keys"; }
+    fi
+    if ! grep -Fxq "${access_key}" "${key_tmp}"; then
+        printf '\n%s\n' "${access_key}" >> "${key_tmp}"
+    fi
+    sudo install -d -m 0700 -o "${target_user}" -g "${target_group}" "${ssh_dir}" \
+        && sudo install -m 0600 -o "${target_user}" -g "${target_group}" "${key_tmp}" "${keys}" \
+        || { rm -f "${key_tmp}"; error "Cannot install SSH authorized key"; }
+    rm -f "${key_tmp}"
+    sudo -u "${target_user}" ssh-keygen -l -f "${keys}" >/dev/null \
+        || error "No readable valid SSH key; password login was not changed"
+
+    config_tmp=$(mktemp) || error "Cannot stage SSH configuration"
+    backup=$(mktemp) || { rm -f "${config_tmp}"; error "Cannot back up SSH configuration"; }
+    sudo cat "${config}" > "${backup}" || { rm -f "${config_tmp}" "${backup}"; error "Cannot back up SSH configuration"; }
+    # OpenSSH uses the first global value. Put this before distro/cloud-init
+    # Includes, and remove only our own block on subsequent installer runs.
+    {
+        printf '%s\n' '# BEGIN infra SSH key-only login' \
+            'PubkeyAuthentication yes' 'PasswordAuthentication no' \
+            'KbdInteractiveAuthentication no' '# END infra SSH key-only login'
+        sudo awk '
+            /^# BEGIN infra SSH key-only login$/ { skip=1; next }
+            /^# END infra SSH key-only login$/ { skip=0; next }
+            !skip { print }
+        ' "${config}"
+    } > "${config_tmp}"
+    peer="${SSH_CONNECTION:-}"
+    peer="${peer%% *}"
+    peer="${peer:-127.0.0.1}"
+    if ! sudo /usr/sbin/sshd -t -f "${config_tmp}"; then
+        rm -f "${config_tmp}" "${backup}"
+        error "Proposed SSH configuration is invalid; original retained"
+    fi
+    effective=$(sudo /usr/sbin/sshd -T -f "${config_tmp}" -C "user=${target_user},host=${peer},addr=${peer}") || {
+        rm -f "${config_tmp}" "${backup}"; error "Cannot verify effective SSH configuration";
+    }
+    if ! printf '%s\n' "${effective}" | grep -Fxq 'passwordauthentication no' \
+        || ! printf '%s\n' "${effective}" | grep -Fxq 'kbdinteractiveauthentication no' \
+        || ! printf '%s\n' "${effective}" | grep -Fxq 'pubkeyauthentication yes' \
+        || ! printf '%s\n' "${effective}" | grep -Eq '^authenticationmethods (any|publickey)$' \
+        || ! printf '%s\n' "${effective}" | awk -v absolute="${keys}" '
+            $1 == "authorizedkeysfile" {
+                for (i=2; i<=NF; i++) if ($i == ".ssh/authorized_keys" || $i == "%h/.ssh/authorized_keys" || $i == absolute) found=1
+            }
+            END { exit !found }
+        '; then
+        rm -f "${config_tmp}" "${backup}"
+        error "SSH Match rules or AuthorizedKeysFile override key-only access for ${target_user}; original configuration retained"
+    fi
+    if ! sudo install -m 0644 -o root -g root "${config_tmp}" "${config}" \
+        || ! sudo /usr/sbin/sshd -t \
+        || ! sudo systemctl reload ssh; then
+        sudo install -m 0644 -o root -g root "${backup}" "${config}" || error "SSH rollback failed; backup is ${backup}"
+        sudo systemctl reload ssh || warn "Could not reload restored SSH configuration"
+        rm -f "${config_tmp}" "${backup}"
+        error "SSH change failed; previous configuration restored"
+    fi
+    rm -f "${config_tmp}" "${backup}"
+    success "SSH public-key login configured for ${target_user}; password and keyboard-interactive login disabled."
+    info "Existing SSH sessions stay open. New connections must use an authorized private key."
+}
+
 main() {
     detect_ubuntu
 
@@ -1276,7 +1441,11 @@ main() {
         select_rocm_version
         preflight_checks
         confirm_install
+        prepare_amd_upgrade
 
+        # A failed earlier install may have left sources pointing at the wrong
+        # keyring. Remove our managed sources before the first bootstrap update.
+        clear_amd_repo_files
         install_base_packages
         configure_pcie_aspm
         install_cli_tool_compat_symlinks
@@ -1290,6 +1459,7 @@ main() {
         install_bandwidth_test
         setup_repos
         validate_install
+        finalize_ssh_access
         offer_reboot
     fi
 }

@@ -1,5 +1,42 @@
 # base-install.sh
 
+The final configuration step installs/verifies the managed SSH public key for
+the invoking non-root user, then disables SSH password and keyboard-interactive
+authentication. Run via `sudo` from the intended login account. The installer
+validates the effective SSH settings before reloading `ssh`; failure restores
+the prior configuration. Existing sessions remain open. This runs before the
+reboot prompt, including in `--no-gpu-stack` mode. Uninstall retains the managed
+key when this key-only policy is active.
+
+The managed block is written at the beginning of `/etc/ssh/sshd_config`, before
+distribution/cloud-init includes. It sets `PubkeyAuthentication yes`,
+`PasswordAuthentication no`, and `KbdInteractiveAuthentication no`. Existing
+authorized keys are preserved. Conflicting effective `Match` or authentication
+settings stop the change. Connect using the private key matching an authorized
+public key; for the existing operator key, from your workstation:
+
+```bash
+ssh -i ~/.ssh/EZC-HydraHost ezc@SERVER_IP
+```
+
+## Updating an existing GPU stack
+
+Run with the desired `--driver` and `--cuda` selections. The installer displays
+the installed driver and target, then uses APT to update in place after checking
+dependency resolution. Stop GPU workloads before confirming. There is normally
+no pre-install reboot for an APT-managed update.
+
+Held GPU packages require `--unfreeze-gpu-stack`; the existing workflow re-holds
+them after validation. A detected NVIDIA runfile installation must first be
+removed using its `nvidia-uninstall` tool, followed by a reboot and rerun. Do not
+use the full host `--uninstall` flow just to update a driver.
+
+Changed driver packages or a mismatch between the loaded and installed module
+trigger a reboot prompt even when `nvidia-smi` still works. `--yes` prints the
+manual reboot requirement. If DCGM, gpu-burn, or validation was deferred, rerun
+with the same driver/CUDA selections after reboot. `--no-gpu-stack` continues to
+skip driver updates.
+
 
 For the complete staged workflow, deployment bundle, saved options, and reboot recovery, see [provision.md](provision.md).
 GPU node base installation script for vast.ai and production deployments.

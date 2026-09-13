@@ -48,6 +48,8 @@ GPU_STACK_HOLD_DETECTED=false
 GPU_STACK_HOLD_AFTER_INSTALL=false
 GPU_STACK_HELD_PACKAGES=()
 GPU_STACK_INSTALLED_PACKAGES=()
+NVIDIA_DRIVER_BEFORE=""
+NVIDIA_REBOOT_REQUIRED=false
 
 usage() {
     cat <<EOF
@@ -182,15 +184,8 @@ preflight_checks() {
 
     # Existing NVIDIA
     if [[ "${SKIP_GPU_STACK}" == false ]]; then
-        if dpkg -l 2>/dev/null | grep -qP '^ii\s+(nvidia-driver|libnvidia-compute|cuda-)'; then
-            warn "Existing NVIDIA/CUDA packages found — may conflict:"
-            dpkg -l 2>/dev/null | grep -P '^ii\s+(nvidia|cuda|cudnn)' | awk '{printf "    %s %s\n", $2, $3}' || true
-            if [[ "${NON_INTERACTIVE}" == false ]]; then
-                read -rp "  Continue anyway? [y/N]: " purge_confirm
-                [[ "${purge_confirm,,}" == "y" ]] || error "Aborted."
-            fi
-        else
-            success "No conflicting NVIDIA/CUDA packages"
+        if command -v nvidia-uninstall &>/dev/null; then
+            error "NVIDIA runfile installation detected. Stop GPU workloads and use its nvidia-uninstall tool first, then reboot before rerunning this installer. Do not use --uninstall for a driver-only upgrade."
         fi
     else
         success "Existing NVIDIA/CUDA package conflict check: skipped (--no-gpu-stack)"
@@ -977,6 +972,45 @@ install_cuda_keyring() {
 # ═══════════════════════════════════════════════════════════════
 # STEP 8 — NVIDIA stack
 # ═══════════════════════════════════════════════════════════════
+nvidia_driver_snapshot() {
+    dpkg-query -W -f='${db:Status-Status} ${binary:Package} ${Version}\n' 2>/dev/null \
+        | awk '$1 == "installed" && $2 ~ /^(nvidia-(driver|dkms|kernel|utils)|libnvidia-|linux-(modules|objects)-nvidia)/ {print $2, $3}' \
+        | sort
+}
+
+plan_nvidia_update() {
+    NVIDIA_DRIVER_BEFORE=$(nvidia_driver_snapshot)
+    section "NVIDIA Driver Install / Update"
+    if [[ -n "${NVIDIA_DRIVER_BEFORE}" ]]; then
+        print_gpu_stack_packages "Installed driver packages:" "${NVIDIA_DRIVER_BEFORE}"
+        info "APT will update the existing stack to driver ${DRIVER_VERSION}-open and CUDA ${CUDA_DISPLAY_VERSION}, including available package updates."
+    else
+        info "No packaged NVIDIA driver found; installing ${DRIVER_VERSION}-open."
+    fi
+    warn "Stop GPU workloads before proceeding. If driver packages change, reboot after installation before using GPUs; a working nvidia-smi does not remove that requirement."
+    info "APT-managed upgrades normally need no uninstall or reboot before installation."
+    if [[ "${GPU_STACK_HOLD_DETECTED}" == true && "${UNFREEZE_GPU_STACK}" != true ]]; then
+        error "GPU packages are held. Rerun with --unfreeze-gpu-stack to update and re-hold them, or use --no-gpu-stack for host tooling only."
+    fi
+}
+
+check_nvidia_reboot() {
+    local after
+    after=$(nvidia_driver_snapshot)
+    if [[ "${after}" != "${NVIDIA_DRIVER_BEFORE}" ]]; then
+        NVIDIA_REBOOT_REQUIRED=true
+    fi
+    # Also catches a rerun after a completed upgrade but before its reboot.
+    if [[ -r /sys/module/nvidia/version ]] && command -v modinfo &>/dev/null; then
+        local loaded installed
+        read -r loaded < /sys/module/nvidia/version
+        installed=$(modinfo -F version nvidia 2>/dev/null) || installed=""
+        if [[ -n "${installed}" && "${loaded}" != "${installed}" ]]; then
+            NVIDIA_REBOOT_REQUIRED=true
+        fi
+    fi
+}
+
 install_nvidia_stack() {
     section "NVIDIA Driver + CUDA Stack"
     info "Installing driver=${DRIVER_VERSION}, cuda=${CUDA_DISPLAY_VERSION}, cudnn=cudnn9-cuda-${CUDA_CUDNN_SUFFIX}"
@@ -985,6 +1019,12 @@ install_nvidia_stack() {
     # are present for every supported driver version.
     local utils_pkg="nvidia-utils-${DRIVER_VERSION}"
     info "Adding ${utils_pkg} for nvidia-smi and related tools"
+
+    sudo apt-get --simulate install \
+        "cuda-toolkit-${CUDA_TOOLKIT_VERSION}" "libnvidia-compute-${DRIVER_VERSION}" \
+        "nvidia-dkms-${DRIVER_VERSION}-open" "${utils_pkg}" \
+        "cudnn9-cuda-${CUDA_CUDNN_SUFFIX}" nvtop \
+        || error "APT cannot resolve the requested GPU update. Review conflicts above before changing packages; do not run the full host --uninstall."
 
     sudo apt-get install -V -y \
         "cuda-toolkit-${CUDA_TOOLKIT_VERSION}" \
@@ -995,6 +1035,7 @@ install_nvidia_stack() {
         nvtop \
         || error "NVIDIA stack install failed — check apt output above"
     success "NVIDIA stack installed"
+    check_nvidia_reboot
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -1176,7 +1217,9 @@ offer_reboot() {
         warn "To temporarily update through this installer: rerun with --unfreeze-gpu-stack"
     fi
 
-    if ! (command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null); then
+    if [[ "${NVIDIA_REBOOT_REQUIRED}" == true ]] || ! (command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null); then
+        warn "Reboot required before GPU workloads to activate the installed NVIDIA driver."
+        info "After reboot, rerun with --driver ${DRIVER_VERSION} --cuda ${CUDA_VERSION} if DCGM, gpu-burn, or validation was deferred."
         if [[ "${NON_INTERACTIVE}" == true ]]; then
             info "Non-interactive — reboot manually to activate NVIDIA kernel modules."
         else
@@ -1442,7 +1485,9 @@ uninstall_node() {
     authorized_keys="${ssh_dir}/authorized_keys"
     sudoers_file="/etc/sudoers.d/99-infra-${target_user}"
 
-    if [[ -f "${authorized_keys}" ]]; then
+    if sudo grep -Fq '# BEGIN infra SSH key-only login' /etc/ssh/sshd_config 2>/dev/null; then
+        info "Keeping the managed SSH key because password login is disabled."
+    elif [[ -f "${authorized_keys}" ]]; then
         local auth_tmp
         auth_tmp="$(mktemp)"
         awk -v key="${access_key}" '$0 != key { print }' "${authorized_keys}" > "${auth_tmp}"
@@ -1604,6 +1649,87 @@ uninstall_node() {
 # ═══════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════
+# Disable SSH password authentication only after installing the login user's key.
+finalize_ssh_access() {
+    section "Final Step -- SSH Key Authentication"
+    local target_user target_home target_group ssh_dir keys key_tmp config_tmp backup effective peer
+    local config="/etc/ssh/sshd_config"
+    local access_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG3WsgbyzKCqXrdZJyWiRA/SHPC1nGAfs6bvnj7K/PZ9 ezc@local'
+    target_user="${SUDO_USER:-${USER:-}}"
+    [[ -n "${target_user}" && "${target_user}" != root ]] \
+        || error "SSH password login was not changed. Run the installer via sudo from the intended non-root login account."
+    target_home=$(getent passwd "${target_user}" | awk -F: '{print $6}')
+    [[ "${target_home}" == /* && -d "${target_home}" ]] || error "Cannot resolve the SSH user's home directory"
+    target_group=$(id -gn "${target_user}") || error "Cannot resolve the SSH user's group"
+    [[ -x /usr/sbin/sshd && -f "${config}" ]] || error "OpenSSH server is required before disabling password login"
+    sudo /usr/sbin/sshd -t || error "Existing SSH configuration is invalid; password login was not changed"
+    ssh_dir="${target_home}/.ssh"
+    keys="${ssh_dir}/authorized_keys"
+    key_tmp=$(mktemp) || error "Cannot create key staging file"
+    if [[ -f "${keys}" ]]; then
+        sudo cat "${keys}" > "${key_tmp}" || { rm -f "${key_tmp}"; error "Cannot read authorized_keys"; }
+    fi
+    if ! grep -Fxq "${access_key}" "${key_tmp}"; then
+        printf '\n%s\n' "${access_key}" >> "${key_tmp}"
+    fi
+    sudo install -d -m 0700 -o "${target_user}" -g "${target_group}" "${ssh_dir}" \
+        && sudo install -m 0600 -o "${target_user}" -g "${target_group}" "${key_tmp}" "${keys}" \
+        || { rm -f "${key_tmp}"; error "Cannot install SSH authorized key"; }
+    rm -f "${key_tmp}"
+    sudo -u "${target_user}" ssh-keygen -l -f "${keys}" >/dev/null \
+        || error "No readable valid SSH key; password login was not changed"
+
+    config_tmp=$(mktemp) || error "Cannot stage SSH configuration"
+    backup=$(mktemp) || { rm -f "${config_tmp}"; error "Cannot back up SSH configuration"; }
+    sudo cat "${config}" > "${backup}" || { rm -f "${config_tmp}" "${backup}"; error "Cannot back up SSH configuration"; }
+    # OpenSSH uses the first global value. Put this before distro/cloud-init
+    # Includes, and remove only our own block on subsequent installer runs.
+    {
+        printf '%s\n' '# BEGIN infra SSH key-only login' \
+            'PubkeyAuthentication yes' 'PasswordAuthentication no' \
+            'KbdInteractiveAuthentication no' '# END infra SSH key-only login'
+        sudo awk '
+            /^# BEGIN infra SSH key-only login$/ { skip=1; next }
+            /^# END infra SSH key-only login$/ { skip=0; next }
+            !skip { print }
+        ' "${config}"
+    } > "${config_tmp}"
+    peer="${SSH_CONNECTION:-}"
+    peer="${peer%% *}"
+    peer="${peer:-127.0.0.1}"
+    if ! sudo /usr/sbin/sshd -t -f "${config_tmp}"; then
+        rm -f "${config_tmp}" "${backup}"
+        error "Proposed SSH configuration is invalid; original retained"
+    fi
+    effective=$(sudo /usr/sbin/sshd -T -f "${config_tmp}" -C "user=${target_user},host=${peer},addr=${peer}") || {
+        rm -f "${config_tmp}" "${backup}"; error "Cannot verify effective SSH configuration";
+    }
+    if ! printf '%s\n' "${effective}" | grep -Fxq 'passwordauthentication no' \
+        || ! printf '%s\n' "${effective}" | grep -Fxq 'kbdinteractiveauthentication no' \
+        || ! printf '%s\n' "${effective}" | grep -Fxq 'pubkeyauthentication yes' \
+        || ! printf '%s\n' "${effective}" | grep -Eq '^authenticationmethods (any|publickey)$' \
+        || ! printf '%s\n' "${effective}" | awk -v absolute="${keys}" '
+            $1 == "authorizedkeysfile" {
+                for (i=2; i<=NF; i++) if ($i == ".ssh/authorized_keys" || $i == "%h/.ssh/authorized_keys" || $i == absolute) found=1
+            }
+            END { exit !found }
+        '; then
+        rm -f "${config_tmp}" "${backup}"
+        error "SSH Match rules or AuthorizedKeysFile override key-only access for ${target_user}; original configuration retained"
+    fi
+    if ! sudo install -m 0644 -o root -g root "${config_tmp}" "${config}" \
+        || ! sudo /usr/sbin/sshd -t \
+        || ! sudo systemctl reload ssh; then
+        sudo install -m 0644 -o root -g root "${backup}" "${config}" || error "SSH rollback failed; backup is ${backup}"
+        sudo systemctl reload ssh || warn "Could not reload restored SSH configuration"
+        rm -f "${config_tmp}" "${backup}"
+        error "SSH change failed; previous configuration restored"
+    fi
+    rm -f "${config_tmp}" "${backup}"
+    success "SSH public-key login configured for ${target_user}; password and keyboard-interactive login disabled."
+    info "Existing SSH sessions stay open. New connections must use an authorized private key."
+}
+
 main() {
     detect_ubuntu
 
@@ -1625,6 +1751,7 @@ main() {
             select_driver_version
             select_cuda_version
             validate_combination
+            plan_nvidia_update
         fi
         confirm_install
 
@@ -1660,6 +1787,7 @@ main() {
                 hold_gpu_stack_packages
             fi
         fi
+        finalize_ssh_access
         offer_reboot
     fi
 }
