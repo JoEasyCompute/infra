@@ -15,7 +15,7 @@ error() { echo "$*" >&2; exit 1; }
 dpkg-query() { printf '%s\n' "$MOCK_PACKAGES"; }
 MOCK_PACKAGES=$'installed nvidia-dkms-580-open 580.1\nconfig-files nvidia-utils-575 575.1\ninstalled unrelated 1'
 [[ $(nvidia_driver_snapshot) == 'nvidia-dkms-580-open 580.1' ]]
-DRIVER_VERSION=610 CUDA_VERSION=13.3 CUDA_DISPLAY_VERSION=13.3
+DRIVER_VERSION=615 CUDA_VERSION=13.4 CUDA_DISPLAY_VERSION=13.4
 GPU_STACK_HOLD_DETECTED=false UNFREEZE_GPU_STACK=false
 output=$(plan_nvidia_update)
 [[ $output == *'APT will update'* ]]
@@ -48,7 +48,8 @@ SKIP_GPU_STACK=true
 output=$(offer_reboot)
 [[ $output == *'Host tooling install complete'* && $output != *'reboot manually'* ]]
 # Failed simulation must prevent the mutating apt transaction.
-CUDA_TOOLKIT_VERSION=13-3 CUDA_CUDNN_SUFFIX=13
+CUDA_TOOLKIT_VERSION=13-4 CUDA_CUDNN_SUFFIX=13-4
+apt-cache() { echo "libnvidia-compute | 615.71.09-2ubuntu1 | repo"; }
 sudo() {
     if [[ "$*" == *--simulate* ]]; then return 1; fi
     echo 'MUTATING APT CALLED'; return 0
