@@ -57,7 +57,7 @@ Usage: $(basename "$0") [OPTIONS]
 
 Options:
   --driver  <575|580|595|615>        NVIDIA driver version (default: interactive)
-  --cuda    <12-9|13|13.3>           CUDA toolkit version  (default: interactive)
+  --cuda    <12-9|13|13.4>           CUDA toolkit version  (default: interactive)
   --yes                      Non-interactive mode, use defaults (580 + 12-9)
   --no-gpu-stack             Skip NVIDIA driver / CUDA toolkit / DCGM / gpu-burn install
   --freeze-gpu-stack         Hold the validated NVIDIA/CUDA stack after install
@@ -68,7 +68,7 @@ Options:
 Examples:
   $(basename "$0")                           # Interactive install
   $(basename "$0") --driver 580 --cuda 12-9  # Explicit versions
-  $(basename "$0") --driver 615 --cuda 13.3  # Latest supported stack
+  $(basename "$0") --driver 615 --cuda 13.4  # Latest supported stack
   $(basename "$0") --no-gpu-stack           # Base host tooling only
   $(basename "$0") --freeze-gpu-stack        # Freeze the validated stack after install
   $(basename "$0") --unfreeze-gpu-stack      # Unhold, upgrade, then re-freeze
@@ -341,13 +341,13 @@ select_cuda_version() {
                 CUDA_MAJOR="13"
                 CUDA_CUDNN_SUFFIX="13"
                 ;;
-            "13-3"|"13.3")
-                CUDA_TOOLKIT_VERSION="13-3"
-                CUDA_DISPLAY_VERSION="13.3"
+            "13-4"|"13.4")
+                CUDA_TOOLKIT_VERSION="13-4"
+                CUDA_DISPLAY_VERSION="13.4"
                 CUDA_MAJOR="13"
-                CUDA_CUDNN_SUFFIX="13-3"
+                CUDA_CUDNN_SUFFIX="13-4"
                 ;;
-            *) error "Invalid --cuda: ${CUDA_VERSION}. Valid: 12-9, 13, 13.3" ;;
+            *) error "Invalid --cuda: ${CUDA_VERSION}. Valid: 12-9, 13, 13.4" ;;
         esac
         success "CUDA version (--cuda arg): ${CUDA_DISPLAY_VERSION}"; return
     fi
@@ -359,16 +359,16 @@ select_cuda_version() {
     echo ""
     echo -e "${BOLD}Select CUDA Toolkit Version:${NC}"
     echo "  1) 12.9  — stable [default]"
-    echo "  2) 13.3  — latest"
+    echo "  2) 13.4  — latest"
     echo "  3) 13.0  — legacy 13.x"
     echo ""
     read -rp "Enter choice [1-3, default=1]: " cuda_choice
     case "${cuda_choice}" in
         2)
-            CUDA_TOOLKIT_VERSION="13-3"
-            CUDA_DISPLAY_VERSION="13.3"
+            CUDA_TOOLKIT_VERSION="13-4"
+            CUDA_DISPLAY_VERSION="13.4"
             CUDA_MAJOR="13"
-            CUDA_CUDNN_SUFFIX="13-3"
+            CUDA_CUDNN_SUFFIX="13-4"
             ;;
         3)
             CUDA_TOOLKIT_VERSION="13"
