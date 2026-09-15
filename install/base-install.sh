@@ -56,7 +56,7 @@ usage() {
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-  --driver  <575|580|595|610>        NVIDIA driver version (default: interactive)
+  --driver  <575|580|595|615>        NVIDIA driver version (default: interactive)
   --cuda    <12-9|13|13.3>           CUDA toolkit version  (default: interactive)
   --yes                      Non-interactive mode, use defaults (580 + 12-9)
   --no-gpu-stack             Skip NVIDIA driver / CUDA toolkit / DCGM / gpu-burn install
@@ -68,7 +68,7 @@ Options:
 Examples:
   $(basename "$0")                           # Interactive install
   $(basename "$0") --driver 580 --cuda 12-9  # Explicit versions
-  $(basename "$0") --driver 610 --cuda 13.3  # Latest supported stack
+  $(basename "$0") --driver 615 --cuda 13.3  # Latest supported stack
   $(basename "$0") --no-gpu-stack           # Base host tooling only
   $(basename "$0") --freeze-gpu-stack        # Freeze the validated stack after install
   $(basename "$0") --unfreeze-gpu-stack      # Unhold, upgrade, then re-freeze
@@ -302,8 +302,8 @@ hold_gpu_stack_packages() {
 select_driver_version() {
     if [[ -n "${DRIVER_VERSION}" ]]; then
         case "${DRIVER_VERSION}" in
-            575|580|595|610) success "Driver version (--driver arg): ${DRIVER_VERSION}" ; return ;;
-            *) error "Invalid --driver: ${DRIVER_VERSION}. Valid: 575, 580, 595, 610" ;;
+            575|580|595|615) success "Driver version (--driver arg): ${DRIVER_VERSION}" ; return ;;
+            *) error "Invalid --driver: ${DRIVER_VERSION}. Valid: 575, 580, 595, 615" ;;
         esac
     fi
     if [[ "${NON_INTERACTIVE}" == true ]]; then
@@ -314,13 +314,13 @@ select_driver_version() {
     echo "  1) 575  — stable, widely tested"
     echo "  2) 580  — recommended [default]"
     echo "  3) 595  — current"
-    echo "  4) 610  — latest"
+    echo "  4) 615  — latest"
     echo ""
     read -rp "Enter choice [1-4, default=2]: " driver_choice
     case "${driver_choice}" in
         1) DRIVER_VERSION="575" ;;
         3) DRIVER_VERSION="595" ;;
-        4) DRIVER_VERSION="610" ;;
+        4) DRIVER_VERSION="615" ;;
         *) DRIVER_VERSION="580" ;;
     esac
     success "Driver version: ${DRIVER_VERSION}"
@@ -388,7 +388,7 @@ select_cuda_version() {
 
 validate_combination() {
     if [[ "${CUDA_MAJOR}" == "13" && "${DRIVER_VERSION}" == "575" ]]; then
-        warn "Driver 575 + CUDA 13.x may have compatibility issues. Recommended: 580, 595, or 610."
+        warn "Driver 575 + CUDA 13.x may have compatibility issues. Recommended: 580, 595, or 615."
         if [[ "${NON_INTERACTIVE}" == false ]]; then
             read -rp "  Continue anyway? [y/N]: " yn
             [[ "${yn,,}" == "y" ]] || error "Aborted."
