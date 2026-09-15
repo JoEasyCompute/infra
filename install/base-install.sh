@@ -1015,24 +1015,40 @@ install_nvidia_stack() {
     section "NVIDIA Driver + CUDA Stack"
     info "Installing driver=${DRIVER_VERSION}, cuda=${CUDA_DISPLAY_VERSION}, cudnn=cudnn9-cuda-${CUDA_CUDNN_SUFFIX}"
 
-    # Install nvidia-utils explicitly so nvidia-smi and related userspace tools
-    # are present for every supported driver version.
-    local utils_pkg="nvidia-utils-${DRIVER_VERSION}"
-    info "Adding ${utils_pkg} for nvidia-smi and related tools"
+    local -a driver_packages
+    if (( DRIVER_VERSION >= 590 )); then
+        # NVIDIA's Ubuntu packages no longer include the branch in their names.
+        # Select an exact version before simulation; installing the pin package
+        # in that same transaction also keeps subsequent upgrades on this branch.
+        local package_version
+        package_version=$(apt-cache madison libnvidia-compute \
+            | awk -v branch="${DRIVER_VERSION}" '$3 ~ "^" branch "[.]" {print $3}' \
+            | sort -Vr | awk 'NR == 1 {print}')
+        [[ -n "${package_version}" ]] \
+            || error "NVIDIA branch ${DRIVER_VERSION} is unavailable in the configured APT repositories."
+        driver_packages=(
+            "libnvidia-compute=${package_version}"
+            "nvidia-dkms-open=${package_version}"
+            "nvidia-driver-pinning-${DRIVER_VERSION}"
+        )
+        info "Using NVIDIA compute packages ${package_version} (includes nvidia-smi)"
+    else
+        driver_packages=(
+            "libnvidia-compute-${DRIVER_VERSION}"
+            "nvidia-dkms-${DRIVER_VERSION}-open"
+            "nvidia-utils-${DRIVER_VERSION}"
+        )
+        info "Adding nvidia-utils-${DRIVER_VERSION} for nvidia-smi and related tools"
+    fi
 
     sudo apt-get --simulate install \
-        "cuda-toolkit-${CUDA_TOOLKIT_VERSION}" "libnvidia-compute-${DRIVER_VERSION}" \
-        "nvidia-dkms-${DRIVER_VERSION}-open" "${utils_pkg}" \
+        "cuda-toolkit-${CUDA_TOOLKIT_VERSION}" "${driver_packages[@]}" \
         "cudnn9-cuda-${CUDA_CUDNN_SUFFIX}" nvtop \
         || error "APT cannot resolve the requested GPU update. Review conflicts above before changing packages; do not run the full host --uninstall."
 
     sudo apt-get install -V -y \
-        "cuda-toolkit-${CUDA_TOOLKIT_VERSION}" \
-        "libnvidia-compute-${DRIVER_VERSION}" \
-        "nvidia-dkms-${DRIVER_VERSION}-open" \
-        "${utils_pkg}" \
-        "cudnn9-cuda-${CUDA_CUDNN_SUFFIX}" \
-        nvtop \
+        "cuda-toolkit-${CUDA_TOOLKIT_VERSION}" "${driver_packages[@]}" \
+        "cudnn9-cuda-${CUDA_CUDNN_SUFFIX}" nvtop \
         || error "NVIDIA stack install failed — check apt output above"
     success "NVIDIA stack installed"
     check_nvidia_reboot
