@@ -211,6 +211,7 @@ Use this as the shortest path from intent to script:
 | Fresh AMD node | [install/provision-amd.sh](install/provision-amd.sh) | Orchestrated across reboots; best default for full AMD provisioning |
 | Host tooling only | [install/base-install.sh](install/base-install.sh) `--no-gpu-stack` | Installs the shared operator toolkit, recovery policy, aliases, and helper tooling without NVIDIA drivers or CUDA |
 | Bootstrap a local user | [install/user-bootstrap.sh](install/user-bootstrap.sh) | Creates or updates a user, adds sudo-group access, installs SSH authorized keys from a named repo key, file, or inline text, and writes a passwordless sudoers drop-in |
+| Refresh access on an existing user | [install/user-access-setup.sh](install/user-access-setup.sh) | Installs the repo-managed SSH key, passwordless sudo, and shell aliases without rerunning the base installer; defaults to the invoking sudo user |
 | Manage graphical autologin | [install/autologin.sh](install/autologin.sh) | Enables or disables desktop autologin for the current sudo user on GDM3, LightDM, or SDDM |
 | Manage console autologin | [install/console-autologin.sh](install/console-autologin.sh) | Enables or disables tty1 autologin for the current sudo user |
 | Manage PCIe boot policy | [install/pcie-aspm.sh](install/pcie-aspm.sh) | Shows the current boot policy and writes or removes the managed GRUB drop-in for PCIe AER, ASPM, and NVMe latency tuning |
