@@ -33,7 +33,7 @@ DRIVER_VERSION=615
 GPU_STACK_INSTALLED_EARLY=false
 KEYRING_CALLED=false
 prepare_nvidia_driver_transition >/dev/null
-[[ $KEYRING_CALLED == true && $APT_CALLS == *'apt-get --simulate install'* && $APT_CALLS == *'libnvidia-compute-580-'* && $APT_CALLS == *'nvidia-kernel-common-580-'* && $GPU_STACK_INSTALLED_EARLY == true ]] || { echo 'FAIL: complete driver transition not performed before bootstrap'; exit 1; }
+[[ $KEYRING_CALLED == true && $APT_CALLS == *'apt-get --simulate install'* && $APT_CALLS == *'libnvidia-cfg1=615.71.09-2ubuntu1'* && $APT_CALLS == *'libnvidia-compute-580-'* && $APT_CALLS == *'nvidia-kernel-common-580-'* && $GPU_STACK_INSTALLED_EARLY == true ]] || { echo 'FAIL: complete driver transition not performed before bootstrap'; exit 1; }
 output=$(install_nvidia_stack)
 [[ $output == *'libnvidia-compute=615.71.09-2ubuntu1'* && $output == *'nvidia-dkms-open=615.71.09-2ubuntu1'* ]] || { echo 'FAIL: modern driver package names/version'; exit 1; }
 [[ $output == *'libnvidia-compute-580-'* && $output == *'nvidia-dkms-580-open-'* && $output == *'nvidia-kernel-common-580-'* ]] || { echo 'FAIL: old driver packages not removed in apt transactions'; exit 1; }
