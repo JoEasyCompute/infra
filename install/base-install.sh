@@ -432,9 +432,16 @@ confirm_install() {
 # ═══════════════════════════════════════════════════════════════
 legacy_nvidia_package_removals() {
     dpkg-query -W -f='${db:Status-Status} ${binary:Package}\n' 2>/dev/null \
-        | awk '$1 == "installed" && $2 !~ /^nvidia-driver-pinning-/ \
+        | awk '$1 ~ /^(installed|unpacked|half-installed|half-configured|triggers-awaited|triggers-pending)$/ \
+            && $2 !~ /^nvidia-driver-pinning-/ \
             && $2 ~ /^(nvidia-|libnvidia-|linux-(modules|objects)-nvidia-)/ \
             && $2 ~ /-[0-9][0-9][0-9](-|:|$)/ {print $2 "-"}'
+}
+
+legacy_nvidia_cfg1_packages() {
+    dpkg-query -W -f='${db:Status-Status} ${binary:Package}\n' 2>/dev/null \
+        | awk '$1 ~ /^(installed|unpacked|half-installed|half-configured|triggers-awaited|triggers-pending)$/ \
+            && $2 ~ /^libnvidia-cfg1-[0-9][0-9][0-9](:|$)/ {print $2}'
 }
 
 prepare_nvidia_driver_transition() {
@@ -1046,12 +1053,23 @@ install_nvidia_stack() {
         # NVIDIA's Ubuntu packages no longer include the branch in their names.
         # The branch pin must be installed in a separate transaction before
         # APT resolves the driver's exact-version dependencies.
-        local package_version
+        local package_version package
         package_version=$(apt-cache madison libnvidia-compute \
             | awk -v branch="${DRIVER_VERSION}" '$3 ~ "^" branch "[.]" {print $3}' \
             | sort -Vr | awk 'NR == 1 {print}')
         [[ -n "${package_version}" ]] \
             || error "NVIDIA branch ${DRIVER_VERSION} is unavailable in the configured APT repositories."
+
+        # The branch-suffixed and generic cfg1 packages may own the same
+        # shared library without declaring a replace relationship. Remove the
+        # old owner before APT unpacks the generic package.
+        while IFS= read -r package; do
+            [[ -z "${package}" ]] && continue
+            info "Removing conflicting legacy package ${package} before configuring driver ${DRIVER_VERSION}"
+            sudo dpkg --remove --force-depends "${package}" \
+                || error "Failed to remove conflicting legacy package ${package}."
+        done < <(legacy_nvidia_cfg1_packages)
+
         while IFS= read -r removal; do
             if [[ -n "${removal}" ]]; then
                 obsolete_driver_removals+=("${removal}")
