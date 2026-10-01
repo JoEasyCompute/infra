@@ -2,7 +2,9 @@
 # Verify package selection without running installer startup or APT.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-eval "$(awk '$0 == "install_nvidia_stack() {" {copy=1} copy {print} copy && /^}$/ {exit}' "${ROOT_DIR}/install/base-install.sh")"
+for fn in legacy_nvidia_package_removals prepare_nvidia_driver_transition install_nvidia_stack; do
+    eval "$(awk -v name="$fn" '$0 == name "() {" {copy=1} copy {print} copy && /^}$/ {exit}' "${ROOT_DIR}/install/base-install.sh")"
+done
 info() { :; }; section() { :; }; success() { :; }
 error() { echo "$*" >&2; exit 1; }
 check_nvidia_reboot() { :; }
@@ -24,6 +26,8 @@ sudo() {
     fi
 }
 DRIVER_VERSION=615
+output=$(prepare_nvidia_driver_transition)
+[[ $output == *'apt-get --simulate remove'* && $output == *'libnvidia-compute-580-'* && $output == *'nvidia-kernel-common-580-'* ]] || { echo 'FAIL: legacy packages not cleared before bootstrap'; exit 1; }
 output=$(install_nvidia_stack)
 [[ $output == *'libnvidia-compute=615.71.09-2ubuntu1'* && $output == *'nvidia-dkms-open=615.71.09-2ubuntu1'* ]] || { echo 'FAIL: modern driver package names/version'; exit 1; }
 [[ $output == *'libnvidia-compute-580-'* && $output == *'nvidia-dkms-580-open-'* && $output == *'nvidia-kernel-common-580-'* ]] || { echo 'FAIL: old driver packages not removed in apt transactions'; exit 1; }

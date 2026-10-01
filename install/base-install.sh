@@ -429,12 +429,37 @@ confirm_install() {
 # ═══════════════════════════════════════════════════════════════
 # STEP 5 — Base packages
 # ═══════════════════════════════════════════════════════════════
+legacy_nvidia_package_removals() {
+    dpkg-query -W -f='${db:Status-Status} ${binary:Package}\n' 2>/dev/null \
+        | awk '$1 == "installed" && $2 !~ /^nvidia-driver-pinning-/ \
+            && $2 ~ /^(nvidia-|libnvidia-|linux-(modules|objects)-nvidia-)/ \
+            && $2 ~ /-[0-9][0-9][0-9](-|:|$)/ {print $2 "-"}'
+}
+
+prepare_nvidia_driver_transition() {
+    (( DRIVER_VERSION >= 590 )) || return 0
+
+    local -a legacy_packages=()
+    local package
+    while IFS= read -r package; do
+        [[ -n "${package}" ]] && legacy_packages+=("${package}")
+    done < <(legacy_nvidia_package_removals)
+    ((${#legacy_packages[@]} > 0)) || return 0
+
+    info "Removing legacy NVIDIA branch packages before bootstrap APT installs"
+    sudo apt-get --simulate remove "${legacy_packages[@]}" \
+        || error "APT cannot safely remove legacy NVIDIA packages before the driver update."
+    sudo apt-get remove -y "${legacy_packages[@]}" \
+        || error "Failed to remove legacy NVIDIA packages before the driver update."
+}
+
 install_base_packages() {
     section "Base System Packages"
 
     info "Bootstrapping prerequisites..."
     sudo apt-get update -q \
         || error "apt-get update failed"
+    prepare_nvidia_driver_transition
     sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
         software-properties-common apt-transport-https ca-certificates curl gnupg debconf-utils \
         || error "Bootstrap package install failed"
@@ -1034,12 +1059,7 @@ install_nvidia_stack() {
         # The branch pin remains active if the subsequent stack simulation fails.
         while IFS= read -r removal; do
             [[ -n "${removal}" ]] && obsolete_driver_removals+=("${removal}")
-        done < <(
-            dpkg-query -W -f='${db:Status-Status} ${binary:Package}\n' 2>/dev/null \
-                | awk '$1 == "installed" && $2 !~ /^nvidia-driver-pinning-/ \
-                    && $2 ~ /^(nvidia-|libnvidia-|linux-(modules|objects)-nvidia-)/ \
-                    && $2 ~ /-[0-9][0-9][0-9](-|:|$)/ {print $2 "-"}'
-        )
+        done < <(legacy_nvidia_package_removals)
         driver_packages=(
             "libnvidia-compute=${package_version}"
             "nvidia-dkms-open=${package_version}"
