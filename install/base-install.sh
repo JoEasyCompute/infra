@@ -48,6 +48,7 @@ GPU_STACK_HOLD_DETECTED=false
 GPU_STACK_HOLD_AFTER_INSTALL=false
 GPU_STACK_HELD_PACKAGES=()
 GPU_STACK_INSTALLED_PACKAGES=()
+GPU_STACK_INSTALLED_EARLY=false
 NVIDIA_DRIVER_BEFORE=""
 NVIDIA_REBOOT_REQUIRED=false
 
@@ -446,11 +447,10 @@ prepare_nvidia_driver_transition() {
     done < <(legacy_nvidia_package_removals)
     ((${#legacy_packages[@]} > 0)) || return 0
 
-    info "Removing legacy NVIDIA branch packages before bootstrap APT installs"
-    sudo apt-get --simulate remove "${legacy_packages[@]}" \
-        || error "APT cannot safely remove legacy NVIDIA packages before the driver update."
-    sudo apt-get remove -y "${legacy_packages[@]}" \
-        || error "Failed to remove legacy NVIDIA packages before the driver update."
+    info "Resolving the NVIDIA branch transition before bootstrap APT installs"
+    install_cuda_keyring
+    install_nvidia_stack
+    GPU_STACK_INSTALLED_EARLY=true
 }
 
 install_base_packages() {
@@ -1825,8 +1825,10 @@ main() {
         install_shell_aliases
         configure_gcc_alternatives
         if [[ "${SKIP_GPU_STACK}" == false ]]; then
-            install_cuda_keyring
-            install_nvidia_stack
+            if [[ "${GPU_STACK_INSTALLED_EARLY}" == false ]]; then
+                install_cuda_keyring
+                install_nvidia_stack
+            fi
             configure_cuda_path
             install_dcgm
         fi
