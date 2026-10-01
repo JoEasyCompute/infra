@@ -1015,22 +1015,36 @@ install_nvidia_stack() {
     section "NVIDIA Driver + CUDA Stack"
     info "Installing driver=${DRIVER_VERSION}, cuda=${CUDA_DISPLAY_VERSION}, cudnn=cudnn9-cuda-${CUDA_CUDNN_SUFFIX}"
 
-    local -a driver_packages
+    local -a driver_packages obsolete_driver_removals=()
     if (( DRIVER_VERSION >= 590 )); then
         # NVIDIA's Ubuntu packages no longer include the branch in their names.
-        # Select an exact version before simulation; installing the pin package
-        # in that same transaction also keeps subsequent upgrades on this branch.
+        # The branch pin must be installed in a separate transaction before
+        # APT resolves the driver's exact-version dependencies.
         local package_version
         package_version=$(apt-cache madison libnvidia-compute \
             | awk -v branch="${DRIVER_VERSION}" '$3 ~ "^" branch "[.]" {print $3}' \
             | sort -Vr | awk 'NR == 1 {print}')
         [[ -n "${package_version}" ]] \
             || error "NVIDIA branch ${DRIVER_VERSION} is unavailable in the configured APT repositories."
+        info "Configuring NVIDIA branch ${DRIVER_VERSION} before resolving driver dependencies"
+        sudo apt-get --simulate install "nvidia-driver-pinning-${DRIVER_VERSION}" \
+            || error "APT cannot resolve NVIDIA branch pin ${DRIVER_VERSION}."
+        sudo apt-get install -V -y "nvidia-driver-pinning-${DRIVER_VERSION}" \
+            || error "Failed to configure NVIDIA branch pin ${DRIVER_VERSION}."
+        # The branch pin remains active if the subsequent stack simulation fails.
+        while IFS= read -r removal; do
+            [[ -n "${removal}" ]] && obsolete_driver_removals+=("${removal}")
+        done < <(
+            dpkg-query -W -f='${db:Status-Status} ${binary:Package}\n' 2>/dev/null \
+                | awk '$1 == "installed" && $2 !~ /^nvidia-driver-pinning-/ \
+                    && $2 ~ /^(nvidia-|libnvidia-|linux-(modules|objects)-nvidia-)/ \
+                    && $2 ~ /-[0-9][0-9][0-9](-|:|$)/ {print $2 "-"}'
+        )
         driver_packages=(
             "libnvidia-compute=${package_version}"
             "nvidia-dkms-open=${package_version}"
-            "nvidia-driver-pinning-${DRIVER_VERSION}"
         )
+        driver_packages+=("${obsolete_driver_removals[@]}")
         info "Using NVIDIA compute packages ${package_version} (includes nvidia-smi)"
     else
         driver_packages=(
