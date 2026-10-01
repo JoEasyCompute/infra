@@ -2,7 +2,7 @@
 # Verify package selection without running installer startup or APT.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-for fn in legacy_nvidia_package_removals prepare_nvidia_driver_transition install_nvidia_stack; do
+for fn in legacy_nvidia_package_removals legacy_nvidia_cfg1_packages prepare_nvidia_driver_transition install_nvidia_stack; do
     eval "$(awk -v name="$fn" '$0 == name "() {" {copy=1} copy {print} copy && /^}$/ {exit}' "${ROOT_DIR}/install/base-install.sh")"
 done
 info() { :; }; section() { :; }; success() { :; }
@@ -11,7 +11,7 @@ check_nvidia_reboot() { :; }
 KEYRING_CALLED=false
 install_cuda_keyring() { KEYRING_CALLED=true; }
 CUDA_TOOLKIT_VERSION=13-4 CUDA_DISPLAY_VERSION=13.4 CUDA_CUDNN_SUFFIX=13-4
-MOCK_INSTALLED_NVIDIA=$'installed libnvidia-compute-580 580.178.04-1ubuntu1\ninstalled nvidia-dkms-580-open 580.178.04-1ubuntu1\ninstalled nvidia-kernel-common-580 580.173.02-1ubuntu1\ninstalled unrelated-package 1'
+MOCK_INSTALLED_NVIDIA=$'installed libnvidia-cfg1-580:amd64 580.178.04-1ubuntu1\ninstalled libnvidia-compute-580 580.178.04-1ubuntu1\nunpacked nvidia-dkms-580-open 580.178.04-1ubuntu1\nunpacked nvidia-kernel-common-580 580.173.02-1ubuntu1\nconfig-files nvidia-dkms-575-open 575.1\ninstalled unrelated-package 1'
 dpkg-query() { printf '%s\n' "$MOCK_INSTALLED_NVIDIA"; }
 apt-cache() {
     printf '%s\n' 'libnvidia-compute | 615.71.09-1ubuntu1 | repo' 'libnvidia-compute | 615.71.09-2ubuntu1 | repo' 'libnvidia-compute | 595.91.07-1ubuntu1 | repo'
@@ -33,7 +33,7 @@ DRIVER_VERSION=615
 GPU_STACK_INSTALLED_EARLY=false
 KEYRING_CALLED=false
 prepare_nvidia_driver_transition >/dev/null
-[[ $KEYRING_CALLED == true && $APT_CALLS == *'apt-get --simulate install'* && $APT_CALLS == *'libnvidia-cfg1=615.71.09-2ubuntu1'* && $APT_CALLS == *'libnvidia-compute-580-'* && $APT_CALLS == *'nvidia-kernel-common-580-'* && $GPU_STACK_INSTALLED_EARLY == true ]] || { echo 'FAIL: complete driver transition not performed before bootstrap'; exit 1; }
+[[ $KEYRING_CALLED == true && $APT_CALLS == *'dpkg --remove --force-depends libnvidia-cfg1-580:amd64'* && $APT_CALLS == *'apt-get --simulate install'* && $APT_CALLS == *'libnvidia-cfg1=615.71.09-2ubuntu1'* && $APT_CALLS == *'libnvidia-compute-580-'* && $APT_CALLS == *'nvidia-kernel-common-580-'* && $GPU_STACK_INSTALLED_EARLY == true ]] || { echo 'FAIL: complete driver transition not performed before bootstrap'; exit 1; }
 output=$(install_nvidia_stack)
 [[ $output == *'libnvidia-compute=615.71.09-2ubuntu1'* && $output == *'nvidia-dkms-open=615.71.09-2ubuntu1'* ]] || { echo 'FAIL: modern driver package names/version'; exit 1; }
 [[ $output == *'libnvidia-compute-580-'* && $output == *'nvidia-dkms-580-open-'* && $output == *'nvidia-kernel-common-580-'* ]] || { echo 'FAIL: old driver packages not removed in apt transactions'; exit 1; }
