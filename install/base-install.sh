@@ -1040,7 +1040,8 @@ install_nvidia_stack() {
     section "NVIDIA Driver + CUDA Stack"
     info "Installing driver=${DRIVER_VERSION}, cuda=${CUDA_DISPLAY_VERSION}, cudnn=cudnn9-cuda-${CUDA_CUDNN_SUFFIX}"
 
-    local -a driver_packages obsolete_driver_removals=()
+    local -a driver_packages=() obsolete_driver_removals=() pin_packages=()
+    local has_legacy_driver_packages=false
     if (( DRIVER_VERSION >= 590 )); then
         # NVIDIA's Ubuntu packages no longer include the branch in their names.
         # The branch pin must be installed in a separate transaction before
@@ -1051,20 +1052,33 @@ install_nvidia_stack() {
             | sort -Vr | awk 'NR == 1 {print}')
         [[ -n "${package_version}" ]] \
             || error "NVIDIA branch ${DRIVER_VERSION} is unavailable in the configured APT repositories."
-        info "Configuring NVIDIA branch ${DRIVER_VERSION} before resolving driver dependencies"
-        sudo apt-get --simulate install "nvidia-driver-pinning-${DRIVER_VERSION}" \
+        while IFS= read -r removal; do
+            if [[ -n "${removal}" ]]; then
+                obsolete_driver_removals+=("${removal}")
+                has_legacy_driver_packages=true
+            fi
+        done < <(legacy_nvidia_package_removals)
+
+        pin_packages=("nvidia-driver-pinning-${DRIVER_VERSION}")
+        if [[ "${has_legacy_driver_packages}" == true ]]; then
+            # Repair an inconsistent old branch in the same transaction as
+            # the generic cfg1 package required by nvidia-persistenced.
+            pin_packages+=("libnvidia-cfg1=${package_version}" "${obsolete_driver_removals[@]}")
+            info "Repairing installed NVIDIA packages while configuring branch ${DRIVER_VERSION}"
+        else
+            info "Configuring NVIDIA branch ${DRIVER_VERSION} before resolving driver dependencies"
+        fi
+        sudo apt-get --simulate install "${pin_packages[@]}" \
             || error "APT cannot resolve NVIDIA branch pin ${DRIVER_VERSION}."
-        sudo apt-get install -V -y "nvidia-driver-pinning-${DRIVER_VERSION}" \
+        sudo apt-get install -V -y "${pin_packages[@]}" \
             || error "Failed to configure NVIDIA branch pin ${DRIVER_VERSION}."
         # The branch pin remains active if the subsequent stack simulation fails.
-        while IFS= read -r removal; do
-            [[ -n "${removal}" ]] && obsolete_driver_removals+=("${removal}")
-        done < <(legacy_nvidia_package_removals)
+        # Old branch packages were removed by the pin transaction above.
+        obsolete_driver_removals=()
         driver_packages=(
             "libnvidia-compute=${package_version}"
             "nvidia-dkms-open=${package_version}"
         )
-        driver_packages+=("${obsolete_driver_removals[@]}")
         info "Using NVIDIA compute packages ${package_version} (includes nvidia-smi)"
     else
         driver_packages=(
