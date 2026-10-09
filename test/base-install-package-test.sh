@@ -2,7 +2,7 @@
 # Verify package selection without running installer startup or APT.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-for fn in legacy_nvidia_package_removals legacy_nvidia_cfg1_packages prepare_nvidia_driver_transition install_nvidia_stack; do
+for fn in apt_get_noninteractive legacy_nvidia_package_removals legacy_nvidia_cfg1_packages prepare_nvidia_driver_transition install_nvidia_stack; do
     eval "$(awk -v name="$fn" '$0 == name "() {" {copy=1} copy {print} copy && /^}$/ {exit}' "${ROOT_DIR}/install/base-install.sh")"
 done
 info() { :; }; section() { :; }; success() { :; }
@@ -25,7 +25,7 @@ sudo() {
         echo 'FAIL: 595 dependencies resolved before branch pin was installed' >&2
         return 1
     fi
-    if [[ "$*" == 'apt-get install -V -y nvidia-driver-pinning-'* ]]; then
+    if [[ "$*" == *'apt-get install -V -y nvidia-driver-pinning-'* ]]; then
         PIN_INSTALLED=true
     fi
 }

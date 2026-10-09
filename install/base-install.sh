@@ -33,6 +33,10 @@ warn()    { echo -e "${YELLOW}[WARN]${NC}    $*"; }
 error()   { echo -e "${RED}[ERROR]${NC}   $*"; exit 1; }
 section() { echo -e "\n${BOLD}${CYAN}── $* ──${NC}"; }
 
+apt_get_noninteractive() {
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get "$@"
+}
+
 # ─── CLI argument parsing ──────────────────────────────────────
 DRIVER_VERSION=""
 CUDA_VERSION=""
@@ -464,10 +468,10 @@ install_base_packages() {
     section "Base System Packages"
 
     info "Bootstrapping prerequisites..."
-    sudo apt-get update -q \
+    apt_get_noninteractive update -q \
         || error "apt-get update failed"
     prepare_nvidia_driver_transition
-    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    apt_get_noninteractive install -y \
         software-properties-common apt-transport-https ca-certificates curl gnupg debconf-utils \
         || error "Bootstrap package install failed"
 
@@ -495,14 +499,14 @@ EOF
         info "Adding graphics-drivers PPA..."
         sudo add-apt-repository -y ppa:graphics-drivers/ppa \
             || error "Failed to add graphics-drivers PPA"
-        sudo apt-get update -q \
+        apt_get_noninteractive update -q \
             || error "apt-get update after PPA failed"
 
         # Install kernel headers explicitly — required for DKMS to build nvidia module.
         # Without this, DKMS silently fails and nvidia.ko is never built.
         local kver; kver=$(uname -r)
         info "Installing kernel headers for: ${kver}"
-        sudo apt-get install -y \
+        apt_get_noninteractive install -y \
             "linux-headers-${kver}" \
             linux-headers-generic \
             || warn "Kernel headers install had warnings — DKMS build may fail"
@@ -518,7 +522,7 @@ EOF
     fi
 
     info "Installing base packages..."
-    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    apt_get_noninteractive install -y \
         git cmake build-essential dkms alsa-utils \
         gcc-11 g++-11 gcc-12 g++-12 lsb-release \
         ipmitool jq fzf ripgrep fd-find bat \
@@ -997,8 +1001,8 @@ install_cuda_keyring() {
         success "CUDA keyring installed"
     fi
 
-    sudo apt-get update -q || error "apt-get update after CUDA keyring failed"
-    sudo apt-get upgrade -y || warn "apt-get upgrade had warnings (non-fatal)"
+    apt_get_noninteractive update -q || error "apt-get update after CUDA keyring failed"
+    apt_get_noninteractive upgrade -y || warn "apt-get upgrade had warnings (non-fatal)"
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -1086,9 +1090,9 @@ install_nvidia_stack() {
         else
             info "Configuring NVIDIA branch ${DRIVER_VERSION} before resolving driver dependencies"
         fi
-        sudo apt-get --simulate install "${pin_packages[@]}" \
+        apt_get_noninteractive --simulate install "${pin_packages[@]}" \
             || error "APT cannot resolve NVIDIA branch pin ${DRIVER_VERSION}."
-        sudo apt-get install -V -y "${pin_packages[@]}" \
+        apt_get_noninteractive install -V -y "${pin_packages[@]}" \
             || error "Failed to configure NVIDIA branch pin ${DRIVER_VERSION}."
         # The branch pin remains active if the subsequent stack simulation fails.
         # Old branch packages were removed by the pin transaction above.
@@ -1107,12 +1111,12 @@ install_nvidia_stack() {
         info "Adding nvidia-utils-${DRIVER_VERSION} for nvidia-smi and related tools"
     fi
 
-    sudo apt-get --simulate install \
+    apt_get_noninteractive --simulate install \
         "cuda-toolkit-${CUDA_TOOLKIT_VERSION}" "${driver_packages[@]}" \
         "cudnn9-cuda-${CUDA_CUDNN_SUFFIX}" nvtop \
         || error "APT cannot resolve the requested GPU update. Review conflicts above before changing packages; do not run the full host --uninstall."
 
-    sudo apt-get install -V -y \
+    apt_get_noninteractive install -V -y \
         "cuda-toolkit-${CUDA_TOOLKIT_VERSION}" "${driver_packages[@]}" \
         "cudnn9-cuda-${CUDA_CUDNN_SUFFIX}" nvtop \
         || error "NVIDIA stack install failed — check apt output above"
@@ -1149,7 +1153,7 @@ install_dcgm() {
         local live_cuda_major
         live_cuda_major=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[0-9]+' || echo "${CUDA_MAJOR}")
         info "Installing datacenter-gpu-manager-4-cuda${live_cuda_major}..."
-        sudo apt-get install -y "datacenter-gpu-manager-4-cuda${live_cuda_major}" \
+        apt_get_noninteractive install -y "datacenter-gpu-manager-4-cuda${live_cuda_major}" \
             || error "DCGM install failed"
         sudo systemctl enable --now nvidia-dcgm
         success "DCGM installed and enabled"
@@ -1386,7 +1390,7 @@ uninstall_node() {
         echo "${pkgs_to_remove}" | tr ' ' '\n' | sed 's/^/    /' | grep -v '^$'
         echo ""
         # shellcheck disable=SC2086
-        sudo apt-get purge -y ${pkgs_to_remove} \
+        apt_get_noninteractive purge -y ${pkgs_to_remove} \
             || warn "Some packages failed to purge — continuing"
         success "NVIDIA/CUDA packages purged"
     else
@@ -1594,7 +1598,7 @@ uninstall_node() {
     # ── 10. Remove CUDA apt keyring and sources ───────────────
     section "Removing CUDA Repo & Keyring"
     if dpkg -l cuda-keyring 2>/dev/null | grep -q '^ii'; then
-        sudo apt-get purge -y cuda-keyring || true
+        apt_get_noninteractive purge -y cuda-keyring || true
         success "cuda-keyring package removed"
     fi
     sudo rm -f /usr/share/keyrings/cuda-archive-keyring.gpg
@@ -1665,8 +1669,8 @@ uninstall_node() {
 
     # ── 15. apt autoremove + update ───────────────────────────
     section "Final apt Cleanup"
-    sudo apt-get autoremove -y  || warn "autoremove had warnings (non-fatal)"
-    sudo apt-get update -q      || warn "apt-get update had warnings (non-fatal)"
+    apt_get_noninteractive autoremove -y  || warn "autoremove had warnings (non-fatal)"
+    apt_get_noninteractive update -q      || warn "apt-get update had warnings (non-fatal)"
     success "apt cleanup complete"
 
     # ── 16. Final verification ────────────────────────────────
