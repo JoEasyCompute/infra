@@ -3,7 +3,7 @@
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="${ROOT_DIR}/install/base-install.sh"
-for fn in nvidia_driver_snapshot plan_nvidia_update check_nvidia_reboot install_nvidia_stack offer_reboot; do
+for fn in apt_get_noninteractive nvidia_driver_snapshot plan_nvidia_update check_nvidia_reboot install_nvidia_stack offer_reboot; do
     eval "$(awk -v name="$fn" '$0 == name "() {" {copy=1} copy {print} copy && /^}$/ {exit}' "$SCRIPT")"
 done
 info() { echo "$*"; }
