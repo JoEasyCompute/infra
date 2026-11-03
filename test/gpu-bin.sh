@@ -13,6 +13,15 @@
 # at their ceilings to confirm, then each card is banded and graded.
 #
 # Cards are tracked by UUID (indices can change after a drop or reboot).
+# Each run gets an ID (yyyy-mm-dd-hh-mm) and its own folder per server:
+#   $GPU_BIN_DIR/<server-serial>/<run-id>/{state,logs,results_<server>_<run>.csv}
+# and every finished row is appended to $GPU_BIN_DIR/all-results.csv.
+# The server is identified by its DMI system serial (then board serial,
+# then BMC MAC), so one USB stick can test many servers.
+#
+# Booted from USB / live media, per-card power limits are NOT applied (they
+# would land on the stick, not the server's OS); they are written to
+# apply-on-host_<server>_<run>.sh to run on the server's own OS.
 #
 # Usage:
 #   sudo ./gpu-bin.sh                   start (or continue) a binning run
@@ -26,12 +35,16 @@
 #   --confirm-duration S  all-GPU confirm burn seconds          (default 1800)
 #   --max-cycles N        max power cycles before giving up     (default 8)
 #   --step-timeout S      kill a worker after S seconds         (default burn+1200)
-#   --force               run even if GPUs have compute processes
+#   --force               run even if GPU compute processes exist
+#   --apply-limits        always apply per-card limits at finish
+#   --record-limits       never apply them; write apply-on-host script only
+#                         (default: record only when booted from USB/live media)
 #
 # Environment overrides (used by test/gpu-bin-test.sh):
 #   GPU_BIN_DIR (default /opt/gpu-bin)   FULLTEST (default <script dir>/fulltest.sh)
 #   NVIDIA_SMI IPMITOOL JOURNALCTL SYSTEMCTL  POLL_SECONDS  STAGGER_SECONDS
 #   GPU_POWER_LIMIT (default ../install/gpu-power-limit.sh) — per-card limits at finish
+#   DMIDECODE  SYSFS_PCI  GPU_BIN_SERVER_ID  GPU_BIN_MEDIA=usb|host  GPU_BIN_ALLOW_VOLATILE=1
 #   GPU_BIN_NO_UNIT=1  (do not install the systemd resume unit)
 # =============================================================================
 set -uo pipefail
@@ -49,18 +62,22 @@ POLL_SECONDS="${POLL_SECONDS:-15}"
 STAGGER_SECONDS="${STAGGER_SECONDS:-2}"
 GPU_POWER_LIMIT="${GPU_POWER_LIMIT:-$(readlink -f "$SCRIPT_DIR/../install/gpu-power-limit.sh" 2>/dev/null || echo /opt/provision/gpu-power-limit.sh)}"
 
-STATE_DIR="$GPU_BIN_DIR/state"
-LOG_DIR="$GPU_BIN_DIR/logs"
-CARDS="$STATE_DIR/cards.tsv"       # one line per card, see FIELDS below
-RUN="$STATE_DIR/run.env"           # phase, cycles, options (parsed as data)
-RESULT_CSV="$GPU_BIN_DIR/results.csv"
+DMIDECODE="${DMIDECODE:-dmidecode}"
+SYSFS_PCI="${SYSFS_PCI:-/sys/bus/pci/devices}"
+
+# Per-run paths are set by set_run_paths once the server and run are known
+SERVER_ID=""; SERVER_DIR=""; ACTIVE=""; RUN_ID=""; RUN_DIR=""
+STATE_DIR=""; CARDS=""; RUN=""; RESULT_CSV=""
+LOG_DIR="$GPU_BIN_DIR"
+ALL_RESULTS="$GPU_BIN_DIR/all-results.csv"
+APPLY_LIMITS=auto
 UNIT_NAME="gpu-bin-resume.service"
 UNIT_PATH="/etc/systemd/system/$UNIT_NAME"
 PAUSED_UNITS="gpu-watchdog.timer gpu-watchdog.service"
 
 # cards.tsv fields (tab separated):
 #  1 uuid 2 serial 3 bus 4 model 5 default_pl 6 steps(comma) 7 step_idx
-#  8 last_pass 9 first_fail 10 status 11 failed_tests 12 note
+#  8 last_pass 9 first_fail 10 status 11 failed_tests 12 note 13 physical_slot
 # status: climbing | done | dropped | failed-floor | memfail | connector | missing
 export CUDA_DEVICE_ORDER=PCI_BUS_ID   # make CUDA indices match nvidia-smi
 
@@ -73,6 +90,72 @@ MODE=run
 
 log() { echo "$(date '+%F %T') [gpu-bin] $*" | tee -a "$LOG_DIR/gpu-bin.log" >&2; }
 die() { log "ERROR: $*"; exit 1; }
+
+set_run_paths() {
+    RUN_ID="$1"; RUN_DIR="$SERVER_DIR/$RUN_ID"
+    STATE_DIR="$RUN_DIR/state"; LOG_DIR="$RUN_DIR/logs"
+    CARDS="$STATE_DIR/cards.tsv"; RUN="$STATE_DIR/run.env"
+    RESULT_CSV="$RUN_DIR/results_${SERVER_ID}_${RUN_ID}.csv"
+    mkdir -p "$STATE_DIR" "$LOG_DIR"
+}
+
+# ─── Server identity, media, slots ───────────────────────────────────────────
+server_id() {
+    if [ -n "${GPU_BIN_SERVER_ID:-}" ]; then echo "$GPU_BIN_SERVER_ID" | tr -c 'A-Za-z0-9._\n-' '_'; return; fi
+    local v="" k c mac
+    for k in system-serial-number baseboard-serial-number; do
+        c="$("$DMIDECODE" -s "$k" 2>/dev/null | head -1 | xargs 2>/dev/null)"
+        case "$c" in
+            ""|*"To Be Filled"*|*"Default string"*|*"Not Specified"*|*"Not Applicable"*|*"Serial Number"*|0123456789|N/A|None) continue ;;
+        esac
+        v="$c"; break
+    done
+    if [ -z "$v" ]; then
+        mac="$("$IPMITOOL" -I open lan print 2>/dev/null | awk -F': *' '/^MAC Address/{print $2; exit}' | tr -d ':')"
+        if [ -n "$mac" ]; then v="bmc-$mac"; else v="host-$(hostname)"; fi
+    fi
+    echo "$v" | tr -c 'A-Za-z0-9._\n-' '_'
+}
+
+# True when this OS runs from USB/removable or live (casper) media
+running_from_removable() {
+    case "${GPU_BIN_MEDIA:-auto}" in usb) return 0 ;; host) return 1 ;; esac
+    grep -qwE 'boot=(casper|live)' /proc/cmdline 2>/dev/null && return 0
+    local src; src="$(findmnt -no SOURCE / 2>/dev/null)"
+    [ -n "$src" ] || return 1
+    lsblk -sno TRAN,RM "$src" 2>/dev/null | awk '$1=="usb" || $NF=="1"{f=1} END{exit !f}'
+}
+
+SLOT_MAP=""
+build_slot_map() {   # SMBIOS "bus address <TAB> slot designation"
+    SLOT_MAP="$("$DMIDECODE" -t slot 2>/dev/null | awk '
+        BEGIN { RS="\n\n"; FS="\n" }
+        /System Slot Information/ {
+            slot=""; bus=""
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /Designation:/) { sub(/^[[:space:]]*Designation:[[:space:]]*/, "", $i); slot=$i }
+                else if ($i ~ /Bus Address:/) { sub(/^[[:space:]]*Bus Address:[[:space:]]*/, "", $i); bus=$i }
+            }
+            gsub(/[[:space:]]/, "", bus)
+            if (bus != "" && slot != "") printf "%s\t%s\n", tolower(bus), slot
+        }')"
+}
+# physical_slot <nvidia-smi bus id> -> slot label from SMBIOS or lspci, walking up through risers/switches
+physical_slot() {
+    local bdf path p s
+    bdf="$(echo "$1" | tr 'A-F' 'a-f' | sed -E 's/^0*([0-9a-f]{4}:)/\1/')"
+    path="$(readlink -f "$SYSFS_PCI/$bdf" 2>/dev/null)"
+    [ -n "$path" ] && [ -e "$path" ] || return 0
+    while [ -n "$path" ] && [ "$path" != / ]; do
+        p="$(basename "$path")"
+        if [[ "$p" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]]; then
+            s="$(printf '%s\n' "$SLOT_MAP" | awk -F'\t' -v b="$p" '$1==b{print $2; exit}')"
+            [ -n "$s" ] || s="$(lspci -s "$p" -vv 2>/dev/null | sed -n 's/.*Physical Slot:[[:space:]]*//p' | head -1)"
+            [ -n "$s" ] && { echo "$s"; return 0; }
+        fi
+        path="$(dirname "$path")"
+    done
+}
 
 # ─── Model band tables ───────────────────────────────────────────────────────
 # Edges are ladder steps (W). The top step is always the card's own default.
@@ -158,8 +241,9 @@ wait_for_driver() {
 
 # ─── Discovery ───────────────────────────────────────────────────────────────
 discover() {
-    local tmp="$STATE_DIR/.cards.new" uuid serial bus name def min max key steps
+    local tmp="$STATE_DIR/.cards.new" uuid serial bus name def min max key steps slot
     : > "$tmp"
+    build_slot_map
     smi --query-gpu=uuid,serial,pci.bus_id,name,power.default_limit,power.min_limit,power.max_limit \
         --format=csv,noheader,nounits > "$STATE_DIR/.query" || die "nvidia-smi query failed"
     while IFS=',' read -r uuid serial bus name def min max; do
@@ -169,18 +253,28 @@ discover() {
         max="$(printf '%.0f' "$(echo "$max" | xargs)")"
         key="$(model_key "$name")"
         steps="$(build_steps "$key" "$def" "$min" "$max")"
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t0\t\t\tclimbing\t\t\n' \
-            "$uuid" "$serial" "$bus" "$name" "$def" "$steps" >> "$tmp"
+        slot="$(physical_slot "$bus")"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t0\t\t\tclimbing\t\t\t%s\n' \
+            "$uuid" "$serial" "$bus" "$name" "$def" "$steps" "$slot" >> "$tmp"
     done < "$STATE_DIR/.query"
     [ -s "$tmp" ] || die "no NVIDIA GPUs found"
     mv "$tmp" "$CARDS"
 }
 
 print_status() {
-    [ -f "$CARDS" ] || { echo "No binning run in $GPU_BIN_DIR"; return 0; }
-    echo "Phase: $(run_get phase)   power cycles: $(run_get cycles)/$(run_get max_cycles)"
-    printf '%-14s %-18s %-14s %-24s %-8s %-8s %-12s %s\n' UUID SERIAL BUS MODEL CEILING FIRSTFAIL STATUS NOTE
-    awk -F'\t' '{printf "%-14s %-18s %-14s %-24s %-8s %-8s %-12s %s\n", substr($1,1,14), $2, $3, $4, $8, $9, $10, $12}' "$CARDS"
+    echo "Server: $SERVER_ID   (runs under $SERVER_DIR)"
+    if [ -n "$RUN_ID" ] && [ -f "$CARDS" ]; then
+        echo "Active run: $RUN_ID   phase: $(run_get phase)   power cycles: $(run_get cycles)/$(run_get max_cycles)"
+        printf '%-14s %-16s %-16s %-14s %-22s %-8s %-9s %-12s %s\n' UUID SERIAL BUS SLOT MODEL CEILING FIRSTFAIL STATUS NOTE
+        awk -F'\t' '{printf "%-14s %-16s %-16s %-14s %-22s %-8s %-9s %-12s %s\n", substr($1,1,14), $2, $3, $13, $4, $8, $9, $10, $12}' "$CARDS"
+    else
+        echo "Active run: none"
+    fi
+    local d
+    for d in "$SERVER_DIR"/*/; do
+        [ -f "$d/state/run.env" ] || continue
+        echo "  run $(basename "$d"): $(awk -F= '$1=="phase"{print $2}' "$d/state/run.env")$(ls "$d"/results_*.csv >/dev/null 2>&1 && echo "  -> $(ls "$d"/results_*.csv)")"
+    done
 }
 
 # ─── Resume service ──────────────────────────────────────────────────────────
@@ -191,7 +285,6 @@ install_unit() {
 Description=Resume gpu-bin.sh GPU binning after power cycle
 After=multi-user.target systemd-udev-settle.service nvidia-persistenced.service nvidia-runtime-policy.service
 Wants=systemd-udev-settle.service
-ConditionPathExists=$RUN
 
 [Service]
 Type=simple
@@ -209,6 +302,9 @@ EOF
 }
 remove_unit() {
     [ "${GPU_BIN_NO_UNIT:-0}" = 1 ] && return 0
+    if ls "$GPU_BIN_DIR"/*/active-run >/dev/null 2>&1; then
+        log "Resume service kept: another server on this media still has an active run"; return 0
+    fi
     "$SYSTEMCTL" disable "$UNIT_NAME" >/dev/null 2>&1 || true
     rm -f "$UNIT_PATH"; "$SYSTEMCTL" daemon-reload || true
 }
@@ -396,18 +492,23 @@ confirm_round() {
 }
 
 finish() {
-    local uuid key def c bg band grade serial bus model ff status ft note idx applied pct rung overrides=""
+    local uuid key def c bg band grade serial bus slot model ff status ft note idx applied pct rung
+    local overrides="" host_lines=""
     run_set phase complete
+    rm -f "$ACTIVE"
     remove_unit
     "$SYSTEMCTL" restart nvidia-runtime-policy.service >/dev/null 2>&1 || true   # back to power-saving presets
     sleep 2
 
+    local header="Date,Node,GPU UUID / idx,PCI bus ID,Model,Serial,Failing test(s),Rung reached (1-9),Default PL (W),Lowest passing PL (W),First failing PL (W),% of default,PCIe link (gen x width),Fault follows,Grade,Ticket,Evidence path,Notes,Band (auto)"
     # Columns match the training tracker's GPU Ladder Log (A..S) so rows paste straight in.
-    echo "Date,Node,GPU UUID / idx,PCI bus ID,Model,Serial,Failing test(s),Rung reached (1-9),Default PL (W),Lowest passing PL (W),First failing PL (W),% of default,PCIe link (gen x width),Fault follows,Grade,Ticket,Evidence path,Notes,Band (auto)" > "$RESULT_CSV"
+    # Date = run ID (yyyy-mm-dd-hh-mm); Node = server serial; PCI bus ID includes the physical slot.
+    echo "$header" > "$RESULT_CSV"
     for uuid in $(cut -f1 "$CARDS"); do
         serial="$(card_field "$uuid" 2)"; bus="$(card_field "$uuid" 3)"; model="$(card_field "$uuid" 4)"
         def="$(card_field "$uuid" 5)"; c="$(card_field "$uuid" 8)"; ff="$(card_field "$uuid" 9)"
         status="$(card_field "$uuid" 10)"; ft="$(card_field "$uuid" 11)"; note="$(card_field "$uuid" 12)"
+        slot="$(card_field "$uuid" 13)"
         key="$(model_key "$model")"; idx="$(index_of "$uuid")"
         case "$status" in memfail|failed-floor|missing) c="" ;; esac
         bg="$(band_for "$key" "$c" "$def")"; band="${bg%%|*}"; grade="${bg#*|}"
@@ -421,28 +522,51 @@ finish() {
             applied="$(printf '%.0f' "${applied:-0}" 2>/dev/null || echo 0)"
             if [ "$applied" -gt "$c" ]; then
                 overrides="$overrides --gpu-limit $idx:$c"
-                note="$note; per-card limit ${c}W set (node runs ${applied}W)"
+                host_lines="${host_lines}#   index $idx = $bus${slot:+ ($slot)} $model $serial $uuid -> ${c}W
+"
+                if [ "$(run_get apply)" = yes ]; then
+                    note="$note; per-card limit ${c}W set (node runs ${applied}W)"
+                else
+                    note="$note; per-card limit ${c}W NOT applied (USB run) - apply on the server OS: apply-on-host_${SERVER_ID}_${RUN_ID}.sh"
+                fi
             fi
         fi
         pct=""; [ -n "$c" ] && pct="$(awk -v a="$c" -v b="$def" 'BEGIN{if(b>0)printf "%.3f", a/b}')"
         rung=4; [ "$status" = memfail ] && rung=2
-        printf '%s,%s,%s,%s,%s,%s,"%s",%s,%s,%s,%s,%s,,,%s,,%s,"%s",%s\n' \
-            "$(date +%F)" "$(hostname)" "$uuid" "$bus" "$model" "$serial" "$ft" "$rung" \
+        printf '%s,%s,%s,"%s",%s,%s,"%s",%s,%s,%s,%s,%s,,,%s,,%s,"%s",%s\n' \
+            "$RUN_ID" "$SERVER_ID" "$uuid" "$bus${slot:+ ($slot)}" "$model" "$serial" "$ft" "$rung" \
             "$def" "$c" "$ff" "$pct" "$grade" "$LOG_DIR/${uuid}_*W.log" "$note" "$band" >> "$RESULT_CSV"
     done
 
     if [ -n "$overrides" ]; then
-        if [ -x "$GPU_POWER_LIMIT" ]; then
-            log "Applying per-card limits: $GPU_POWER_LIMIT$overrides"
-            # shellcheck disable=SC2086
-            "$GPU_POWER_LIMIT" $overrides >> "$LOG_DIR/gpu-bin.log" 2>&1 \
-                || log "WARNING: per-card limits FAILED — run by hand: sudo gpu-power-limit.sh$overrides"
+        local host_script="$RUN_DIR/apply-on-host_${SERVER_ID}_${RUN_ID}.sh"
+        {
+            echo "#!/usr/bin/env bash"
+            echo "# Per-card power limits from gpu-bin run $RUN_ID on server $SERVER_ID."
+            echo "# Run from the infra repo root on the server's own OS (not the test USB). Check the indices still match:"
+            echo "#   nvidia-smi --query-gpu=index,pci.bus_id,serial --format=csv"
+            printf '%s' "$host_lines"
+            echo "set -e"
+            echo "sudo ./install/gpu-power-limit.sh$overrides"
+        } > "$host_script"; chmod +x "$host_script"
+        if [ "$(run_get apply)" = yes ]; then
+            if [ -x "$GPU_POWER_LIMIT" ]; then
+                log "Applying per-card limits: $GPU_POWER_LIMIT$overrides"
+                # shellcheck disable=SC2086
+                "$GPU_POWER_LIMIT" $overrides >> "$LOG_DIR/gpu-bin.log" 2>&1 \
+                    || log "WARNING: per-card limits FAILED - run by hand: $host_script"
+            else
+                log "WARNING: gpu-power-limit.sh not found at $GPU_POWER_LIMIT - run by hand: $host_script"
+            fi
         else
-            log "WARNING: gpu-power-limit.sh not found at $GPU_POWER_LIMIT — run by hand: sudo gpu-power-limit.sh$overrides"
+            log "USB/live boot: per-card limits NOT applied. Run on the server's own OS: $host_script"
         fi
     fi
+
+    [ -f "$ALL_RESULTS" ] || echo "$header" > "$ALL_RESULTS"
+    tail -n +2 "$RESULT_CSV" >> "$ALL_RESULTS"
     restore_units
-    log "Binning complete. Results: $RESULT_CSV (columns match the tracker's GPU Ladder Log)"
+    log "Binning complete: run $RUN_ID on $SERVER_ID. Results: $RESULT_CSV (also appended to $ALL_RESULTS)"
     column -s, -t < "$RESULT_CSV" >&2 2>/dev/null || cat "$RESULT_CSV" >&2
 }
 
@@ -454,11 +578,13 @@ while [ $# -gt 0 ]; do
         --dry-run) MODE=dry ;;
         --reset) MODE=reset ;;
         --force) FORCE=1 ;;
+        --apply-limits) APPLY_LIMITS=yes ;;
+        --record-limits) APPLY_LIMITS=no ;;
         --burn-duration) BURN_DURATION="$2"; shift ;;
         --confirm-duration) CONFIRM_DURATION="$2"; shift ;;
         --max-cycles) MAX_CYCLES="$2"; shift ;;
         --step-timeout) STEP_TIMEOUT="$2"; shift ;;
-        -h|--help) sed -n '2,36p' "$SCRIPT_PATH"; exit 0 ;;
+        -h|--help) sed -n '2,50p' "$SCRIPT_PATH"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
     shift
@@ -467,50 +593,75 @@ for v in BURN_DURATION CONFIRM_DURATION MAX_CYCLES; do
     [[ "${!v}" =~ ^[0-9]+$ ]] || { echo "$v must be a positive integer" >&2; exit 1; }
 done
 
-mkdir -p "$STATE_DIR" "$LOG_DIR" 2>/dev/null || { [ "$MODE" = status ] || { echo "cannot create $GPU_BIN_DIR (run as root?)" >&2; exit 1; }; }
+mkdir -p "$GPU_BIN_DIR" 2>/dev/null || { [ "$MODE" = status ] || { echo "cannot create $GPU_BIN_DIR (run as root?)" >&2; exit 1; }; }
+SERVER_ID="$(server_id)"; SERVER_DIR="$GPU_BIN_DIR/$SERVER_ID"; ACTIVE="$SERVER_DIR/active-run"
+mkdir -p "$SERVER_DIR" 2>/dev/null || true
+[ -s "$ACTIVE" ] && set_run_paths "$(cat "$ACTIVE")"
 
 case "$MODE" in
     status) print_status; exit 0 ;;
     reset)
-        remove_unit; rm -rf "$STATE_DIR"; restore_units
-        echo "gpu-bin state cleared (logs kept in $LOG_DIR)"; exit 0 ;;
+        if [ -n "$RUN_ID" ]; then run_set phase reset; rm -f "$ACTIVE"; fi
+        remove_unit; restore_units
+        echo "Active run for $SERVER_ID cleared (${RUN_ID:-none}); its logs are kept in ${RUN_DIR:-$SERVER_DIR}"; exit 0 ;;
     dry)
         STATE_DIR="$(mktemp -d)"; CARDS="$STATE_DIR/cards.tsv"
         discover
-        echo "Ladders (W) per card; top step = card default:"
-        awk -F'\t' '{printf "  %-24s %-14s %-40s steps: %s\n", $4, $3, $1, $6}' "$CARDS"
+        echo "Server $SERVER_ID - ladders (W) per card; top step = card default:"
+        awk -F'\t' '{printf "  %-24s %-16s %-14s %-40s steps: %s\n", $4, $3, $13, $1, $6}' "$CARDS"
+        if running_from_removable; then echo "Media: USB/live - per-card limits will be recorded, not applied"
+        else echo "Media: host disk - per-card limits will be applied"; fi
         rm -rf "$STATE_DIR"; exit 0 ;;
 esac
 
 [ "$(id -u)" -eq 0 ] || [ -n "${GPU_BIN_ALLOW_NONROOT:-}" ] || die "run as root"
 [ -x "$FULLTEST" ] || die "fulltest.sh not found/executable at $FULLTEST (deploy with code.sh + code.cu beside it)"
 command -v "$IPMITOOL" >/dev/null 2>&1 || die "ipmitool not installed (apt install ipmitool)"
+case "$(stat -f -c %T "$GPU_BIN_DIR" 2>/dev/null)" in
+    overlayfs|tmpfs|ramfs)
+        [ -n "${GPU_BIN_ALLOW_VOLATILE:-}" ] || die "$GPU_BIN_DIR is on RAM-backed storage (live boot?) - state, logs and the resume service would be lost at the first power cycle. Point GPU_BIN_DIR at a persistent partition and bake the resume service into the image, or boot a full install." ;;
+esac
 
-if [ -f "$RUN" ]; then
+if [ -n "$RUN_ID" ]; then
     # Continuing: keep the options the run was started with
     BURN_DURATION="$(run_get burn)"; CONFIRM_DURATION="$(run_get confirm)"; MAX_CYCLES="$(run_get max_cycles)"
-    case "$(run_get phase)" in
-        complete) log "Run already complete. Use --reset to start a new one."; print_status; exit 0 ;;
-        halted)
-            # A person running --resume by hand means the node was inspected/fixed
-            if [ "$MODE" = resume ] && [ -z "${INVOCATION_ID:-}" ]; then
-                run_set phase "$(run_get halted_from)"; run_set cycles 0
-                log "Resuming halted run (power-cycle count reset)"
-            fi ;;
-    esac
-    [ "$(run_get phase)" = halted ] && { log "Run is halted; fix the node, then run: sudo $SCRIPT_PATH --resume"; exit 3; }
+    if [ "$(run_get phase)" = halted ]; then
+        # A person running --resume by hand means the node was inspected/fixed
+        if [ "$MODE" = resume ] && [ -z "${INVOCATION_ID:-}" ]; then
+            run_set phase "$(run_get halted_from)"; run_set cycles 0
+            log "Resuming halted run $RUN_ID (power-cycle count reset)"
+        else
+            log "Run $RUN_ID is halted; fix the node, then run: sudo $SCRIPT_PATH --resume"; exit 3
+        fi
+    fi
     wait_for_driver || power_cycle "driver not ready after boot"
+    seen=0
+    for u in $(cut -f1 "$CARDS"); do [ -n "$(index_of "$u")" ] && { seen=1; break; }; done
+    if [ "$seen" -eq 0 ]; then
+        run_set halted_from "$(run_get phase)"; run_set phase halted
+        die "none of run $RUN_ID's GPUs are visible on $SERVER_ID (GPUs swapped, or all lost?). Inspect, then --resume or --reset."
+    fi
+    log "Resuming run $RUN_ID on $SERVER_ID (phase $(run_get phase))"
 else
-    [ "$MODE" = resume ] && die "nothing to resume"
+    if [ "$MODE" = resume ]; then
+        log "No active run for $SERVER_ID - nothing to resume"; exit 0
+    fi
     wait_for_driver || die "nvidia-smi not responding"
     if [ "$FORCE" -ne 1 ] && [ -n "$(smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null)" ]; then
         die "GPUs have running compute processes (miner / rental agent / container). Stop them or use --force."
     fi
-    "$IPMITOOL" -I open mc info >/dev/null 2>&1 || die "in-band IPMI (/dev/ipmi0) not working — cannot recover from a GPU drop unattended"
+    "$IPMITOOL" -I open mc info >/dev/null 2>&1 || die "in-band IPMI (/dev/ipmi0) not working - cannot recover from a GPU drop unattended"
+    rid="$(date +%Y-%m-%d-%H-%M)"; n=2
+    while [ -e "$SERVER_DIR/$rid" ]; do rid="$(date +%Y-%m-%d-%H-%M)-$n"; n=$((n + 1)); done
+    set_run_paths "$rid"
     discover
+    if [ "$APPLY_LIMITS" = auto ]; then
+        if running_from_removable; then APPLY_LIMITS=no; else APPLY_LIMITS=yes; fi
+    fi
     run_set phase warmup; run_set cycles 0; run_set burn "$BURN_DURATION"
-    run_set confirm "$CONFIRM_DURATION"; run_set max_cycles "$MAX_CYCLES"
-    log "New run: $(wc -l < "$CARDS") GPU(s); burn ${BURN_DURATION}s/step; confirm ${CONFIRM_DURATION}s; max ${MAX_CYCLES} cycles"
+    run_set confirm "$CONFIRM_DURATION"; run_set max_cycles "$MAX_CYCLES"; run_set apply "$APPLY_LIMITS"
+    echo "$RUN_ID" > "$ACTIVE"
+    log "New run $RUN_ID on $SERVER_ID: $(wc -l < "$CARDS") GPU(s); burn ${BURN_DURATION}s/step; confirm ${CONFIRM_DURATION}s; max ${MAX_CYCLES} cycles; apply per-card limits: $APPLY_LIMITS"
 fi
 STEP_TIMEOUT="${STEP_TIMEOUT:-$((BURN_DURATION + 1200))}"
 
