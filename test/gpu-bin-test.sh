@@ -4,6 +4,8 @@
 # Server SRV123: GPU0 RTX 5090 (healthy, in SLOT1 behind a riser bridge),
 #   GPU1 RTX 5090 (falls off the bus at 550 W), GPU2 RTX 4090 (fails stress
 #   at 450 W), GPU3 RTX A4000 (fails at 140 W).
+# Plus a node like the real BR80S5402800219 run: 6 fitted / 4 visible, three
+#   cards failing the floor together, re-tested alone before grading.
 # Expect: one cold power cycle, then GPU0 Default/A (575 W),
 #   GPU1 Acceptable/A (540 W), GPU2 Grade B/B (300 W),
 #   GPU3 Grade B/B (100 W) with a per-card 100 W limit (preset is 140 W).
@@ -56,6 +58,17 @@ gpu="$2"
 echo "args: $*" >> "$NODE/fulltest.calls"
 case "$gpu" in *,*) echo "[ PASS ] confirm"; exit 0 ;; esac
 pl="$(cat "$NODE/pl_$gpu")"
+# how many cards are under test right now (shared round vs solo re-test)
+touch "$NODE/running_$gpu"; trap 'rm -f "$NODE/running_$gpu"' EXIT
+sleep 0.5; n="$(ls "$NODE"/running_* 2>/dev/null | wc -l)"
+if [ -n "${MOCK_SHARED:-}" ] && [ "$gpu" != 3 ] && [ "$pl" -le 450 ]; then
+  if [ "$gpu" = 0 ]; then   # bad card: drops at the floor, alone or not
+    touch "$NODE/dropped_0"
+    echo "NVRM: Xid (PCI:0000:25:00): 79, pid=1, GPU has fallen off the bus." >> "$NODE/journal"; exit 1
+  fi
+  if [ "$gpu" = 1 ] && [ "$n" -gt 1 ]; then echo "[ FAIL ] Sustained Compute Stress (exit code 1)"; exit 1; fi
+  if [ "$gpu" = 2 ]; then echo "[ FAIL ] Sustained Compute Stress (exit code 1)"; exit 1; fi
+fi
 if [ -n "${MOCK_DOUBLE:-}" ] && { [ "$gpu" = 0 ] || [ "$gpu" = 1 ]; } && [ "$pl" -ge 500 ]; then
   touch "$NODE/dropped_$gpu"
   echo "NVRM: Xid (PCI:0000:$([ "$gpu" = 0 ] && echo 25 || echo 41):00): 79, pid=1, GPU has fallen off the bus." >> "$NODE/journal"
@@ -129,7 +142,7 @@ check 'grep -q "GPU-bbbb.*,4,575,540,550,0.939,,,A,,.*fell off bus.*,Acceptable$
 check 'grep -q "GPU-cccc.*,\"Sustained Compute Stress\",4,450,300,450,0.667,,,B,.*,Grade B$" "$R"' "GPU2 4090 fails 450 -> Grade B / B at 300 W"
 check 'grep -q "GPU-dddd.*,4,140,100,140,0.714,,,B,.*per-card limit 100W set.*,Grade B$" "$R"'  "GPU3 A4000 fails 140 -> Grade B / B at 100 W"
 check '[ "$(cat "$NODE/gpl.calls")" = "--gpu-limit 3:100" ]'  "host disk: per-card limit applied to the grade B A4000 only"
-check '[ "$(awk -F, "NR>1{print NF}" "$R" | sort -u)" = 19 ]' "every row has 19 columns"
+check '[ "$(python3 -c "import csv,sys; print(sorted({len(r) for r in csv.reader(open(sys.argv[1]))}))" "$R")" = "[19]" ]' "every row has 19 columns"
 check '[ "$(wc -l < "$NODE/cycles")" -eq 1 ]'                  "no further power cycles"
 check 'grep -q -- "--gpu 0,1,2,3 stress" "$NODE/fulltest.calls"' "all-GPU confirm burn ran"
 check 'grep -q -- "--gpu 2 code memtest stress" "$NODE/fulltest.calls"' "memtest runs on the floor step"
@@ -162,6 +175,29 @@ check '[ -s "$GPU_BIN_DIR/SRV123/active-run" ]' "SRV123 run is kept for when the
 rm -f "$NODE/serial"
 GPU_BIN_MEDIA=usb bash "$GB" --reset >/dev/null 2>&1
 
+# ── Node like BR80S5402800219: 6 fitted, 4 visible, shared-round floor failures ──
+rm -rf "$GPU_BIN_DIR" "$NODE"/*
+export MOCK_SHARED=1
+GPU_BIN_MEDIA=host bash "$GB" --expect-gpus 6 --burn-duration 1 --confirm-duration 1 >/dev/null 2>&1
+for k in 1 2 3 4 5; do
+  [ -n "$(newest_csv)" ] && break
+  GPU_BIN_MEDIA=host bash "$GB" --resume >/dev/null 2>&1
+done
+unset MOCK_SHARED
+R3="$(newest_csv)"; LOG3="$(ls "$GPU_BIN_DIR"/SRV123/*/logs/gpu-bin.log | head -1)"
+check '[ -n "$R3" ]'                                             "shared-failure node: run completes"
+check 'grep -q "ISOLATE: GPU-aaaa" "$LOG3" && grep -q "ISOLATE: GPU-bbbb" "$LOG3" && grep -q "ISOLATE: GPU-cccc" "$LOG3"' "3 cards failing the floor together are re-tested alone"
+check '! grep -q "ISOLATE: GPU-dddd" "$LOG3"'                    "the card that passed the shared round is not re-tested"
+check 'grep -q "GPU-aaaa.*,C,.*also when tested alone.*,Fail$" "$R3"'     "card that drops alone too -> grade C"
+check 'grep -q "GPU-bbbb.*,A,.*passed alone.*,Acceptable$" "$R3"'          "card that only failed alongside others climbs on -> Acceptable / A"
+check 'grep -q "GPU-cccc.*,C,.*also when tested alone.*,Fail$" "$R3"'     "card that fails alone too -> grade C"
+check 'grep -q "GPU-dddd.*,B,.*,Grade B$" "$R3"'                          "unaffected A4000 still graded normally"
+check '[ "$(grep -c "not detected .* of 2" "$R3")" -eq 2 ]'              "--expect-gpus 6 with 4 visible -> 2 not-detected rows"
+check 'grep -q "not detected 1 of 2.*,C,.*6 GPUs expected / 4 visible" "$R3"' "not-detected rows are grade C with a check-hardware note"
+check '[ "$(python3 -c "import csv,sys; print(sorted({len(r) for r in csv.reader(open(sys.argv[1]))}))" "$R3")" = "[19]" ] && [ "$(tail -n +2 "$R3" | wc -l)" -eq 6 ]' "all 6 rows have 19 columns"
+check 'grep -q "NODE NOTE" "$LOG3"'                                       "node note about full-load power written"
+check '! grep -q "HALT" "$LOG3"'                                          "floor drops do not trigger the PSU halt"
+
 # ── Two cards dropping in the same round -> halt, no power cycle ────────────
 rm -f "$NODE"/cycles "$NODE"/pl_* "$NODE"/journal
 MOCK_DOUBLE=1 GPU_BIN_MEDIA=host bash "$GB" --burn-duration 1 >/dev/null 2>&1; rc=$?
@@ -170,7 +206,8 @@ check '[ ! -f "$NODE/cycles" ]'             "double drop does not power-cycle"
 st="$(bash "$GB" --status 2>&1)"
 check 'echo "$st" | grep -q "phase: halted"' "status shows halted"
 check 'echo "$st" | grep -q "PSU/riser power suspected"' "halt note blames the shared power path"
-check '[ "$(echo "$st" | grep -c " climbing ")" -eq 2 ]' "both cards left climbing for a retry after the fix"
+check '[ "$(echo "$st" | grep -c " climbing ")" -eq 2 ]' "both dropped cards left climbing for a retry after the fix"
+check '[ "$(echo "$st" | grep -c " done ")" -eq 2 ]'     "other cards' results from the halted round are kept"
 check '[ "$(cat "$NODE"/pl_2 "$NODE"/pl_3 | tr "\n" " ")" = "450 140 " ]' "halt: surviving cards back at their own default limit"
 
 exit "$fail"
