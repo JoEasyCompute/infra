@@ -2580,10 +2580,12 @@ BURN_POWER_ANOMALY_FLAGGED_GPUS=""
 BURN_TELEMETRY_FILE=""
 STRESS_FAILURE_SCAN_START_LINE=1
 
+# Match real kernel Xid lines only ("NVRM: Xid (PCI:...)"), not the word Xid in
+# this script's own explanatory text (e.g. the power-anomaly advice).
 stress_hard_failure_detected() {
     local start_line="${STRESS_FAILURE_SCAN_START_LINE:-1}"
     sed -n "${start_line},\$p" "$LOG_FILE" | grep -qiE \
-        'Throttling HW: true|Thermal HW: true|HW_Slowdown|HW_PowerBrake|CUDA error|illegal memory access|device-side assert|segmentation fault|SIGSEGV|Xid|panic|core dumped|fatal error' \
+        'Throttling HW: true|Thermal HW: true|HW_Slowdown|HW_PowerBrake|CUDA error|illegal memory access|device-side assert|segmentation fault|SIGSEGV|NVRM: Xid|Xid \(PCI:|fallen off the bus|panic|core dumped|fatal error' \
         || return 1
     return 0
 }
@@ -2602,7 +2604,9 @@ BURN_THERMAL_RC=0
 run_burn_monitor() {
     local burn_pid="$1"
     local sample_interval=5
-    local telemetry_file="$BUILD_DIR/_burn_telemetry.csv"
+    # Per-target file: parallel single-GPU runs (gpu-bin.sh) must not share telemetry,
+    # or the power-anomaly peer comparison mixes cards from other processes.
+    local telemetry_file="$BUILD_DIR/_burn_telemetry${GPU_TARGET:+_gpu${GPU_TARGET//,/-}}.csv"
     ensure_build_dir_writable "writing burn telemetry" || return 1
 
     # Reset telemetry file for this run; analyse_power_anomalies will read it
