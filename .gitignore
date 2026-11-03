@@ -10,3 +10,6 @@ logs/network-batch/*.txt
 .omx/
 
 .antigravitycli/
+
+# Local training plan, tracker and evidence (never pushed)
+training/
