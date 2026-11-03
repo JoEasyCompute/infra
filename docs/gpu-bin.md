@@ -4,6 +4,28 @@
 
 Physical rungs (reseat, riser and cable swaps, the swap test) are still done by hand.
 
+## Runs, servers and USB sticks
+
+Every run gets a **run ID** (`yyyy-mm-dd-hh-mm`, plus `-2`, `-3`… when two start in the same minute) and its own folder, **per server**:
+
+```text
+/opt/gpu-bin/
+├── all-results.csv                         # every finished row, all servers, all runs
+└── <server-serial>/
+    ├── active-run                          # run ID in progress (absent when idle)
+    └── 2026-11-03-14-05/
+        ├── results_<server>_<run>.csv      # this run's rows (tracker columns A–S)
+        ├── apply-on-host_<server>_<run>.sh # only when per-card limits are needed
+        ├── logs/                           # per-card per-step fulltest logs, warm-up, confirm
+        └── state/
+```
+
+- The **server** is identified by its DMI system serial, then the baseboard serial, then the BMC MAC. Hostname is the last resort, because every server booted from the same stick has the same hostname.
+- The **PCI bus ID** column also shows the **physical slot**, for example `00000000:25:00.0 (SLOT3)`. It comes from SMBIOS (`dmidecode -t slot`) or `lspci` "Physical Slot", walking up through risers and PCIe switches. It's blank if the board doesn't publish slot names.
+- **USB / live boot:** when `/` is on a USB or removable device, or the kernel was booted with `boot=casper`/`boot=live`, per-card limits are **not applied**. They would land on the stick, not on the server's own OS. The script writes `apply-on-host_<server>_<run>.sh` instead, listing index, bus ID, slot, model, serial and UUID per card. Run it from the infra repo root on the server's own OS after checking that the indices match. Override with `--apply-limits` / `--record-limits`.
+- **Moving the stick:** a server only resumes its own active run. Booting the stick in another server leaves the first server's unfinished run untouched, and it continues when the stick goes back. If none of a run's GPUs are visible (cards swapped), the run halts instead of producing a results file full of "missing" cards.
+- **Live ISO without persistence:** refused. If `/opt/gpu-bin` is on overlay, tmpfs or ramfs, the state, logs and resume service would vanish at the first power cycle. Use a full install on the stick, or give the live image a persistent partition and bake in the resume service.
+
 ## Requirements
 
 - `fulltest.sh`, `code.sh` and `code.cu` in the same directory as `gpu-bin.sh` (or set `FULLTEST=`)
@@ -28,6 +50,7 @@ sudo ./test/gpu-bin.sh --reset         # discard state, remove the resume servic
 | `--max-cycles N` | 8 | Power cycles allowed before the run halts |
 | `--step-timeout S` | burn + 1200 | Kill a hung worker after S seconds |
 | `--force` | off | Run even if GPU compute processes exist |
+| `--apply-limits` / `--record-limits` | auto | Apply per-card limits at finish, or only write the apply-on-host script (auto: record only on USB/live boot) |
 
 ## Ladders
 
@@ -52,17 +75,19 @@ The top step is always the card's own `power.default_limit`. The floor step runs
    - fulltest's power-anomaly remark (12V-2x6 connector signature) → stop climbing that card, inspect the cable
 4. **Power cycle** when a card dropped or the driver stopped responding: `ipmitool -I open chassis power cycle`. A systemd unit (`gpu-bin-resume.service`) restarts the script after boot.
 5. **Confirm**: all cards together at their ceilings for `--confirm-duration`. A card that drops here is stepped down one band and the confirm repeats after a cycle.
-6. **Finish**: remove the resume service, restore `nvidia-runtime-policy.service` (power-saving presets), then check each grade A/B card against the limit the node will actually run it at. If a card's ceiling is lower (a grade B A4000 under the 140 W preset, for example), it runs `install/gpu-power-limit.sh --gpu-limit <idx>:<ceiling>` for that card. Then it writes `/opt/gpu-bin/results.csv` and re-enables `gpu-watchdog.timer`.
+6. **Finish**: clear the server's active run, remove the resume service (unless another server on the same stick still has an active run), restore `nvidia-runtime-policy.service` (power-saving presets), then check each grade A/B card against the limit the node will actually run it at. If a card's ceiling is lower (a grade B A4000 under the 140 W preset, for example), it runs `install/gpu-power-limit.sh --gpu-limit <idx>:<ceiling>` for that card on a host-disk boot, or only writes the apply-on-host script on a USB boot. Then it writes the run's results CSV, appends it to `all-results.csv`, and re-enables `gpu-watchdog.timer`.
 
    Note: `gpu-power-limit.sh` rebuilds the policy service from the model preset plus these overrides. If the node had a custom `--override` base or earlier per-card limits, set them again. If the script isn't found (`GPU_POWER_LIMIT=` to point at it), the log prints the exact command to run by hand.
 
 ## Results file
 
-`/opt/gpu-bin/results.csv` uses the tracker's GPU Ladder Log columns A–S, so rows paste straight in (paste as values):
+`results_<server>_<run>.csv` (and `all-results.csv`) use the tracker's GPU Ladder Log columns A–S, so rows paste straight in (paste as values):
 
 | Column | Filled by gpu-bin.sh |
 |---|---|
-| Date, Node, GPU UUID / idx, PCI bus ID, Model, Serial | Yes (UUID; the current index is in Notes) |
+| Date / run ID | Run ID `yyyy-mm-dd-hh-mm` |
+| Node / server | Server serial (DMI) |
+| GPU UUID / idx, PCI bus ID, Model, Serial | Yes (UUID; bus ID plus physical slot; the current index is in Notes) |
 | Failing test(s) | Yes (fulltest `[ FAIL ]` lines from the failing step) |
 | Rung reached | 4 (power ladder), or 2 for a memtest failure |
 | Default PL, Lowest passing PL, First failing PL, % of default | Yes |
@@ -80,14 +105,16 @@ The top step is always the card's own `power.default_limit`. The floor step runs
 
 | Path | Contents |
 |---|---|
-| `/opt/gpu-bin/state/cards.tsv` | Per-card ladder state |
-| `/opt/gpu-bin/state/run.env` | Phase, cycle count, options |
-| `/opt/gpu-bin/logs/` | Script log, one fulltest log per card per step, warm-up and confirm logs |
-| `/opt/gpu-bin/results.csv` | Final rows for the tracker |
+| `<server>/<run>/state/cards.tsv` | Per-card ladder state (incl. physical slot) |
+| `<server>/<run>/state/run.env` | Phase, cycle count, options, apply mode |
+| `<server>/<run>/logs/` | Script log, one fulltest log per card per step, warm-up and confirm logs |
+| `<server>/<run>/results_<server>_<run>.csv` | This run's rows for the tracker |
+| `<server>/<run>/apply-on-host_<server>_<run>.sh` | Per-card limits to apply on the server's own OS |
+| `all-results.csv` | Every finished row across servers and runs |
 
 ## Testing
 
-`bash test/gpu-bin-test.sh` runs the whole flow with mocked `nvidia-smi`, `fulltest.sh`, `ipmitool`, `journalctl` and `systemctl`. It covers a drop with a power cycle and resume, a 4090 that fails stress, a grade B A4000 getting its own power limit, the CSV column layout, and a two-card drop halt.
+`bash test/gpu-bin-test.sh` runs the whole flow with mocked `nvidia-smi`, `fulltest.sh`, `ipmitool`, `journalctl` and `systemctl`. It covers a drop with a power cycle and resume, a 4090 that fails stress, a grade B A4000 getting its own power limit, the CSV column layout, run IDs and server serials, slot lookup through a riser bridge, USB mode recording instead of applying limits, a stick moved to another server mid-run, and a two-card drop halt (35 checks).
 
 ## Known limits
 
