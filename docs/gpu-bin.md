@@ -50,6 +50,7 @@ sudo ./test/gpu-bin.sh --reset         # discard state, remove the resume servic
 | `--max-cycles N` | 8 | Power cycles allowed before the run halts |
 | `--step-timeout S` | burn + 1200 | Kill a hung worker after S seconds |
 | `--force` | off | Run even if GPU compute processes exist |
+| `--expect-gpus N` | none | GPUs fitted in the server; each one the driver can't see gets a "not detected" row (grade C) |
 | `--apply-limits` / `--record-limits` | auto | Apply per-card limits at finish, or only write the apply-on-host script (auto: record only on USB/live boot) |
 
 ## Ladders
@@ -73,6 +74,7 @@ The top step is always the card's own `power.default_limit`. The floor step runs
    - Xid 79 / not visible / hung → **dropped**; ceiling = last passing step
    - `memtest` failure → grade C straight away
    - fulltest's power-anomaly remark (12V-2x6 connector signature) → stop climbing that card, inspect the cable
+   - **Two or more cards fail or drop at the floor in the same round** → none of them is graded yet. Each is **re-tested alone** at the floor (ladder rung 2). A card that passes alone goes back on the ladder, with a note, and the run records a node note: "check PSU/riser power under full-node load". A card that fails or drops alone is grade C. A card that drops during the warm-up triggers a power cycle before testing, so it still gets its real test.
 4. **Power cycle** when a card dropped or the driver stopped responding: `ipmitool -I open chassis power cycle`. A systemd unit (`gpu-bin-resume.service`) restarts the script after boot.
 5. **Confirm**: all cards together at their ceilings for `--confirm-duration`. A card that drops here is stepped down one band and the confirm repeats after a cycle.
 6. **Finish**: clear the server's active run, remove the resume service (unless another server on the same stick still has an active run), set **every card back to its own default power limit** (`power.default_limit`), and restart `nvidia-runtime-policy.service` if it's installed so a host-disk server returns to its power-saving presets. Then it checks each grade A/B card's ceiling against the **fleet preset** for its model, read from `GPU_PRESET_MODELS` / `GPU_PRESET_WATTS` in `install/gpu-power-limit.sh` (or the card default for a model with no preset). If the ceiling is lower (a grade B A4000 under the 140 W preset, for example), it runs `install/gpu-power-limit.sh --gpu-limit <idx>:<ceiling>` for that card on a host-disk boot, or only writes the apply-on-host script on a USB boot. Then it writes the run's results CSV, appends it to `all-results.csv`, and re-enables `gpu-watchdog.timer`.
@@ -111,7 +113,7 @@ A 5090 graded "Acceptable" at 540 W gets **no** per-card limit. Its ceiling is a
 
 ## When it stops on its own (exit 2 / 3)
 
-- **Two or more cards drop in the same round**: the shared power path (PSU, breakout, riser power) is suspected, not the cards. The cards stay at the same step. Fix the power path, then `--resume`.
+- **Two or more cards drop *above their floor* in the same round** (cards that had already passed a lower step): the shared power path (PSU, breakout, riser power) is suspected, not the cards. The other cards' results from that round are kept. Drops at the floor are re-tested alone instead (see above). The cards stay at the same step. Fix the power path, then `--resume`.
 - **Power-cycle limit reached**: inspect the node, then `--resume` (this resets the cycle count).
 
 ## Files
@@ -127,7 +129,19 @@ A 5090 graded "Acceptable" at 540 W gets **no** per-card limit. Its ceiling is a
 
 ## Testing
 
-`bash test/gpu-bin-test.sh` runs the whole flow with mocked `nvidia-smi`, `fulltest.sh`, `ipmitool`, `journalctl` and `systemctl`. It covers a drop with a power cycle and resume, a 4090 that fails stress, a grade B A4000 getting its own power limit, the CSV column layout, run IDs and server serials, slot lookup through a riser bridge, USB mode recording instead of applying limits, a stick moved to another server mid-run, a two-card drop halt, and power limits returning to card defaults on finish and on halt (38 checks).
+`bash test/gpu-bin-test.sh` runs the whole flow with mocked `nvidia-smi`, `fulltest.sh`, `ipmitool`, `journalctl` and `systemctl`. It covers a drop with a power cycle and resume, a 4090 that fails stress, a grade B A4000 getting its own power limit, the CSV column layout, run IDs and server serials, slot lookup through a riser bridge, USB mode recording instead of applying limits, a stick moved to another server mid-run, a two-card drop halt, power limits returning to card defaults on finish and on halt, and a copy of the BR80S5402800219 node (6 fitted, 4 visible, three cards failing the floor together, re-tested alone) (51 checks).
+
+## Missing GPUs
+
+A card that doesn't enumerate on PCIe at all (absent from both `nvidia-smi -L` and `lspci`) can't be found by any software check. Pass `--expect-gpus N` with the number fitted. The results then get one row per missing card, "not detected", grade C, with a note to check the slot, riser, power and BIOS bifurcation.
+
+## fulltest.sh fixes this depends on
+
+Found on BR80S5402800219 (2026-11-03): three 5090s at 450 W were failed by fulltest, not by the cards.
+
+- `stress_hard_failure_detected` matched the plain word `Xid`, including fulltest's own power-anomaly advice text ("...precursor to Xid 79..."). Combined with gpu-fryer's Gflops-check exit 1 (a known false positive on power-capped cards), every card got a hard stress FAIL. It now matches only real kernel lines (`NVRM: Xid`, `Xid (PCI:`, `fallen off the bus`). Fixed in both `fulltest.sh` and `gpu-fulltest-v2.sh`.
+- The burn telemetry file was shared by all fulltest processes in `test/build/`, so parallel single-GPU runs compared each card against the others' data. It is now per GPU target (`_burn_telemetry_gpu<N>.csv`).
+- As a result, the 12V-2x6 power-anomaly check (which compares a card with its peers) only applies in gpu-bin's all-GPU confirm burn. gpu-bin reads it from there and marks flagged cards "connector".
 
 ## Known limits
 

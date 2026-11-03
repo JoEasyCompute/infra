@@ -36,6 +36,8 @@
 #   --max-cycles N        max power cycles before giving up     (default 8)
 #   --step-timeout S      kill a worker after S seconds         (default burn+1200)
 #   --force               run even if GPU compute processes exist
+#   --expect-gpus N       GPUs fitted in the server; each one the driver
+#                         cannot see is reported as a "not detected" row
 #   --apply-limits        always apply per-card limits at finish
 #   --record-limits       never apply them; write apply-on-host script only
 #                         (a card needs its own limit when its ceiling is below
@@ -75,6 +77,7 @@ STATE_DIR=""; CARDS=""; RUN=""; RESULT_CSV=""
 LOG_DIR="$GPU_BIN_DIR"
 ALL_RESULTS="$GPU_BIN_DIR/all-results.csv"
 APPLY_LIMITS=auto
+EXPECT_GPUS=""
 UNIT_NAME="gpu-bin-resume.service"
 UNIT_PATH="/etc/systemd/system/$UNIT_NAME"
 PAUSED_UNITS="gpu-watchdog.timer gpu-watchdog.service"
@@ -82,7 +85,8 @@ PAUSED_UNITS="gpu-watchdog.timer gpu-watchdog.service"
 # cards.tsv fields (tab separated):
 #  1 uuid 2 serial 3 bus 4 model 5 default_pl 6 steps(comma) 7 step_idx
 #  8 last_pass 9 first_fail 10 status 11 failed_tests 12 note 13 physical_slot
-# status: climbing | done | dropped | failed-floor | memfail | connector | missing
+# 14 solo_retested (1 once a card has had its solo re-test)
+# status: climbing | isolate | done | dropped | failed-floor | memfail | connector | missing
 export CUDA_DEVICE_ORDER=PCI_BUS_ID   # make CUDA indices match nvidia-smi
 
 BURN_DURATION=600
@@ -226,6 +230,11 @@ card_set() {   # card_set uuid field value
     local tmp; tmp="$(mktemp "$STATE_DIR/.cards.XXXX")"
     awk -F'\t' -v OFS='\t' -v u="$1" -v f="$2" -v v="$3" '$1==u{$f=v}1' "$CARDS" > "$tmp" && mv "$tmp" "$CARDS"
 }
+# note_add <uuid> <text>: keep a "passed alone" note, otherwise replace
+note_add() {
+    local prev; prev="$(card_field "$1" 12)"
+    case "$prev" in *"passed alone"*) card_set "$1" 12 "$prev; $2" ;; *) card_set "$1" 12 "$2" ;; esac
+}
 cards_with_status() { awk -F'\t' -v s="$1" '$10==s{print $1}' "$CARDS"; }
 step_at() { echo "$1" | cut -d, -f$(( $2 + 1 )); }
 step_count() { echo "$1" | awk -F, '{print NF}'; }
@@ -258,7 +267,7 @@ discover() {
         key="$(model_key "$name")"
         steps="$(build_steps "$key" "$def" "$min" "$max")"
         slot="$(physical_slot "$bus")"
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t0\t\t\tclimbing\t\t\t%s\n' \
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t0\t\t\tclimbing\t\t\t%s\t\n' \
             "$uuid" "$serial" "$bus" "$name" "$def" "$steps" "$slot" >> "$tmp"
     done < "$STATE_DIR/.query"
     [ -s "$tmp" ] || die "no NVIDIA GPUs found"
@@ -367,7 +376,7 @@ power_cycle() {
 # run_worker <uuid> <index> <watts> <tests...>  (background) -> writes .rc
 run_worker() {
     local uuid="$1" idx="$2" watts="$3"; shift 3
-    local wlog="$LOG_DIR/${uuid}_${watts}W.log" rc
+    local wlog="$LOG_DIR/${uuid}_${watts}W${WORKER_TAG:+_$WORKER_TAG}.log" rc
     {
         echo "== $(date '+%F %T') uuid=$uuid index=$idx limit=${watts}W tests=$*"
         timeout --kill-after=60 "$STEP_TIMEOUT" "$FULLTEST" --gpu "$idx" "$@" --burn-duration "$BURN_DURATION"
@@ -418,64 +427,124 @@ climb_round() {
     done
 
     local fell; fell="$(xid79_bus_ids "$start")"
-    local i rc wl watts_now ft
+    local i rc wl watts_now ft outcomes=() o ou oc ow os oft floor_bad=0 drops_up=0
     for i in "${!uuids[@]}"; do
         uuid="${uuids[$i]}"
         steps="$(card_field "$uuid" 6)"; sidx="$(card_field "$uuid" 7)"
         watts_now="$(step_at "$steps" "$sidx")"
         rc="$(cat "$STATE_DIR/$uuid.rc" 2>/dev/null || echo 255)"
         wl="$LOG_DIR/${uuid}_${watts_now}W.log"
+        ft=""
         if echo "$fell" | grep -qi "$(bus_short "$(card_field "$uuid" 3)")" || [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] \
            || [ -z "$(index_of "$uuid")" ]; then
-            drops=$((drops + 1)); need_cycle=1; dropped+=("$uuid:$watts_now")
+            oc=drop; need_cycle=1
+            if [ "$sidx" -eq 0 ]; then floor_bad=$((floor_bad + 1)); else drops_up=$((drops_up + 1)); fi
             log "DROP: $uuid at ${watts_now}W (last pass: $(card_field "$uuid" 8 | sed 's/^$/none/'))"
         elif [ "$rc" -eq 0 ]; then
-            if grep -qi 'power anomaly on GPU' "$wl"; then
-                card_set "$uuid" 10 connector; card_set "$uuid" 9 "$watts_now"
-                card_set "$uuid" 12 "power anomaly (12V-2x6 connector signature) at ${watts_now}W — inspect cable before any further test"
-                log "CONNECTOR: $uuid flagged at ${watts_now}W — stopped climbing"
-                continue
-            fi
-            card_set "$uuid" 8 "$watts_now"
-            if [ $((sidx + 1)) -ge "$(step_count "$steps")" ]; then
-                card_set "$uuid" 10 done; log "TOP: $uuid passed its default ${watts_now}W"
-            else
-                card_set "$uuid" 7 $((sidx + 1)); log "PASS: $uuid at ${watts_now}W"
-            fi
+            oc=pass
         else
             ft="$(grep -E '\[ FAIL \]' "$wl" | sed -E 's/.*\[ FAIL \] //; s/ \(exit code.*//' | paste -sd ';' -)"
-            card_set "$uuid" 9 "$watts_now"; card_set "$uuid" 11 "$ft"
-            if echo "$ft" | grep -qi memtest; then
-                card_set "$uuid" 10 memfail; card_set "$uuid" 12 "memtest failed — grade C"
-            elif [ "$sidx" -eq 0 ]; then
-                card_set "$uuid" 10 failed-floor; card_set "$uuid" 12 "failed at floor ${watts_now}W"
-            else
-                card_set "$uuid" 10 done
-            fi
+            if echo "$ft" | grep -qi memtest; then oc=memfail
+            elif [ "$sidx" -eq 0 ]; then oc=floorfail; floor_bad=$((floor_bad + 1))
+            else oc=fail; fi
             log "FAIL: $uuid at ${watts_now}W ($ft)"
             # a failed CUDA run can leave the card wedged even without Xid 79
             smi -i "$(index_of "$uuid")" -q >/dev/null 2>&1 || need_cycle=1
         fi
+        outcomes+=("$uuid|$oc|$watts_now|$sidx|$ft")
     done
 
-    if [ "$drops" -ge 2 ]; then
-        # Several cards at once points at shared power, not the cards:
-        # leave them climbing at the same step so the run retries after the fix.
-        for d in "${dropped[@]}"; do
-            card_set "${d%%:*}" 12 "dropped with $((drops - 1)) other card(s) at ${d##*:}W — PSU/riser power suspected"
+    for o in "${outcomes[@]}"; do
+        IFS='|' read -r ou oc ow os oft <<< "$o"
+        steps="$(card_field "$ou" 6)"
+        [ -n "$oft" ] && card_set "$ou" 11 "$oft"
+        case "$oc" in
+            pass)
+                card_set "$ou" 8 "$ow"
+                if [ $((os + 1)) -ge "$(step_count "$steps")" ]; then
+                    card_set "$ou" 10 done; log "TOP: $ou passed its default ${ow}W"
+                else
+                    card_set "$ou" 7 $((os + 1)); log "PASS: $ou at ${ow}W"
+                fi ;;
+            memfail)
+                card_set "$ou" 9 "$ow"; card_set "$ou" 10 memfail; card_set "$ou" 12 "memtest failed — grade C" ;;
+            fail)
+                card_set "$ou" 9 "$ow"; card_set "$ou" 10 done ;;
+            drop|floorfail)
+                if [ "$oc" = drop ] && [ "$os" -gt 0 ] && [ "$drops_up" -ge 2 ]; then
+                    continue   # left climbing at this step: shared-power halt below
+                fi
+                card_set "$ou" 9 "$ow"
+                if [ "$os" -eq 0 ] && [ "$floor_bad" -ge 2 ] && [ "$(card_field "$ou" 14)" != 1 ]; then
+                    # Several cards failing the floor together may be one shared event:
+                    # re-test each alone before grading (ladder rung 2).
+                    card_set "$ou" 10 isolate
+                    card_set "$ou" 12 "$([ "$oc" = drop ] && echo dropped || echo failed) at floor ${ow}W with $((floor_bad - 1)) other card(s) — re-testing alone"
+                    log "ISOLATE: $ou will be re-tested alone at ${ow}W"
+                elif [ "$oc" = drop ]; then
+                    card_set "$ou" 10 dropped
+                    note_add "$ou" "fell off bus / hung at ${ow}W"
+                else
+                    card_set "$ou" 10 failed-floor; card_set "$ou" 12 "failed at floor ${ow}W"
+                fi ;;
+        esac
+    done
+    # Cards that already passed a lower step dropping together point at shared power.
+    if [ "$drops_up" -ge 2 ]; then
+        for o in "${outcomes[@]}"; do
+            IFS='|' read -r ou oc ow os oft <<< "$o"
+            [ "$oc" = drop ] && [ "$os" -gt 0 ] && card_set "$ou" 12 "dropped with $((drops_up - 1)) other card(s) at ${ow}W — PSU/riser power suspected"
         done
         run_set halted_from climb; run_set phase halted
-        log "HALT: $drops cards dropped in the same round — suspect PSU / riser power, not the cards."
+        log "HALT: $drops_up cards dropped above their floor in the same round — suspect PSU / riser power, not the cards."
         log "      Fix the power path, then: sudo $SCRIPT_PATH --resume"
         reset_limits; remove_unit; restore_units; exit 3
     fi
-    for d in "${dropped[@]}"; do
-        card_set "${d%%:*}" 9 "${d##*:}"; card_set "${d%%:*}" 10 dropped
-        card_set "${d%%:*}" 12 "fell off bus / hung at ${d##*:}W"
-    done
+
     smi -L >/dev/null 2>&1 || need_cycle=1
     [ "$need_cycle" = 1 ] && power_cycle "card dropped or driver unresponsive after round"
     return 0
+}
+
+# ─── Isolation: re-test one floor-failing card alone ─────────────────────────
+isolate_round() {
+    local uuid idx steps floor start rc wl ft
+    uuid="$(cards_with_status isolate | head -1)"
+    idx="$(index_of "$uuid")"
+    card_set "$uuid" 14 1
+    if [ -z "$idx" ]; then
+        card_set "$uuid" 10 dropped; card_set "$uuid" 12 "not visible for the solo re-test; inspect slot/riser/power"
+        return 0
+    fi
+    steps="$(card_field "$uuid" 6)"; floor="$(step_at "$steps" 0)"
+    smi -i "$idx" -pl "$floor" >/dev/null 2>&1 || true
+    rm -f "$STATE_DIR/$uuid.rc"
+    log "Solo re-test: $(card_field "$uuid" 4) $uuid (index $idx) alone at ${floor}W: code memtest stress"
+    start=$(date +%s)
+    WORKER_TAG=solo run_worker "$uuid" "$idx" "$floor" code memtest stress
+    rc="$(cat "$STATE_DIR/$uuid.rc" 2>/dev/null || echo 255)"
+    wl="$LOG_DIR/${uuid}_${floor}W_solo.log"
+    if xid79_bus_ids "$start" | grep -qi "$(bus_short "$(card_field "$uuid" 3)")" || [ "$rc" -eq 124 ] \
+       || [ "$rc" -eq 137 ] || [ -z "$(index_of "$uuid")" ]; then
+        card_set "$uuid" 10 dropped; card_set "$uuid" 9 "$floor"
+        card_set "$uuid" 12 "fell off bus at floor ${floor}W, also when tested alone"
+        log "SOLO DROP: $uuid at ${floor}W — grade C"
+        power_cycle "card dropped in solo re-test"
+    elif [ "$rc" -eq 0 ]; then
+        card_set "$uuid" 8 "$floor"; card_set "$uuid" 9 ""; card_set "$uuid" 11 ""
+        card_set "$uuid" 12 "failed the floor only alongside other cards; passed alone — check node PSU/riser power under full load"
+        run_set node_note "cards failed the floor together but passed alone — check PSU/riser power under full-node load"
+        if [ "$(step_count "$steps")" -le 1 ]; then card_set "$uuid" 10 done
+        else card_set "$uuid" 7 1; card_set "$uuid" 10 climbing; fi
+        log "SOLO PASS: $uuid at ${floor}W — back on the ladder"
+    else
+        ft="$(grep -E '\[ FAIL \]' "$wl" | sed -E 's/.*\[ FAIL \] //; s/ \(exit code.*//' | paste -sd ';' -)"
+        card_set "$uuid" 9 "$floor"; card_set "$uuid" 11 "$ft"
+        if echo "$ft" | grep -qi memtest; then card_set "$uuid" 10 memfail; card_set "$uuid" 12 "memtest failed alone — grade C"
+        else card_set "$uuid" 10 failed-floor; card_set "$uuid" 12 "failed at floor ${floor}W, also when tested alone"; fi
+        log "SOLO FAIL: $uuid at ${floor}W ($ft) — grade C"
+        smi -L >/dev/null 2>&1 || power_cycle "driver unresponsive after solo re-test"
+    fi
 }
 
 # ─── Warm-up: build fulltest's tools once, serially, before parallel workers ──
@@ -489,6 +558,10 @@ warmup() {
     timeout --kill-after=60 "$STEP_TIMEOUT" "$FULLTEST" --gpu "$idx" code memtest stress \
         --burn-duration 60 >> "$LOG_DIR/warmup.log" 2>&1 || log "Warm-up returned non-zero (see warmup.log); continuing"
     smi -L >/dev/null 2>&1 || power_cycle "driver unresponsive after warm-up"
+    local u
+    for u in $(cut -f1 "$CARDS"); do
+        [ -n "$(index_of "$u")" ] || power_cycle "a card dropped during warm-up — cycling so it gets its real test"
+    done
 }
 
 # ─── Confirm: all cards together at their ceilings ───────────────────────────
@@ -508,6 +581,17 @@ confirm_round() {
     rc=$?
     local fell; fell="$(xid79_bus_ids "$start")"
     if [ "$rc" -eq 0 ] && [ -z "$fell" ]; then
+        # The power-anomaly check compares a card with its peers, so it is only
+        # meaningful here, where all cards run in one fulltest.
+        local flagged gi gu
+        flagged="$(grep -oE 'power anomaly on GPU\(s\) [0-9, ]+' "$LOG_DIR/confirm.log" | tail -1 | grep -oE '[0-9]+')"
+        for gi in $flagged; do
+            gu="$(smi --query-gpu=index,uuid --format=csv,noheader 2>/dev/null | awk -F', *' -v i="$gi" '$1==i{print $2}')"
+            [ -n "$gu" ] || continue
+            card_set "$gu" 10 connector
+            card_set "$gu" 12 "power anomaly (12V-2x6 connector signature) in the all-GPU confirm — inspect cable"
+            log "CONNECTOR: GPU $gi ($gu) flagged in confirm"
+        done
         log "Confirm passed"; run_set phase finish; return 0
     fi
     # Step down every card that fell off; if none identifiable, step all down one.
@@ -570,8 +654,20 @@ finish() {
         rung=4; [ "$status" = memfail ] && rung=2
         printf '%s,%s,%s,"%s",%s,%s,"%s",%s,%s,%s,%s,%s,,,%s,,%s,"%s",%s\n' \
             "$RUN_ID" "$SERVER_ID" "$uuid" "$bus${slot:+ ($slot)}" "$model" "$serial" "$ft" "$rung" \
-            "$def" "$c" "$ff" "$pct" "$grade" "$LOG_DIR/${uuid}_*W.log" "$note" "$band" >> "$RESULT_CSV"
+            "$def" "$c" "$ff" "$pct" "$grade" "$LOG_DIR/${uuid}_*.log" "$note" "$band" >> "$RESULT_CSV"
     done
+
+    local expect found k nn
+    expect="$(run_get expect)"; found="$(wc -l < "$CARDS")"; nn="$(run_get node_note)"
+    if [ -n "$expect" ] && [ "$found" -lt "$expect" ]; then
+        for k in $(seq 1 $((expect - found))); do
+            printf '%s,%s,%s,"%s",%s,%s,"%s",%s,%s,%s,%s,%s,,,%s,,%s,"%s",%s\n' \
+                "$RUN_ID" "$SERVER_ID" "not detected $k of $((expect - found))" "" "(not detected)" "" "" 1 \
+                "" "" "" "" C "" "$expect GPUs expected / $found visible: not on PCIe or not seen by the driver - check slot / riser / power / BIOS bifurcation" "Not detected" >> "$RESULT_CSV"
+        done
+        log "$((expect - found)) expected GPU(s) not detected — rows added"
+    fi
+    [ -n "$nn" ] && log "NODE NOTE: $nn"
 
     if [ -n "$overrides" ]; then
         local host_script="$RUN_DIR/apply-on-host_${SERVER_ID}_${RUN_ID}.sh"
@@ -615,6 +711,7 @@ while [ $# -gt 0 ]; do
         --force) FORCE=1 ;;
         --apply-limits) APPLY_LIMITS=yes ;;
         --record-limits) APPLY_LIMITS=no ;;
+        --expect-gpus) EXPECT_GPUS="$2"; shift ;;
         --burn-duration) BURN_DURATION="$2"; shift ;;
         --confirm-duration) CONFIRM_DURATION="$2"; shift ;;
         --max-cycles) MAX_CYCLES="$2"; shift ;;
@@ -624,6 +721,7 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+[ -z "$EXPECT_GPUS" ] || [[ "$EXPECT_GPUS" =~ ^[0-9]+$ ]] || { echo "--expect-gpus must be a number" >&2; exit 1; }
 for v in BURN_DURATION CONFIRM_DURATION MAX_CYCLES; do
     [[ "${!v}" =~ ^[0-9]+$ ]] || { echo "$v must be a positive integer" >&2; exit 1; }
 done
@@ -642,7 +740,7 @@ case "$MODE" in
     dry)
         STATE_DIR="$(mktemp -d)"; CARDS="$STATE_DIR/cards.tsv"
         discover
-        echo "Server $SERVER_ID - ladders (W) per card; top step = card default:"
+        echo "Server $SERVER_ID - $(wc -l < "$CARDS") GPU(s) visible${EXPECT_GPUS:+, $EXPECT_GPUS expected} - ladders (W) per card; top step = card default:"
         awk -F'\t' '{printf "  %-24s %-16s %-14s %-40s steps: %s\n", $4, $3, $13, $1, $6}' "$CARDS"
         if running_from_removable; then echo "Media: USB/live - per-card limits will be recorded, not applied"
         else echo "Media: host disk - per-card limits will be applied"; fi
@@ -696,6 +794,10 @@ else
     fi
     run_set phase warmup; run_set cycles 0; run_set burn "$BURN_DURATION"
     run_set confirm "$CONFIRM_DURATION"; run_set max_cycles "$MAX_CYCLES"; run_set apply "$APPLY_LIMITS"
+    run_set expect "$EXPECT_GPUS"
+    if [ -n "$EXPECT_GPUS" ] && [ "$(wc -l < "$CARDS")" -lt "$EXPECT_GPUS" ]; then
+        log "WARNING: $EXPECT_GPUS GPUs expected, only $(wc -l < "$CARDS") visible — the missing ones will be reported as not detected"
+    fi
     echo "$RUN_ID" > "$ACTIVE"
     log "New run $RUN_ID on $SERVER_ID: $(wc -l < "$CARDS") GPU(s); burn ${BURN_DURATION}s/step; confirm ${CONFIRM_DURATION}s; max ${MAX_CYCLES} cycles; apply per-card limits: $APPLY_LIMITS"
 fi
@@ -708,7 +810,8 @@ while :; do
     case "$(run_get phase)" in
         warmup) warmup ;;
         climb)
-            if [ -n "$(cards_with_status climbing)" ]; then climb_round
+            if [ -n "$(cards_with_status isolate)" ]; then isolate_round
+            elif [ -n "$(cards_with_status climbing)" ]; then climb_round
             else run_set phase confirm; fi ;;
         confirm) confirm_round ;;
         finish) finish; exit 0 ;;
