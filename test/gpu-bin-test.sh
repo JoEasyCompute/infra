@@ -66,7 +66,7 @@ if [ -n "${MOCK_SHARED:-}" ] && [ "$gpu" != 3 ] && [ "$pl" -le 450 ]; then
     touch "$NODE/dropped_0"
     echo "NVRM: Xid (PCI:0000:25:00): 79, pid=1, GPU has fallen off the bus." >> "$NODE/journal"; exit 1
   fi
-  if [ "$gpu" = 1 ] && [ "$n" -gt 1 ]; then echo "[ FAIL ] Sustained Compute Stress (exit code 1)"; exit 1; fi
+  if [ "$gpu" = 1 ] && [ "$n" -gt 1 ]; then echo "[ FAIL ] cuda_memtest (GPU Memory Stress) (exit code 1)"; exit 1; fi
   if [ "$gpu" = 2 ]; then echo "[ FAIL ] Sustained Compute Stress (exit code 1)"; exit 1; fi
 fi
 if [ -n "${MOCK_DOUBLE:-}" ] && { [ "$gpu" = 0 ] || [ "$gpu" = 1 ]; } && [ "$pl" -ge 500 ]; then
@@ -189,7 +189,8 @@ check '[ -n "$R3" ]'                                             "shared-failure
 check 'grep -q "ISOLATE: GPU-aaaa" "$LOG3" && grep -q "ISOLATE: GPU-bbbb" "$LOG3" && grep -q "ISOLATE: GPU-cccc" "$LOG3"' "3 cards failing the floor together are re-tested alone"
 check '! grep -q "ISOLATE: GPU-dddd" "$LOG3"'                    "the card that passed the shared round is not re-tested"
 check 'grep -q "GPU-aaaa.*,C,.*also when tested alone.*,Fail$" "$R3"'     "card that drops alone too -> grade C"
-check 'grep -q "GPU-bbbb.*,A,.*passed alone.*,Acceptable$" "$R3"'          "card that only failed alongside others climbs on -> Acceptable / A"
+check 'grep -q "GPU-bbbb.*,A,.*passed alone.*,Acceptable$" "$R3"'          "card whose memtest only failed alongside others climbs on -> Acceptable / A"
+check 'grep -q "ISOLATE: GPU-bbbb.*(memtest)" "$LOG3"'                     "shared-round memtest failure is re-tested alone, not graded C"
 check 'grep -q "GPU-cccc.*,C,.*also when tested alone.*,Fail$" "$R3"'     "card that fails alone too -> grade C"
 check 'grep -q "GPU-dddd.*,B,.*,Grade B$" "$R3"'                          "unaffected A4000 still graded normally"
 check '[ "$(grep -c "not detected .* of 2" "$R3")" -eq 2 ]'              "--expect-gpus 6 with 4 visible -> 2 not-detected rows"
