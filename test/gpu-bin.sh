@@ -38,6 +38,10 @@
 #   --force               run even if GPU compute processes exist
 #   --apply-limits        always apply per-card limits at finish
 #   --record-limits       never apply them; write apply-on-host script only
+#                         (a card needs its own limit when its ceiling is below
+#                          the fleet preset in gpu-power-limit.sh)
+# On finish or halt every card is set back to its own default power limit,
+# then nvidia-runtime-policy.service (if installed) re-applies the presets.
 #                         (default: record only when booted from USB/live media)
 #
 # Environment overrides (used by test/gpu-bin-test.sh):
@@ -311,12 +315,45 @@ remove_unit() {
 pause_units()   { local u; for u in $PAUSED_UNITS; do "$SYSTEMCTL" stop "$u" >/dev/null 2>&1 || true; done; }
 restore_units() { local u; for u in $PAUSED_UNITS; do "$SYSTEMCTL" start "$u" >/dev/null 2>&1 || true; done; }
 
+# Fleet preset (power-saving floor) for a model, read from gpu-power-limit.sh;
+# falls back to the card's own default when the model has no preset.
+fleet_preset() {   # fleet_preset <model name> <default W>
+    local model="$1" def="$2" names watts i
+    if [ -r "$GPU_POWER_LIMIT" ]; then
+        read -r -a names <<< "$(sed -n 's/^GPU_PRESET_MODELS=(\(.*\))/\1/p' "$GPU_POWER_LIMIT" | tr -d '"')"
+        read -r -a watts <<< "$(sed -n 's/^GPU_PRESET_WATTS=(\(.*\))/\1/p' "$GPU_POWER_LIMIT")"
+        for i in "${!names[@]}"; do
+            if [[ "$model" == *"${names[$i]}"* ]] && [ -n "${watts[$i]:-}" ]; then echo "${watts[$i]}"; return; fi
+        done
+    fi
+    echo "$def"
+}
+
+# Put every visible card back to its own default limit, then let the node's
+# power policy (if installed) re-apply its presets.
+reset_limits() {
+    local uuid idx def
+    [ -f "$CARDS" ] || return 0
+    for uuid in $(cut -f1 "$CARDS"); do
+        idx="$(index_of "$uuid")"; def="$(card_field "$uuid" 5)"
+        [ -n "$idx" ] && [ -n "$def" ] || continue
+        smi -i "$idx" -pl "$def" >/dev/null 2>&1 && echo "$idx:$def" >> "$STATE_DIR/.reset" \
+            || log "WARNING: could not reset GPU $idx ($uuid) to ${def}W"
+    done
+    if "$SYSTEMCTL" cat nvidia-runtime-policy.service >/dev/null 2>&1; then
+        "$SYSTEMCTL" restart nvidia-runtime-policy.service >/dev/null 2>&1 || true
+        log "Power limits reset to card defaults, then nvidia-runtime-policy presets re-applied"
+    else
+        log "Power limits reset to card defaults"
+    fi
+}
+
 power_cycle() {
     local cycles; cycles=$(( $(run_get cycles) + 1 ))
     if [ "$cycles" -gt "$MAX_CYCLES" ]; then
         run_set halted_from "$(run_get phase)"; run_set phase halted
         log "HALT: power-cycle limit ($MAX_CYCLES) reached. Inspect the node; resume with --resume after fixing."
-        remove_unit; restore_units; exit 2
+        reset_limits; remove_unit; restore_units; exit 2
     fi
     run_set cycles "$cycles"
     log "Cold power cycle $cycles/$MAX_CYCLES via BMC (in-band): $1"
@@ -430,7 +467,7 @@ climb_round() {
         run_set halted_from climb; run_set phase halted
         log "HALT: $drops cards dropped in the same round — suspect PSU / riser power, not the cards."
         log "      Fix the power path, then: sudo $SCRIPT_PATH --resume"
-        remove_unit; restore_units; exit 3
+        reset_limits; remove_unit; restore_units; exit 3
     fi
     for d in "${dropped[@]}"; do
         card_set "${d%%:*}" 9 "${d##*:}"; card_set "${d%%:*}" 10 dropped
@@ -497,8 +534,7 @@ finish() {
     run_set phase complete
     rm -f "$ACTIVE"
     remove_unit
-    "$SYSTEMCTL" restart nvidia-runtime-policy.service >/dev/null 2>&1 || true   # back to power-saving presets
-    sleep 2
+    reset_limits
 
     local header="Date,Node,GPU UUID / idx,PCI bus ID,Model,Serial,Failing test(s),Rung reached (1-9),Default PL (W),Lowest passing PL (W),First failing PL (W),% of default,PCIe link (gen x width),Fault follows,Grade,Ticket,Evidence path,Notes,Band (auto)"
     # Columns match the training tracker's GPU Ladder Log (A..S) so rows paste straight in.
@@ -517,15 +553,14 @@ finish() {
         if [ "$grade" = C ]; then
             note="$note; NOT for client service: sell / RMA / mining only (mining needs a stress pass at its mining limit)"
         elif [ -n "$c" ] && [ -n "$idx" ]; then
-            # A card whose ceiling is below what the node will run it at needs its own limit
-            applied="$(smi -i "$idx" --query-gpu=power.limit --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs)"
-            applied="$(printf '%.0f' "${applied:-0}" 2>/dev/null || echo 0)"
+            # A card whose ceiling is below the fleet preset it will run at needs its own limit
+            applied="$(fleet_preset "$model" "$def")"
             if [ "$applied" -gt "$c" ]; then
                 overrides="$overrides --gpu-limit $idx:$c"
                 host_lines="${host_lines}#   index $idx = $bus${slot:+ ($slot)} $model $serial $uuid -> ${c}W
 "
                 if [ "$(run_get apply)" = yes ]; then
-                    note="$note; per-card limit ${c}W set (node runs ${applied}W)"
+                    note="$note; per-card limit ${c}W set (fleet preset ${applied}W)"
                 else
                     note="$note; per-card limit ${c}W NOT applied (USB run) - apply on the server OS: apply-on-host_${SERVER_ID}_${RUN_ID}.sh"
                 fi
@@ -639,6 +674,7 @@ if [ -n "$RUN_ID" ]; then
     for u in $(cut -f1 "$CARDS"); do [ -n "$(index_of "$u")" ] && { seen=1; break; }; done
     if [ "$seen" -eq 0 ]; then
         run_set halted_from "$(run_get phase)"; run_set phase halted
+        reset_limits
         die "none of run $RUN_ID's GPUs are visible on $SERVER_ID (GPUs swapped, or all lost?). Inspect, then --resume or --reset."
     fi
     log "Resuming run $RUN_ID on $SERVER_ID (phase $(run_get phase))"
