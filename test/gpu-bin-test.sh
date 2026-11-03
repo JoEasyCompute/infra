@@ -45,7 +45,7 @@ case "$*" in
   *--query-compute-apps*) : ;;
   *--query-gpu=power.limit*) set -- $*; echo "${preset[$2]}.00" ;;
   -L) echo "GPU 0: mock" ;;
-  *-pl*) set -- $*; [ -f "$NODE/dropped_$2" ] && exit 15; echo "$4" > "$NODE/pl_$2" ;;
+  *-pl*) set -- $*; [ -f "$NODE/dropped_$2" ] && exit 15; echo "$4" > "$NODE/pl_$2"; echo "$2:$4" >> "$NODE/pl.history" ;;
   *-q*) set -- $*; [ -f "$NODE/dropped_$2" ] && exit 15; exit 0 ;;
 esac
 EOF
@@ -88,7 +88,12 @@ esac
 EOF
 
 printf '#!/usr/bin/env bash\nexit 0\n' > "$M/systemctl"
-printf '#!/usr/bin/env bash\necho "$*" >> "$NODE/gpl.calls"\n' > "$M/gpu-power-limit.sh"
+cat > "$M/gpu-power-limit.sh" <<'EOF'
+#!/usr/bin/env bash
+GPU_PRESET_MODELS=("5090" "4090" "A100" "H100" "A4000")
+GPU_PRESET_WATTS=(450 300 300 500 140)
+echo "$*" >> "$NODE/gpl.calls"
+EOF
 chmod +x "$M"/*
 
 export GPU_BIN_DIR="$WS/bin" FULLTEST="$M/fulltest.sh" NVIDIA_SMI="$M/nvidia-smi" \
@@ -129,6 +134,8 @@ check '[ "$(wc -l < "$NODE/cycles")" -eq 1 ]'                  "no further power
 check 'grep -q -- "--gpu 0,1,2,3 stress" "$NODE/fulltest.calls"' "all-GPU confirm burn ran"
 check 'grep -q -- "--gpu 2 code memtest stress" "$NODE/fulltest.calls"' "memtest runs on the floor step"
 check '[ ! -e "$GPU_BIN_DIR/SRV123/active-run" ]'              "active run cleared when finished"
+check '[ "$(cat "$NODE"/pl_0 "$NODE"/pl_1 "$NODE"/pl_2 "$NODE"/pl_3 | tr "\n" " ")" = "575 575 450 140 " ]' "finish: every card back at its own default limit"
+check '! grep -q "GPU-bbbb.*per-card limit" "$R"'              "5090 at 540 W gets no override (above the 450 W fleet preset)"
 R1="$R"
 
 # ── Run 2 from a USB stick: limits recorded, not applied ────────────────────
@@ -164,5 +171,6 @@ st="$(bash "$GB" --status 2>&1)"
 check 'echo "$st" | grep -q "phase: halted"' "status shows halted"
 check 'echo "$st" | grep -q "PSU/riser power suspected"' "halt note blames the shared power path"
 check '[ "$(echo "$st" | grep -c " climbing ")" -eq 2 ]' "both cards left climbing for a retry after the fix"
+check '[ "$(cat "$NODE"/pl_2 "$NODE"/pl_3 | tr "\n" " ")" = "450 140 " ]' "halt: surviving cards back at their own default limit"
 
 exit "$fail"

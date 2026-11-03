@@ -75,7 +75,7 @@ The top step is always the card's own `power.default_limit`. The floor step runs
    - fulltest's power-anomaly remark (12V-2x6 connector signature) → stop climbing that card, inspect the cable
 4. **Power cycle** when a card dropped or the driver stopped responding: `ipmitool -I open chassis power cycle`. A systemd unit (`gpu-bin-resume.service`) restarts the script after boot.
 5. **Confirm**: all cards together at their ceilings for `--confirm-duration`. A card that drops here is stepped down one band and the confirm repeats after a cycle.
-6. **Finish**: clear the server's active run, remove the resume service (unless another server on the same stick still has an active run), restore `nvidia-runtime-policy.service` (power-saving presets), then check each grade A/B card against the limit the node will actually run it at. If a card's ceiling is lower (a grade B A4000 under the 140 W preset, for example), it runs `install/gpu-power-limit.sh --gpu-limit <idx>:<ceiling>` for that card on a host-disk boot, or only writes the apply-on-host script on a USB boot. Then it writes the run's results CSV, appends it to `all-results.csv`, and re-enables `gpu-watchdog.timer`.
+6. **Finish**: clear the server's active run, remove the resume service (unless another server on the same stick still has an active run), set **every card back to its own default power limit** (`power.default_limit`), and restart `nvidia-runtime-policy.service` if it's installed so a host-disk server returns to its power-saving presets. Then it checks each grade A/B card's ceiling against the **fleet preset** for its model, read from `GPU_PRESET_MODELS` / `GPU_PRESET_WATTS` in `install/gpu-power-limit.sh` (or the card default for a model with no preset). If the ceiling is lower (a grade B A4000 under the 140 W preset, for example), it runs `install/gpu-power-limit.sh --gpu-limit <idx>:<ceiling>` for that card on a host-disk boot, or only writes the apply-on-host script on a USB boot. Then it writes the run's results CSV, appends it to `all-results.csv`, and re-enables `gpu-watchdog.timer`.
 
    Note: `gpu-power-limit.sh` rebuilds the policy service from the model preset plus these overrides. If the node had a custom `--override` base or earlier per-card limits, set them again. If the script isn't found (`GPU_POWER_LIMIT=` to point at it), the log prints the exact command to run by hand.
 
@@ -96,6 +96,19 @@ The top step is always the card's own `power.default_limit`. The floor step runs
 | Evidence path | Per-card step logs under `/opt/gpu-bin/logs/` |
 | Notes | Final status, index, drop or connector notes, per-card limit applied, and "NOT for client service" for grade C |
 
+## Power limits after the run
+
+| How the run ends | Power limit left on each card |
+|---|---|
+| Finished, booted from USB (no policy service on the stick) | The card's own default (5090 575/600 W, 4090 450 W, A4000 140 W) |
+| Finished, host disk with `nvidia-runtime-policy.service` | Default first, then the service re-applies the fleet presets |
+| Halted (exit 2 / 3, or GPUs not found) | Same reset as a finished run, for every card still visible |
+| Power cycle mid-run | The driver starts every card at its default after boot anyway |
+
+Limits set with `nvidia-smi -pl` don't survive a reboot. When a server boots its own OS after a USB run, it starts at the defaults, or at whatever that OS's own policy service applies.
+
+A 5090 graded "Acceptable" at 540 W gets **no** per-card limit. Its ceiling is above the 450 W fleet preset, so an override would only raise its power. Only cards whose ceiling is below the preset get one.
+
 ## When it stops on its own (exit 2 / 3)
 
 - **Two or more cards drop in the same round**: the shared power path (PSU, breakout, riser power) is suspected, not the cards. The cards stay at the same step. Fix the power path, then `--resume`.
@@ -114,7 +127,7 @@ The top step is always the card's own `power.default_limit`. The floor step runs
 
 ## Testing
 
-`bash test/gpu-bin-test.sh` runs the whole flow with mocked `nvidia-smi`, `fulltest.sh`, `ipmitool`, `journalctl` and `systemctl`. It covers a drop with a power cycle and resume, a 4090 that fails stress, a grade B A4000 getting its own power limit, the CSV column layout, run IDs and server serials, slot lookup through a riser bridge, USB mode recording instead of applying limits, a stick moved to another server mid-run, and a two-card drop halt (35 checks).
+`bash test/gpu-bin-test.sh` runs the whole flow with mocked `nvidia-smi`, `fulltest.sh`, `ipmitool`, `journalctl` and `systemctl`. It covers a drop with a power cycle and resume, a 4090 that fails stress, a grade B A4000 getting its own power limit, the CSV column layout, run IDs and server serials, slot lookup through a riser bridge, USB mode recording instead of applying limits, a stick moved to another server mid-run, a two-card drop halt, and power limits returning to card defaults on finish and on halt (38 checks).
 
 ## Known limits
 
