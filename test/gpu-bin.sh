@@ -444,7 +444,8 @@ climb_round() {
             oc=pass
         else
             ft="$(grep -E '\[ FAIL \]' "$wl" | sed -E 's/.*\[ FAIL \] //; s/ \(exit code.*//' | paste -sd ';' -)"
-            if echo "$ft" | grep -qi memtest; then oc=memfail
+            if echo "$ft" | grep -qi memtest; then
+                oc=memfail; [ "$sidx" -eq 0 ] && floor_bad=$((floor_bad + 1))
             elif [ "$sidx" -eq 0 ]; then oc=floorfail; floor_bad=$((floor_bad + 1))
             else oc=fail; fi
             log "FAIL: $uuid at ${watts_now}W ($ft)"
@@ -467,7 +468,16 @@ climb_round() {
                     card_set "$ou" 7 $((os + 1)); log "PASS: $ou at ${ow}W"
                 fi ;;
             memfail)
-                card_set "$ou" 9 "$ow"; card_set "$ou" 10 memfail; card_set "$ou" 12 "memtest failed — grade C" ;;
+                card_set "$ou" 9 "$ow"
+                if [ "$os" -eq 0 ] && [ "$floor_bad" -ge 2 ] && [ "$(card_field "$ou" 14)" != 1 ]; then
+                    # memtest failing alongside other cards' failures can be collateral
+                    # (e.g. a neighbour falling off the bus): re-test alone first
+                    card_set "$ou" 10 isolate
+                    card_set "$ou" 12 "memtest failed at floor ${ow}W with $((floor_bad - 1)) other card(s) failing — re-testing alone"
+                    log "ISOLATE: $ou will be re-tested alone at ${ow}W (memtest)"
+                else
+                    card_set "$ou" 10 memfail; card_set "$ou" 12 "memtest failed — grade C"
+                fi ;;
             fail)
                 card_set "$ou" 9 "$ow"; card_set "$ou" 10 done ;;
             drop|floorfail)
