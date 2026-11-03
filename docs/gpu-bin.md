@@ -1,6 +1,6 @@
 # gpu-bin.sh — unattended power-limit ladder and binning
 
-`test/gpu-bin.sh` automates rungs 1–4 and 9 of the GPU diagnostic ladder for every NVIDIA GPU in a node. It climbs each card's power limit from the grade B floor to the card's default limit, survives GPUs falling off the bus by power-cycling itself through its own BMC, and writes one result row per card for the training tracker's GPU Ladder Log.
+`test/gpu-bin.sh` automates rungs 1–4 and 9 of the GPU diagnostic ladder for every NVIDIA GPU in a node. It climbs each card's power limit from the grade B floor to the card's default limit, survives GPUs falling off the bus by power-cycling itself through its own BMC, and writes one result row per card in the exact column order of the training tracker's GPU Ladder Log.
 
 Physical rungs (reseat, riser and cable swaps, the swap test) are still done by hand.
 
@@ -52,7 +52,24 @@ The top step is always the card's own `power.default_limit`. The floor step runs
    - fulltest's power-anomaly remark (12V-2x6 connector signature) → stop climbing that card, inspect the cable
 4. **Power cycle** when a card dropped or the driver stopped responding: `ipmitool -I open chassis power cycle`. A systemd unit (`gpu-bin-resume.service`) restarts the script after boot.
 5. **Confirm**: all cards together at their ceilings for `--confirm-duration`. A card that drops here is stepped down one band and the confirm repeats after a cycle.
-6. **Finish**: write `/opt/gpu-bin/results.csv`, remove the resume service, restore `nvidia-runtime-policy.service` (power-saving presets) and re-enable `gpu-watchdog.timer`.
+6. **Finish**: remove the resume service, restore `nvidia-runtime-policy.service` (power-saving presets), then check each grade A/B card against the limit the node will actually run it at. If a card's ceiling is lower (a grade B A4000 under the 140 W preset, for example), it runs `install/gpu-power-limit.sh --gpu-limit <idx>:<ceiling>` for that card. Then it writes `/opt/gpu-bin/results.csv` and re-enables `gpu-watchdog.timer`.
+
+   Note: `gpu-power-limit.sh` rebuilds the policy service from the model preset plus these overrides. If the node had a custom `--override` base or earlier per-card limits, set them again. If the script isn't found (`GPU_POWER_LIMIT=` to point at it), the log prints the exact command to run by hand.
+
+## Results file
+
+`/opt/gpu-bin/results.csv` uses the tracker's GPU Ladder Log columns A–S, so rows paste straight in (paste as values):
+
+| Column | Filled by gpu-bin.sh |
+|---|---|
+| Date, Node, GPU UUID / idx, PCI bus ID, Model, Serial | Yes (UUID; the current index is in Notes) |
+| Failing test(s) | Yes (fulltest `[ FAIL ]` lines from the failing step) |
+| Rung reached | 4 (power ladder), or 2 for a memtest failure |
+| Default PL, Lowest passing PL, First failing PL, % of default | Yes |
+| PCIe link, Fault follows, Ticket | No — rungs 5–7 and the ticket are manual |
+| Grade, Band | Yes |
+| Evidence path | Per-card step logs under `/opt/gpu-bin/logs/` |
+| Notes | Final status, index, drop or connector notes, per-card limit applied, and "NOT for client service" for grade C |
 
 ## When it stops on its own (exit 2 / 3)
 
@@ -70,7 +87,7 @@ The top step is always the card's own `power.default_limit`. The floor step runs
 
 ## Testing
 
-`bash test/gpu-bin-test.sh` runs the whole flow with mocked `nvidia-smi`, `fulltest.sh`, `ipmitool`, `journalctl` and `systemctl`. It covers a drop with a power cycle and resume, a 4090 that fails stress, and a two-card drop halt.
+`bash test/gpu-bin-test.sh` runs the whole flow with mocked `nvidia-smi`, `fulltest.sh`, `ipmitool`, `journalctl` and `systemctl`. It covers a drop with a power cycle and resume, a 4090 that fails stress, a grade B A4000 getting its own power limit, the CSV column layout, and a two-card drop halt.
 
 ## Known limits
 

@@ -31,6 +31,7 @@
 # Environment overrides (used by test/gpu-bin-test.sh):
 #   GPU_BIN_DIR (default /opt/gpu-bin)   FULLTEST (default <script dir>/fulltest.sh)
 #   NVIDIA_SMI IPMITOOL JOURNALCTL SYSTEMCTL  POLL_SECONDS  STAGGER_SECONDS
+#   GPU_POWER_LIMIT (default ../install/gpu-power-limit.sh) — per-card limits at finish
 #   GPU_BIN_NO_UNIT=1  (do not install the systemd resume unit)
 # =============================================================================
 set -uo pipefail
@@ -46,6 +47,7 @@ JOURNALCTL="${JOURNALCTL:-journalctl}"
 SYSTEMCTL="${SYSTEMCTL:-systemctl}"
 POLL_SECONDS="${POLL_SECONDS:-15}"
 STAGGER_SECONDS="${STAGGER_SECONDS:-2}"
+GPU_POWER_LIMIT="${GPU_POWER_LIMIT:-$(readlink -f "$SCRIPT_DIR/../install/gpu-power-limit.sh" 2>/dev/null || echo /opt/provision/gpu-power-limit.sh)}"
 
 STATE_DIR="$GPU_BIN_DIR/state"
 LOG_DIR="$GPU_BIN_DIR/logs"
@@ -194,7 +196,7 @@ ConditionPathExists=$RUN
 [Service]
 Type=simple
 ExecStart=$SCRIPT_PATH --resume
-Environment=GPU_BIN_DIR=$GPU_BIN_DIR FULLTEST=$FULLTEST
+Environment=GPU_BIN_DIR=$GPU_BIN_DIR FULLTEST=$FULLTEST GPU_POWER_LIMIT=$GPU_POWER_LIMIT
 TimeoutStartSec=infinity
 StandardOutput=append:$LOG_DIR/gpu-bin.console.log
 StandardError=append:$LOG_DIR/gpu-bin.console.log
@@ -394,27 +396,54 @@ confirm_round() {
 }
 
 finish() {
-    local uuid key def c bg band grade
-    echo "Date,Node,GPU UUID,PCI bus ID,Model,Serial,Failing test(s),Default PL (W),Lowest passing PL (W),First failing PL (W),Band,Grade,Status,Notes" > "$RESULT_CSV"
-    local serial bus model ff status ft note
+    local uuid key def c bg band grade serial bus model ff status ft note idx applied pct rung overrides=""
+    run_set phase complete
+    remove_unit
+    "$SYSTEMCTL" restart nvidia-runtime-policy.service >/dev/null 2>&1 || true   # back to power-saving presets
+    sleep 2
+
+    # Columns match the training tracker's GPU Ladder Log (A..S) so rows paste straight in.
+    echo "Date,Node,GPU UUID / idx,PCI bus ID,Model,Serial,Failing test(s),Rung reached (1-9),Default PL (W),Lowest passing PL (W),First failing PL (W),% of default,PCIe link (gen x width),Fault follows,Grade,Ticket,Evidence path,Notes,Band (auto)" > "$RESULT_CSV"
     for uuid in $(cut -f1 "$CARDS"); do
         serial="$(card_field "$uuid" 2)"; bus="$(card_field "$uuid" 3)"; model="$(card_field "$uuid" 4)"
         def="$(card_field "$uuid" 5)"; c="$(card_field "$uuid" 8)"; ff="$(card_field "$uuid" 9)"
         status="$(card_field "$uuid" 10)"; ft="$(card_field "$uuid" 11)"; note="$(card_field "$uuid" 12)"
-        key="$(model_key "$model")"
+        key="$(model_key "$model")"; idx="$(index_of "$uuid")"
         case "$status" in memfail|failed-floor|missing) c="" ;; esac
         bg="$(band_for "$key" "$c" "$def")"; band="${bg%%|*}"; grade="${bg#*|}"
-        [ "$status" = connector ] && note="$note (grade provisional until cable replaced and re-tested)"
-        printf '%s,%s,%s,%s,%s,%s,"%s",%s,%s,%s,%s,%s,%s,"%s"\n' \
-            "$(date +%F)" "$(hostname)" "$uuid" "$bus" "$model" "$serial" "$ft" \
-            "$def" "$c" "$ff" "$band" "$grade" "$status" "$note" >> "$RESULT_CSV"
+        note="status ${status}; index ${idx:-n/a}${note:+; $note}"
+        [ "$status" = connector ] && note="$note; grade provisional until cable replaced and re-tested"
+        if [ "$grade" = C ]; then
+            note="$note; NOT for client service: sell / RMA / mining only (mining needs a stress pass at its mining limit)"
+        elif [ -n "$c" ] && [ -n "$idx" ]; then
+            # A card whose ceiling is below what the node will run it at needs its own limit
+            applied="$(smi -i "$idx" --query-gpu=power.limit --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs)"
+            applied="$(printf '%.0f' "${applied:-0}" 2>/dev/null || echo 0)"
+            if [ "$applied" -gt "$c" ]; then
+                overrides="$overrides --gpu-limit $idx:$c"
+                note="$note; per-card limit ${c}W set (node runs ${applied}W)"
+            fi
+        fi
+        pct=""; [ -n "$c" ] && pct="$(awk -v a="$c" -v b="$def" 'BEGIN{if(b>0)printf "%.3f", a/b}')"
+        rung=4; [ "$status" = memfail ] && rung=2
+        printf '%s,%s,%s,%s,%s,%s,"%s",%s,%s,%s,%s,%s,,,%s,,%s,"%s",%s\n' \
+            "$(date +%F)" "$(hostname)" "$uuid" "$bus" "$model" "$serial" "$ft" "$rung" \
+            "$def" "$c" "$ff" "$pct" "$grade" "$LOG_DIR/${uuid}_*W.log" "$note" "$band" >> "$RESULT_CSV"
     done
-    run_set phase complete
-    remove_unit
-    "$SYSTEMCTL" restart nvidia-runtime-policy.service >/dev/null 2>&1 || true   # back to power-saving presets
+
+    if [ -n "$overrides" ]; then
+        if [ -x "$GPU_POWER_LIMIT" ]; then
+            log "Applying per-card limits: $GPU_POWER_LIMIT$overrides"
+            # shellcheck disable=SC2086
+            "$GPU_POWER_LIMIT" $overrides >> "$LOG_DIR/gpu-bin.log" 2>&1 \
+                || log "WARNING: per-card limits FAILED — run by hand: sudo gpu-power-limit.sh$overrides"
+        else
+            log "WARNING: gpu-power-limit.sh not found at $GPU_POWER_LIMIT — run by hand: sudo gpu-power-limit.sh$overrides"
+        fi
+    fi
     restore_units
-    log "Binning complete. Results: $RESULT_CSV (paste into the tracker's GPU Ladder Log)"
-    column -s, -t < "$RESULT_CSV" >&2 || cat "$RESULT_CSV" >&2
+    log "Binning complete. Results: $RESULT_CSV (columns match the tracker's GPU Ladder Log)"
+    column -s, -t < "$RESULT_CSV" >&2 2>/dev/null || cat "$RESULT_CSV" >&2
 }
 
 # ─── Main ────────────────────────────────────────────────────────────────────
