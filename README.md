@@ -53,6 +53,7 @@ Current platform status:
 │   └── backup/                 # Legacy / archived helper scripts
 ├── test/
 │   ├── fulltest.sh             # NVIDIA multi-GPU acceptance test
+│   ├── gpu-bin.sh              # Unattended power-limit ladder + GPU binning across power cycles
 │   ├── code.sh                 # CUDA int32 stress wrapper for code.cu
 │   ├── disktest.sh             # Disk validation and fio-based health/perf suite
 │   ├── cpu-test.sh             # CPU socket or per-thread stress tester with crash-state checkpoints
@@ -323,6 +324,7 @@ Use `amd-stack-pin.sh --status` to inspect the active pin and `amd-stack-pin.sh 
 | `install/nvidia-stack-hold.sh` | Freeze or unfreeze the validated NVIDIA/CUDA stack | Covered here |
 | `install/docker-install.sh` | Docker CE, NVIDIA Container Toolkit, and runtime storage layout | [docs/docker-install.md](docs/docker-install.md) |
 | `test/fulltest.sh` | NVIDIA GPU acceptance and health validation | [docs/fulltest.md](docs/fulltest.md) |
+| `test/gpu-bin.sh` | Unattended power-limit ladder and GPU binning: climbs every card through its model's band edges in parallel, re-tests shared failures alone, power-cycles itself via in-band IPMI and resumes, writes per-server/per-run results in tracker columns | [docs/gpu-bin.md](docs/gpu-bin.md) |
 | `test/gpu-fulltest-v2.sh` | Experimental prepare-then-run variant of the NVIDIA GPU validation flow | [docs/gpu-fulltest-v2.md](docs/gpu-fulltest-v2.md) |
 | `test/vllm-benchmark-test.sh` | Pinned vLLM server smoke test and Harbor model/agent evaluation | [docs/vllm-benchmark-test.md](docs/vllm-benchmark-test.md) |
 | `test/code.sh` | Tiny nvcc wrapper that compiles and runs `test/code.cu` across the selected GPU(s) | Covered here |
@@ -470,6 +472,8 @@ Future improvements for that detector are tracked in `docs/project-decisions.md`
 
 It writes timestamped logs in the same directory where `fulltest.sh` is run.
 
+Several single-GPU `fulltest.sh --gpu N` processes can run in parallel (this is how `test/gpu-bin.sh` uses it): each GPU target has its own burn telemetry file, and the stress crash check only matches real kernel Xid lines. Because the 12V-2x6 detector compares a card with its peers, it only means something when several GPUs run in one process.
+
 ### `test/vllm-benchmark-test.sh`
 
 This is an optional NVIDIA or AMD model and agent evaluation after the
@@ -591,6 +595,12 @@ When using the orchestrated `/opt/provision` flow, expect:
 - stage state under `/opt/provision/state/`
 - `fulltest` logs in `/opt/provision/` itself because the script writes beside its own path
 
+When using `test/gpu-bin.sh`, expect:
+
+- one folder per server and run under `/opt/gpu-bin/<server-serial>/<yyyy-mm-dd-hh-mm>/` (state, logs, results CSV, apply-on-host script)
+- every finished row also appended to `/opt/gpu-bin/all-results.csv`
+- `gpu-bin-resume.service` installed only while a run is active
+
 When using the orchestrated `/opt/provision-amd` flow, expect:
 
 - orchestrator logs under `/opt/provision-amd/logs/`
@@ -614,6 +624,7 @@ bash test/fulltest-training-test.sh
 bash test/fulltest-numerics-test.sh
 bash test/fulltest-load-cycles-test.sh
 bash test/fulltest-extended-test.sh
+bash test/gpu-bin-test.sh
 bash test/vllm-benchmark-static-test.sh
 python3 test/network-batch.sh --help
 ```
@@ -628,6 +639,8 @@ Script reference guides now live under [docs/](docs):
 - [docs/base-install.md](docs/base-install.md)
 - [docs/docker-install.md](docs/docker-install.md)
 - [docs/fulltest.md](docs/fulltest.md)
+- [docs/gpu-bin.md](docs/gpu-bin.md)
+- [docs/test-triage.md](docs/test-triage.md)
 - [docs/gpu-fulltest-v2.md](docs/gpu-fulltest-v2.md)
 - [docs/vllm-benchmark-test.md](docs/vllm-benchmark-test.md)
 - [docs/disktest.md](docs/disktest.md)

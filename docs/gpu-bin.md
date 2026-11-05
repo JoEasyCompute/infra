@@ -38,6 +38,7 @@ Every run gets a **run ID** (`yyyy-mm-dd-hh-mm`, plus `-2`, `-3`… when two sta
 ```bash
 sudo ./test/gpu-bin.sh --dry-run       # show detected cards and their ladders
 sudo ./test/gpu-bin.sh                 # start; continues across power cycles on its own
+sudo ./test/gpu-bin.sh --expect-gpus 6 # same, and report fitted GPUs the driver can't see
 ./test/gpu-bin.sh --status             # per-card progress
 sudo ./test/gpu-bin.sh --resume        # continue a halted run after fixing the node
 sudo ./test/gpu-bin.sh --reset         # discard state, remove the resume service
@@ -72,9 +73,9 @@ The top step is always the card's own `power.default_limit`. The floor step runs
    - Pass → next step (or done at the default limit)
    - Test failure → ceiling = last passing step
    - Xid 79 / not visible / hung → **dropped**; ceiling = last passing step
-   - `memtest` failure → grade C straight away
+   - `memtest` failure on its own → grade C straight away
    - fulltest's power-anomaly remark (12V-2x6 connector signature) → stop climbing that card, inspect the cable
-   - **Two or more cards fail or drop at the floor in the same round** → none of them is graded yet. Each is **re-tested alone** at the floor (ladder rung 2). A card that passes alone goes back on the ladder, with a note, and the run records a node note: "check PSU/riser power under full-node load". A card that fails or drops alone is grade C. A card that drops during the warm-up triggers a power cycle before testing, so it still gets its real test.
+   - **Two or more cards fail (any test, memtest included) or drop at the floor in the same round** → none of them is graded yet. Each is **re-tested alone** at the floor (ladder rung 2). A card that passes alone goes back on the ladder, with a note, and the run records a node note: "check PSU/riser power under full-node load". A card that fails or drops alone is grade C. A card that drops during the warm-up triggers a power cycle before testing, so it still gets its real test.
 4. **Power cycle** when a card dropped or the driver stopped responding: `ipmitool -I open chassis power cycle`. A systemd unit (`gpu-bin-resume.service`) restarts the script after boot.
 5. **Confirm**: all cards together at their ceilings for `--confirm-duration`. A card that drops here is stepped down one band and the confirm repeats after a cycle.
 6. **Finish**: clear the server's active run, remove the resume service (unless another server on the same stick still has an active run), set **every card back to its own default power limit** (`power.default_limit`), and restart `nvidia-runtime-policy.service` if it's installed so a host-disk server returns to its power-saving presets. Then it checks each grade A/B card's ceiling against the **fleet preset** for its model, read from `GPU_PRESET_MODELS` / `GPU_PRESET_WATTS` in `install/gpu-power-limit.sh` (or the card default for a model with no preset). If the ceiling is lower (a grade B A4000 under the 140 W preset, for example), it runs `install/gpu-power-limit.sh --gpu-limit <idx>:<ceiling>` for that card on a host-disk boot, or only writes the apply-on-host script on a USB boot. Then it writes the run's results CSV, appends it to `all-results.csv`, and re-enables `gpu-watchdog.timer`.
@@ -129,7 +130,33 @@ A 5090 graded "Acceptable" at 540 W gets **no** per-card limit. Its ceiling is a
 
 ## Testing
 
-`bash test/gpu-bin-test.sh` runs the whole flow with mocked `nvidia-smi`, `fulltest.sh`, `ipmitool`, `journalctl` and `systemctl`. It covers a drop with a power cycle and resume, a 4090 that fails stress, a grade B A4000 getting its own power limit, the CSV column layout, run IDs and server serials, slot lookup through a riser bridge, USB mode recording instead of applying limits, a stick moved to another server mid-run, a two-card drop halt, power limits returning to card defaults on finish and on halt, and a copy of the BR80S5402800219 node (6 fitted, 4 visible, three cards failing the floor together, re-tested alone) (51 checks).
+`bash test/gpu-bin-test.sh` runs the whole flow with mocked `nvidia-smi`, `fulltest.sh`, `ipmitool`, `journalctl` and `systemctl`. It covers a drop with a power cycle and resume, a 4090 that fails stress, a grade B A4000 getting its own power limit, the CSV column layout, run IDs and server serials, slot lookup through a riser bridge, USB mode recording instead of applying limits, a stick moved to another server mid-run, a two-card drop halt, power limits returning to card defaults on finish and on halt, and a copy of the BR80S5402800219 node (6 fitted, 4 visible, three cards failing the floor together, including a shared-round memtest failure, re-tested alone) (52 checks).
+
+## Reading a run's log
+
+`<server>/<run>/logs/gpu-bin.log` has one line per decision:
+
+| Line | Meaning |
+|---|---|
+| `Step: … at 450W: code memtest stress` | A card starts a ladder step |
+| `PASS` / `TOP` | Passed this step / passed its own default limit (done) |
+| `FAIL: … (<test>)` | Failed a test at this step; ceiling = last passing step |
+| `DROP: … (last pass: …)` | Fell off the bus or hung |
+| `ISOLATE: …` | Failed or dropped at the floor alongside other cards; will be re-tested alone |
+| `SOLO PASS` / `SOLO FAIL` / `SOLO DROP` | Result of that solo re-test; only a solo failure grades the card C |
+| `NODE NOTE: …` | A card failed only alongside others: check PSU / riser power under full-node load |
+| `CONNECTOR: …` | 12V-2x6 power-anomaly flag from the all-GPU confirm burn: inspect that card's cable |
+| `Cold power cycle n/8` | The node power-cycled itself to recover; the run resumes after boot |
+| `HALT: …` | Stopped for a person (shared power suspected, cycle limit, or the run's GPUs not visible) |
+
+### Case study: BR80S5402800219 (2026-11-03)
+
+6 RTX 5090s fitted, 4 visible. Two runs before the fixes graded every visible card C:
+
+- **14:04:** GPU 0 (`41:00.0`) fell off the bus at 450 W. Cards 1–3 passed `code` and `memtest` but got a stress FAIL. That FAIL came from fulltest, not the cards (see "fulltest.sh fixes" below).
+- **15:16:** GPU 0 dropped again. This time cards 1–3 *failed memtest*, the same cards that passed memtest an hour earlier. That's collateral from the neighbouring card falling off the bus, not three cards' VRAM going bad together.
+
+After the fixes, each card is re-tested alone before grading, and the run behaved as expected. The lesson for the ladder: **when several cards fail in one parallel run while one drops, no result from that round counts until each card has been re-tested alone.**
 
 ## Missing GPUs
 
