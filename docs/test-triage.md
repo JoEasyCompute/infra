@@ -281,6 +281,21 @@ Interpretation:
 
 ---
 
+## Several GPUs Fail in the Same Run
+
+When GPUs run at the same time (a full `fulltest.sh`, parallel single-GPU runs, or a `gpu-bin.sh` round), one card falling off the bus can make its neighbours fail too. That can show up as stress failures, CUDA errors, or even **memtest failures on cards whose VRAM is fine**.
+
+Rule: if two or more cards fail in the same run and one of them dropped (Xid 79 / "fallen off the bus"), **no result from that run counts until each card is re-tested alone**:
+
+1. Re-run each failing card on its own: `./test/fulltest.sh --gpu N code memtest stress`
+2. A card that passes alone is not the fault. A card that fails or drops alone is.
+3. If cards pass alone but fail together, suspect the shared power path (PSU, breakout board, riser power) under full-node load.
+4. To stop a known-bad card disturbing the others while you test, take it out, or hide it from the driver with `sudo install/manage-gpu.sh --disable <bus>` and reboot.
+
+`test/gpu-bin.sh` applies this rule automatically. Real example: BR80S5402800219, where three 5090s failed memtest only in the round in which GPU 0 fell off the bus (see [gpu-bin.md](gpu-bin.md)).
+
+---
+
 ## What to Capture Before Changing Anything
 
 If a test fails, collect:

@@ -12,4 +12,6 @@ logs/network-batch/*.txt
 .antigravitycli/
 
 # Local training plan, tracker and evidence (never pushed)
-training/
+/training/
+# Training lessons: worked on locally, not committed for now
+/docs/training/

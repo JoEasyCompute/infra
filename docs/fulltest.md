@@ -890,6 +890,16 @@ The script patches `sm_110` out of CMakeLists automatically. If the build still 
 
 Rust is installed automatically via `rustup`. If `cargo` is still unavailable, the script falls back to gpu-burn, then to the PyTorch cuBLAS stress fallback automatically — no manual action needed.
 
+### Stress FAIL with "Burn tool exited with code 1" on a power-capped card
+
+gpu-fryer exits 1 when its internal Gflops health check fires. That's a known false positive on TDP-limited or power-capped cards (an A4000, or a 5090 held at 450 W). On its own it is only a **remark**. It becomes a hard FAIL only if the stress window of the log also contains a hardware-crash sign: `HW_Slowdown`, `HW_PowerBrake`, `Throttling HW: true`, a CUDA error, or a real kernel Xid line.
+
+Until 2026-11-03, the crash check matched the bare word `Xid`, including this script's own power-anomaly advice ("...precursor to Xid 79..."). Any run that printed that advice turned the gpu-fryer remark into a FAIL. **Re-check older stress FAILs** whose log has the power-anomaly advice but no `NVRM: Xid` line: they may be false.
+
+### Running several `fulltest.sh` processes at once
+
+Supported for single-GPU targets (`--gpu N`), as `test/gpu-bin.sh` does. Each GPU target writes its own `build/_burn_telemetry_gpu<N>.csv`; before 2026-11-03 they shared one file and the power-anomaly check mixed cards from different processes. Start the processes at least a second apart, because the log file name is timestamped to the second, and build the tools once first (a serial run) so parallel first runs don't race in `build/`.
+
 ### `--gpu` reports invalid index
 
 ```bash
