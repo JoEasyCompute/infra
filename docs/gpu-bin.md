@@ -15,6 +15,7 @@ Every run gets a **run ID** (`yyyy-mm-dd-hh-mm`, plus `-2`, `-3`… when two sta
     ├── active-run                          # run ID in progress (absent when idle)
     └── 2026-11-03-14-05/
         ├── results_<server>_<run>.csv      # this run's rows (tracker columns A–S)
+        ├── results_<server>_<run>.txt      # the same results, one readable block per card
         ├── apply-on-host_<server>_<run>.sh # only when per-card limits are needed
         ├── logs/                           # per-card per-step fulltest logs, warm-up, confirm
         └── state/
@@ -39,7 +40,7 @@ Every run gets a **run ID** (`yyyy-mm-dd-hh-mm`, plus `-2`, `-3`… when two sta
 sudo ./test/gpu-bin.sh --dry-run       # show detected cards and their ladders
 sudo ./test/gpu-bin.sh                 # start; continues across power cycles on its own
 sudo ./test/gpu-bin.sh --expect-gpus 6 # same, and report fitted GPUs the driver can't see
-./test/gpu-bin.sh --status             # per-card progress
+./test/gpu-bin.sh --status             # per-card progress; when idle, the latest results report
 sudo ./test/gpu-bin.sh --resume        # continue a halted run after fixing the node
 sudo ./test/gpu-bin.sh --reset         # discard state, remove the resume service
 ```
@@ -99,6 +100,35 @@ The top step is always the card's own `power.default_limit`. The floor step runs
 | Evidence path | Per-card step logs under `/opt/gpu-bin/logs/` |
 | Notes | Final status, index, drop or connector notes, per-card limit applied, and "NOT for client service" for grade C |
 
+
+### Readable report
+
+`results_<server>_<run>.txt` has the same results for reading on screen, printed at the end of the run and by `--status` when no run is active. The CSV stays as it is, for pasting into the tracker.
+
+```text
+gpu-bin results: server BR80S…, run 2026-11-03-15-16 (finished 2026-11-03 19:42:10)
+Cards: 6   grade A: 1   grade B: 1   grade C: 4 (incl. 2 not detected)
+NODE NOTE: cards failed the floor together but passed alone — check PSU/riser power under full-node load
+Tracker rows: /opt/gpu-bin/…/results_….csv
+
+GPU 1  00000000:41:00.0  NVIDIA GeForce RTX 5090  serial …
+  Grade:    A   Band: Acceptable
+  Ceiling:  540 W of 575 W (94%)   first fail 550 W
+  Failing:  -
+  Status:   dropped (rung 4)
+  Notes:    failed the floor only alongside other cards
+            passed alone — check node PSU/riser power under full load
+            fell off bus / hung at 550W
+  UUID:     GPU-…
+  Evidence: /opt/gpu-bin/…/logs/GPU-…_*.log
+
+NOT DETECTED (1 of 2)
+  Grade:    C   Band: Not detected
+  Notes:    6 GPUs expected, 4 visible: not on PCIe or not seen by the driver
+            check slot / riser / power / BIOS bifurcation
+```
+
+*(Illustrative.)* One block per card with a blank line between them; each note on its own line.
 ## Power limits after the run
 
 | How the run ends | Power limit left on each card |
@@ -125,12 +155,13 @@ A 5090 graded "Acceptable" at 540 W gets **no** per-card limit. Its ceiling is a
 | `<server>/<run>/state/run.env` | Phase, cycle count, options, apply mode |
 | `<server>/<run>/logs/` | Script log, one fulltest log per card per step, warm-up and confirm logs |
 | `<server>/<run>/results_<server>_<run>.csv` | This run's rows for the tracker |
+| `<server>/<run>/results_<server>_<run>.txt` | The same results, readable |
 | `<server>/<run>/apply-on-host_<server>_<run>.sh` | Per-card limits to apply on the server's own OS |
 | `all-results.csv` | Every finished row across servers and runs |
 
 ## Testing
 
-`bash test/gpu-bin-test.sh` runs the whole flow with mocked `nvidia-smi`, `fulltest.sh`, `ipmitool`, `journalctl` and `systemctl`. It covers a drop with a power cycle and resume, a 4090 that fails stress, a grade B A4000 getting its own power limit, the CSV column layout, run IDs and server serials, slot lookup through a riser bridge, USB mode recording instead of applying limits, a stick moved to another server mid-run, a two-card drop halt, power limits returning to card defaults on finish and on halt, and a copy of the BR80S5402800219 node (6 fitted, 4 visible, three cards failing the floor together, including a shared-round memtest failure, re-tested alone) (52 checks).
+`bash test/gpu-bin-test.sh` runs the whole flow with mocked `nvidia-smi`, `fulltest.sh`, `ipmitool`, `journalctl` and `systemctl`. It covers a drop with a power cycle and resume, a 4090 that fails stress, a grade B A4000 getting its own power limit, the CSV column layout, run IDs and server serials, slot lookup through a riser bridge, USB mode recording instead of applying limits, a stick moved to another server mid-run, a two-card drop halt, power limits returning to card defaults on finish and on halt, and a copy of the BR80S5402800219 node (6 fitted, 4 visible, three cards failing the floor together, including a shared-round memtest failure, re-tested alone), and the readable report (61 checks).
 
 ## Reading a run's log
 

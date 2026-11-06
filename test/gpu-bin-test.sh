@@ -149,6 +149,15 @@ check 'grep -q -- "--gpu 2 code memtest stress" "$NODE/fulltest.calls"' "memtest
 check '[ ! -e "$GPU_BIN_DIR/SRV123/active-run" ]'              "active run cleared when finished"
 check '[ "$(cat "$NODE"/pl_0 "$NODE"/pl_1 "$NODE"/pl_2 "$NODE"/pl_3 | tr "\n" " ")" = "575 575 450 140 " ]' "finish: every card back at its own default limit"
 check '! grep -q "GPU-bbbb.*per-card limit" "$R"'              "5090 at 540 W gets no override (above the 450 W fleet preset)"
+T1="${R%.csv}.txt"
+check '[ -s "$T1" ]'                                                  "readable report written beside the CSV"
+check '[ "$(grep -c "^GPU [0-9]" "$T1")" -eq 4 ] && [ "$(grep -c "^  Grade:" "$T1")" -eq 4 ]' "report has one block per card"
+check '[ "$(awk "/^GPU [0-9]/{n++} END{print n}" "$T1")" -eq "$(( $(grep -c "^$" "$T1") - 1 ))" ]' "a blank line after every card block"
+check 'grep -q "^  Grade:    B   Band: Grade B" "$T1" && grep -q "^  Ceiling:  100 W of 140 W (71%)   first fail 140 W" "$T1"' "report shows grade, band, ceiling and % of default"
+check 'grep -q "^  Notes:    per-card limit 100W set (fleet preset 140W)$" "$T1"' "report shows the per-card limit note"
+check 'grep -q "^Cards: 4   grade A: 2   grade B: 2   grade C: 0" "$T1"' "report summary counts grades"
+st1="$(bash "$GB" --status 2>&1)"
+check 'echo "$st1" | grep -q "Latest results:" && echo "$st1" | grep -q "^  Grade:"' "--status shows the latest report when no run is active"
 R1="$R"
 
 # ── Run 2 from a USB stick: limits recorded, not applied ────────────────────
@@ -198,6 +207,9 @@ check 'grep -q "not detected 1 of 2.*,C,.*6 GPUs expected / 4 visible" "$R3"' "n
 check '[ "$(python3 -c "import csv,sys; print(sorted({len(r) for r in csv.reader(open(sys.argv[1]))}))" "$R3")" = "[19]" ] && [ "$(tail -n +2 "$R3" | wc -l)" -eq 6 ]' "all 6 rows have 19 columns"
 check 'grep -q "NODE NOTE" "$LOG3"'                                       "node note about full-load power written"
 check '! grep -q "HALT" "$LOG3"'                                          "floor drops do not trigger the PSU halt"
+T3="${R3%.csv}.txt"
+check '[ "$(grep -c "^NOT DETECTED" "$T3")" -eq 2 ] && grep -q "^NODE NOTE:" "$T3" && grep -q "grade C: 4 (incl. 2 not detected)" "$T3"' "report lists not-detected cards and the node note"
+check 'grep -A1 "^  Notes:    .*alone" "$T3" | grep -q "^            NOT for client service"' "report splits several notes one per line"
 
 # ── Two cards dropping in the same round -> halt, no power cycle ────────────
 rm -f "$NODE"/cycles "$NODE"/pl_* "$NODE"/journal
