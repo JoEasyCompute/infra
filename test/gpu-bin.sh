@@ -15,6 +15,7 @@
 # Cards are tracked by UUID (indices can change after a drop or reboot).
 # Each run gets an ID (yyyy-mm-dd-hh-mm) and its own folder per server:
 #   $GPU_BIN_DIR/<server-serial>/<run-id>/{state,logs,results_<server>_<run>.csv}
+# plus results_<server>_<run>.txt, the same results as one readable block per card,
 # and every finished row is appended to $GPU_BIN_DIR/all-results.csv.
 # The server is identified by its DMI system serial (then board serial,
 # then BMC MAC), so one USB stick can test many servers.
@@ -104,6 +105,7 @@ set_run_paths() {
     STATE_DIR="$RUN_DIR/state"; LOG_DIR="$RUN_DIR/logs"
     CARDS="$STATE_DIR/cards.tsv"; RUN="$STATE_DIR/run.env"
     RESULT_CSV="$RUN_DIR/results_${SERVER_ID}_${RUN_ID}.csv"
+    RESULT_TXT="$RUN_DIR/results_${SERVER_ID}_${RUN_ID}.txt"
     mkdir -p "$STATE_DIR" "$LOG_DIR"
 }
 
@@ -286,8 +288,14 @@ print_status() {
     local d
     for d in "$SERVER_DIR"/*/; do
         [ -f "$d/state/run.env" ] || continue
-        echo "  run $(basename "$d"): $(awk -F= '$1=="phase"{print $2}' "$d/state/run.env")$(ls "$d"/results_*.csv >/dev/null 2>&1 && echo "  -> $(ls "$d"/results_*.csv)")"
+        echo "  run $(basename "$d"): $(awk -F= '$1=="phase"{print $2}' "$d/state/run.env")$(ls "$d"/results_*.txt >/dev/null 2>&1 && echo "  -> $(ls "$d"/results_*.txt)")"
     done
+    if [ -z "$RUN_ID" ]; then
+        local latest
+        latest="$(ls -t "$SERVER_DIR"/*/results_*.txt 2>/dev/null | head -1)"
+        [ -n "$latest" ] && { echo; echo "Latest results:"; echo; cat "$latest"; }
+    fi
+    return 0
 }
 
 # ─── Resume service ──────────────────────────────────────────────────────────
@@ -624,7 +632,7 @@ confirm_round() {
 
 finish() {
     local uuid key def c bg band grade serial bus slot model ff status ft note idx applied pct rung
-    local overrides="" host_lines=""
+    local overrides="" host_lines="" report="" extra pctr cl nA=0 nB=0 nC=0 nND=0
     run_set phase complete
     rm -f "$ACTIVE"
     remove_unit
@@ -642,6 +650,7 @@ finish() {
         key="$(model_key "$model")"; idx="$(index_of "$uuid")"
         case "$status" in memfail|failed-floor|missing) c="" ;; esac
         bg="$(band_for "$key" "$c" "$def")"; band="${bg%%|*}"; grade="${bg#*|}"
+        extra="$note"
         note="status ${status}; index ${idx:-n/a}${note:+; $note}"
         [ "$status" = connector ] && note="$note; grade provisional until cable replaced and re-tested"
         if [ "$grade" = C ]; then
@@ -665,6 +674,21 @@ finish() {
         printf '%s,%s,%s,"%s",%s,%s,"%s",%s,%s,%s,%s,%s,,,%s,,%s,"%s",%s\n' \
             "$RUN_ID" "$SERVER_ID" "$uuid" "$bus${slot:+ ($slot)}" "$model" "$serial" "$ft" "$rung" \
             "$def" "$c" "$ff" "$pct" "$grade" "$LOG_DIR/${uuid}_*.log" "$note" "$band" >> "$RESULT_CSV"
+        case "$grade" in A) nA=$((nA+1)) ;; B) nB=$((nB+1)) ;; *) nC=$((nC+1)) ;; esac
+        # Readable copy: the notes after "status; index" are split one per line
+        extra="${note#"status ${status}; index ${idx:-n/a}"}"; extra="${extra#; }"
+        pctr=""; [ -n "$pct" ] && pctr=" ($(awk -v p="$pct" 'BEGIN{printf "%.0f", p*100}')%)"
+        cl="none passed"; [ -n "$c" ] && cl="${c} W of ${def} W${pctr}"
+        report="${report}GPU ${idx:-?}  ${bus}${slot:+ ($slot)}  ${model}  serial ${serial:-n/a}
+  Grade:    ${grade}   Band: ${band}
+  Ceiling:  ${cl}${ff:+   first fail ${ff} W}
+  Failing:  ${ft:--}
+  Status:   ${status} (rung ${rung})
+  Notes:    $(printf '%s' "${extra:--}" | sed 's/; /\n            /g')
+  UUID:     ${uuid}
+  Evidence: ${LOG_DIR}/${uuid}_*.log
+
+"
     done
 
     local expect found k nn
@@ -674,6 +698,13 @@ finish() {
             printf '%s,%s,%s,"%s",%s,%s,"%s",%s,%s,%s,%s,%s,,,%s,,%s,"%s",%s\n' \
                 "$RUN_ID" "$SERVER_ID" "not detected $k of $((expect - found))" "" "(not detected)" "" "" 1 \
                 "" "" "" "" C "" "$expect GPUs expected / $found visible: not on PCIe or not seen by the driver - check slot / riser / power / BIOS bifurcation" "Not detected" >> "$RESULT_CSV"
+            nC=$((nC+1)); nND=$((nND+1))
+            report="${report}NOT DETECTED ($k of $((expect - found)))
+  Grade:    C   Band: Not detected
+  Notes:    $expect GPUs expected, $found visible: not on PCIe or not seen by the driver
+            check slot / riser / power / BIOS bifurcation
+
+"
         done
         log "$((expect - found)) expected GPU(s) not detected — rows added"
     fi
@@ -707,8 +738,17 @@ finish() {
     [ -f "$ALL_RESULTS" ] || echo "$header" > "$ALL_RESULTS"
     tail -n +2 "$RESULT_CSV" >> "$ALL_RESULTS"
     restore_units
-    log "Binning complete: run $RUN_ID on $SERVER_ID. Results: $RESULT_CSV (also appended to $ALL_RESULTS)"
-    column -s, -t < "$RESULT_CSV" >&2 2>/dev/null || cat "$RESULT_CSV" >&2
+    {
+        echo "gpu-bin results: server $SERVER_ID, run $RUN_ID (finished $(date '+%F %T'))"
+        echo "Cards: $((nA + nB + nC))   grade A: $nA   grade B: $nB   grade C: $nC$([ "$nND" -gt 0 ] && echo " (incl. $nND not detected)")"
+        [ -n "$nn" ] && echo "NODE NOTE: $nn"
+        [ -n "$overrides" ] && echo "Per-card limits:$overrides$([ "$(run_get apply)" = yes ] || echo "  (NOT applied: run apply-on-host_${SERVER_ID}_${RUN_ID}.sh on the server's own OS)")"
+        echo "Tracker rows: $RESULT_CSV"
+        echo
+        printf '%s' "$report"
+    } > "$RESULT_TXT"
+    log "Binning complete: run $RUN_ID on $SERVER_ID. Results: $RESULT_TXT (tracker rows: $RESULT_CSV, also appended to $ALL_RESULTS)"
+    cat "$RESULT_TXT" >&2
 }
 
 # ─── Main ────────────────────────────────────────────────────────────────────
