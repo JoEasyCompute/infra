@@ -119,6 +119,11 @@ fail=0
 check() { if eval "$1"; then echo "ok   - $2"; else echo "FAIL - $2"; fail=1; fi; }
 newest_csv() { ls -t "$GPU_BIN_DIR"/SRV123/*/results_*.csv 2>/dev/null | head -1; }
 
+# ── fulltest must number GPUs like nvidia-smi (PCI order), or --gpu N hits another card on mixed nodes ──
+for f in fulltest.sh gpu-fulltest-v2.sh; do
+  check 'awk "/export CUDA_DEVICE_ORDER=PCI_BUS_ID/{o=NR} /export CUDA_VISIBLE_DEVICES=/{v=NR} END{exit !(o && v && o<v)}" "$ROOT_DIR/test/$f"' "$f sets CUDA_DEVICE_ORDER=PCI_BUS_ID before CUDA_VISIBLE_DEVICES"
+done
+
 # ── Ladders and slot lookup ─────────────────────────────────────────────────
 dry="$(GPU_BIN_MEDIA=host bash "$GB" --dry-run 2>&1)"
 check 'echo "$dry" | grep -q "steps: 450,500,540,550,575$"' "5090 ladder stops at card default 575"

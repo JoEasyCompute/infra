@@ -199,6 +199,9 @@ When specified:
 
 ---
 
+
+`--gpu` indices are `nvidia-smi` indices. The script sets `CUDA_DEVICE_ORDER=PCI_BUS_ID` so that CUDA numbers the GPUs the same way: CUDA's default is "fastest first", which on a node with mixed cards (different models, or the same model with different power limits or clocks) can put a different physical card behind the same number.
+
 ## Tests
 
 Default tests run in a fixed order when none are specified.

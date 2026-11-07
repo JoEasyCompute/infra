@@ -161,7 +161,7 @@ A 5090 graded "Acceptable" at 540 W gets **no** per-card limit. Its ceiling is a
 
 ## Testing
 
-`bash test/gpu-bin-test.sh` runs the whole flow with mocked `nvidia-smi`, `fulltest.sh`, `ipmitool`, `journalctl` and `systemctl`. It covers a drop with a power cycle and resume, a 4090 that fails stress, a grade B A4000 getting its own power limit, the CSV column layout, run IDs and server serials, slot lookup through a riser bridge, USB mode recording instead of applying limits, a stick moved to another server mid-run, a two-card drop halt, power limits returning to card defaults on finish and on halt, and a copy of the BR80S5402800219 node (6 fitted, 4 visible, three cards failing the floor together, including a shared-round memtest failure, re-tested alone), and the readable report (61 checks).
+`bash test/gpu-bin-test.sh` runs the whole flow with mocked `nvidia-smi`, `fulltest.sh`, `ipmitool`, `journalctl` and `systemctl`. It covers a drop with a power cycle and resume, a 4090 that fails stress, a grade B A4000 getting its own power limit, the CSV column layout, run IDs and server serials, slot lookup through a riser bridge, USB mode recording instead of applying limits, a stick moved to another server mid-run, a two-card drop halt, power limits returning to card defaults on finish and on halt, and a copy of the BR80S5402800219 node (6 fitted, 4 visible, three cards failing the floor together, including a shared-round memtest failure, re-tested alone), the readable report, and fulltest's PCI-order GPU numbering (63 checks).
 
 ## Reading a run's log
 
@@ -199,6 +199,7 @@ Found on BR80S5402800219 (2026-11-03): three 5090s at 450 W were failed by fullt
 
 - `stress_hard_failure_detected` matched the plain word `Xid`, including fulltest's own power-anomaly advice text ("...precursor to Xid 79..."). Combined with gpu-fryer's Gflops-check exit 1 (a known false positive on power-capped cards), every card got a hard stress FAIL. It now matches only real kernel lines (`NVRM: Xid`, `Xid (PCI:`, `fallen off the bus`). Fixed in both `fulltest.sh` and `gpu-fulltest-v2.sh`.
 - The burn telemetry file was shared by all fulltest processes in `test/build/`, so parallel single-GPU runs compared each card against the others' data. It is now per GPU target (`_burn_telemetry_gpu<N>.csv`).
+- `fulltest.sh --gpu N` set `CUDA_VISIBLE_DEVICES=N` without `CUDA_DEVICE_ORDER=PCI_BUS_ID`. CUDA numbers GPUs "fastest first" by default, `nvidia-smi` by PCI bus, so on a mixed node (for example one 600 W 5090 among 575 W cards) the stress could run on a different card from the one gpu-bin limited and watched. Both fulltest scripts now set PCI order (2026-11-07).
 - As a result, the 12V-2x6 power-anomaly check (which compares a card with its peers) only applies in gpu-bin's all-GPU confirm burn. gpu-bin reads it from there and marks flagged cards "connector".
 
 ## Known limits

@@ -492,6 +492,11 @@ detect_system() {
         exit 1
     fi
 
+    # CUDA numbers GPUs "fastest first" by default; nvidia-smi numbers them by PCI bus.
+    # On a mixed node those orders can differ, so --gpu N (and every CUDA tool) would
+    # run on a different card from the one nvidia-smi -i N reports and limits.
+    export CUDA_DEVICE_ORDER=PCI_BUS_ID
+
     if [ -n "$GPU_TARGET" ]; then
         # Validate each index in the comma-separated list
         local bad_indices=()
