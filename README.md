@@ -569,7 +569,7 @@ User bootstrap usage details: [docs/user-bootstrap.md](docs/user-bootstrap.md)
 
 Important files under [monitor/](monitor):
 
-- [monitor/ipmi-watch.sh](monitor/ipmi-watch.sh): IPMI reachability checks, outage tracking, Prometheus textfile export, email alerting
+- [monitor/ipmi-watch.sh](monitor/ipmi-watch.sh): IPMI reachability checks, outage tracking, Prometheus textfile export, email alerting ([docs](docs/ipmi-watch.md); credentials from the environment or a root-only file, never the repo)
 - [monitor/calc_ipmi_energy.py](monitor/calc_ipmi_energy.py): IPMI energy-related helper
 
 ### Network
@@ -641,6 +641,7 @@ Script reference guides now live under [docs/](docs):
 - [docs/fulltest.md](docs/fulltest.md)
 - [docs/gpu-bin.md](docs/gpu-bin.md)
 - [docs/test-triage.md](docs/test-triage.md)
+- [docs/ipmi-watch.md](docs/ipmi-watch.md)
 - [docs/gpu-fulltest-v2.md](docs/gpu-fulltest-v2.md)
 - [docs/vllm-benchmark-test.md](docs/vllm-benchmark-test.md)
 - [docs/disktest.md](docs/disktest.md)

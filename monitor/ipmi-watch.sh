@@ -9,9 +9,14 @@ LEGACY_CSV_FILE="$BASE_DIR/target.csv"
 STATE_FILE="$BASE_DIR/state.json"
 LOCK_FILE="/var/lock/ipmi-watch.lock"
 
-IPMI_USER="ADMIN"
-IPMI_PASS='REMOVED'   # MUST be single-quoted
-MAIL_TO="you@example.com"
+IPMI_USER="${IPMI_USER:-ADMIN}"
+# The BMC password is never stored in this script or the repo. In order:
+#   1. IPMI_PASS or IPMI_PASSWORD in the environment
+#   2. $CRED_FILE, root-only (0600), with lines:  IPMI_USER=ADMIN  and  IPMI_PASS=...
+# It is handed to ipmitool through the environment (-E), not -P, so it never
+# shows up in `ps` output.
+CRED_FILE="${IPMI_WATCH_CRED_FILE:-/etc/ipmi-watch/credentials}"
+MAIL_TO="${IPMI_WATCH_MAIL_TO:-you@example.com}"
 MAIL_SUBJECT_PREFIX="IPMI DOWN"
 
 IPMITOOL_TIMEOUT=8   # seconds
@@ -24,6 +29,34 @@ PROM_FILE="$PROM_DIR/ipmi_watch.prom"
 
 NOW_ISO="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 NOW_EPOCH="$(date -u +%s)"
+
+# ─── Credentials ─────────────────────────────────────────────────────────
+load_credentials() {
+  local key val mode owner
+  IPMI_PASS="${IPMI_PASS:-${IPMI_PASSWORD:-}}"
+  if [[ -z "$IPMI_PASS" && -f "$CRED_FILE" ]]; then
+    mode="$(stat -c '%a' "$CRED_FILE")"; owner="$(stat -c '%u' "$CRED_FILE")"
+    if [[ "$owner" != "$(id -u)" || "$mode" =~ [1-7][0-9]$|[1-7]$ ]]; then
+      echo "ipmi-watch: $CRED_FILE must be owned by $(id -un) and not readable by others (chmod 600)" >&2
+      exit 2
+    fi
+    # Parsed as data, never sourced
+    while IFS='=' read -r key val; do
+      val="${val%$'\r'}"; val="${val#\'}"; val="${val%\'}"; val="${val#\"}"; val="${val%\"}"
+      case "$key" in
+        IPMI_USER) IPMI_USER="$val" ;;
+        IPMI_PASS|IPMI_PASSWORD) IPMI_PASS="$val" ;;
+      esac
+    done < <(grep -E '^[[:space:]]*IPMI_(USER|PASS|PASSWORD)=' "$CRED_FILE" | sed 's/^[[:space:]]*//')
+  fi
+  if [[ -z "$IPMI_PASS" ]]; then
+    echo "ipmi-watch: no BMC password. Set IPMI_PASS, or create $CRED_FILE (0600) with IPMI_PASS=..." >&2
+    exit 2
+  fi
+  export IPMI_PASSWORD="$IPMI_PASS"   # read by ipmitool -E
+  unset IPMI_PASS
+}
+load_credentials
 
 exec 9>"$LOCK_FILE"
 flock -n 9 || exit 0
@@ -55,7 +88,7 @@ check_ipmi() {
 
   out="$(
     timeout "$IPMITOOL_TIMEOUT" \
-      ipmitool -I lanplus -H "$ip" -U "$IPMI_USER" -P "$IPMI_PASS" \
+      ipmitool -I lanplus -H "$ip" -U "$IPMI_USER" -E \
       chassis power status 2>&1
   )" || rc=$?
 
