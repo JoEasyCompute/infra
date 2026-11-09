@@ -75,7 +75,7 @@ chmod +x base-install.sh nvidia-stack-hold.sh
 # Interactive install — recommended for first-time use
 ./base-install.sh
 
-# Non-interactive install with defaults (driver 580 + CUDA 12-9)
+# Non-interactive install with defaults (driver 620 + CUDA 13.4)
 ./base-install.sh --yes
 
 # Uninstall / reprovision
@@ -90,8 +90,8 @@ chmod +x base-install.sh nvidia-stack-hold.sh
 ./base-install.sh [OPTIONS]
 
 Options:
-  --driver  <575|580|595|610>        NVIDIA driver version (default: interactive prompt)
-  --cuda    <12-9|13|13.3>           CUDA toolkit version  (default: interactive prompt)
+  --driver  <575|580|595|615|620>        NVIDIA driver version (default: 620)
+  --cuda    <12-9|13|13.4>           CUDA toolkit version  (default: 13.4)
   --yes                      Non-interactive mode, skip all prompts, use defaults
   --no-gpu-stack             Skip NVIDIA driver / CUDA toolkit / DCGM / gpu-burn install
   --freeze-gpu-stack         Hold the validated NVIDIA/CUDA packages after install
@@ -105,6 +105,8 @@ Options:
 ## Examples
 
 ### Interactive install (recommended)
+
+Press Enter at the version prompts to select driver **620** and CUDA **13.4**.
 ```bash
 ./base-install.sh
 ```
@@ -114,8 +116,8 @@ before touching the system.
 ### Specify versions explicitly
 ```bash
 ./base-install.sh --driver 580 --cuda 12-9
-./base-install.sh --driver 595 --cuda 13.3
-./base-install.sh --driver 610 --cuda 13.3
+./base-install.sh --driver 620 --cuda 13.4
+./base-install.sh --driver 615 --cuda 13.4
 ./base-install.sh --driver 575 --cuda 12-9
 
 # Base host tooling only, skip NVIDIA driver/CUDA/DCGM/gpu-burn
@@ -124,11 +126,11 @@ before touching the system.
 
 ### Non-interactive / CI / automation
 ```bash
-# Uses defaults: driver 580 + CUDA 12-9
+# Uses defaults: driver 620 + CUDA 13.4
 ./base-install.sh --yes
 
 # Explicit versions, no prompts
-./base-install.sh --driver 580 --cuda 12-9 --yes
+./base-install.sh --driver 620 --cuda 13.4 --yes
 ```
 Useful for Ansible playbooks, Terraform provisioners, or scripted deployments
 across a fleet of nodes.
@@ -228,15 +230,21 @@ must be done manually afterwards.
 | Driver | CUDA | cuDNN | Status |
 |--------|------|-------|--------|
 | 575 | 12-9 | cudnn9-cuda-12 | Stable |
-| 580 | 12-9 | cudnn9-cuda-12 | **Recommended** |
-| 595 | 13.3 | cudnn9-cuda-13-3 | Current |
-| 610 | 13.3 | cudnn9-cuda-13-3 | Latest |
+| 580 | 12-9 | cudnn9-cuda-12 | Supported |
+| 595 | 13.0 | cudnn9-cuda-13 | Supported |
+| 615 | 13.4 | cudnn9-cuda-13-4 | Supported |
+| 620 | 13.4 | cudnn9-cuda-13-4 | **Default** |
 
 > **Note:** Driver 575 + CUDA 13.x is a known incompatible combination.
 > The script will warn and prompt before continuing if this is selected.
 >
-> **Note:** `nvidia-utils-<version>` is installed explicitly for the selected
-> driver version to provide `nvidia-smi` and related userspace tools.
+> **Note:** Drivers 590 and newer use generic `libnvidia-compute` and
+> `nvidia-dkms-open` packages with a branch pin. `libnvidia-compute` includes
+> `nvidia-smi`; older branches use `nvidia-utils-<version>`.
+> CUDA 13.4 installs cuDNN libraries, development files, static libraries, and
+> headers at the metapackage’s matching version to avoid dependency conflicts.
+> Driver 620 requires DKMS 3.1.8 or newer; APT resolves this dependency.
+> Switching branches replaces the old NVIDIA driver pin.
 
 ---
 
@@ -524,7 +532,7 @@ Or re-run the script after reboot — it will detect `nvidia-smi` and install
 DCGM at that point:
 
 ```bash
-./base-install.sh --driver 580 --cuda 12-9 --yes
+./base-install.sh --driver 620 --cuda 13.4 --yes
 ```
 
 ---

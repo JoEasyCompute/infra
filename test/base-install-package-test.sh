@@ -2,7 +2,7 @@
 # Verify package selection without running installer startup or APT.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-for fn in apt_get_noninteractive legacy_nvidia_package_removals legacy_nvidia_cfg1_packages prepare_nvidia_driver_transition install_nvidia_stack; do
+for fn in apt_get_noninteractive legacy_nvidia_package_removals legacy_nvidia_cfg1_packages prepare_nvidia_driver_transition select_driver_version install_nvidia_stack; do
     eval "$(awk -v name="$fn" '$0 == name "() {" {copy=1} copy {print} copy && /^}$/ {exit}' "${ROOT_DIR}/install/base-install.sh")"
 done
 info() { :; }; section() { :; }; success() { :; }
@@ -14,7 +14,10 @@ CUDA_TOOLKIT_VERSION=13-4 CUDA_DISPLAY_VERSION=13.4 CUDA_CUDNN_SUFFIX=13-4
 MOCK_INSTALLED_NVIDIA=$'installed libnvidia-cfg1-580:amd64 580.178.04-1ubuntu1\ninstalled libnvidia-compute-580 580.178.04-1ubuntu1\nunpacked nvidia-dkms-580-open 580.178.04-1ubuntu1\nunpacked nvidia-kernel-common-580 580.173.02-1ubuntu1\nconfig-files nvidia-dkms-575-open 575.1\ninstalled unrelated-package 1'
 dpkg-query() { printf '%s\n' "$MOCK_INSTALLED_NVIDIA"; }
 apt-cache() {
-    printf '%s\n' 'libnvidia-compute | 615.71.09-1ubuntu1 | repo' 'libnvidia-compute | 615.71.09-2ubuntu1 | repo' 'libnvidia-compute | 595.91.07-1ubuntu1 | repo'
+    if [[ $* == 'madison cudnn9-cuda-13-4' ]]; then
+        echo 'cudnn9-cuda-13-4 | 9.27.0.42-1 | repo'; return
+    fi
+    printf '%s\n' 'libnvidia-compute | 620.70.06-1ubuntu1 | repo' 'libnvidia-compute | 615.71.09-1ubuntu1 | repo' 'libnvidia-compute | 615.71.09-2ubuntu1 | repo' 'libnvidia-compute | 595.91.07-1ubuntu1 | repo'
 }
 PIN_INSTALLED=false
 APT_CALLS=''
@@ -39,6 +42,18 @@ output=$(install_nvidia_stack)
 [[ $output == *'libnvidia-compute-580-'* && $output == *'nvidia-dkms-580-open-'* && $output == *'nvidia-kernel-common-580-'* ]] || { echo 'FAIL: old driver packages not removed in apt transactions'; exit 1; }
 [[ $output == *'nvidia-driver-pinning-615'* && $output != *'nvidia-utils-615'* ]]
 [[ $output == *'cuda-toolkit-13-4'* && $output == *'cudnn9-cuda-13-4'* ]]
+DRIVER_VERSION='' NON_INTERACTIVE=false BOLD='' NC=''
+read() { driver_choice=4; }
+select_driver_version >/dev/null
+unset -f read
+[[ $DRIVER_VERSION == 620 ]] || { echo 'FAIL: latest interactive driver is not 620'; exit 1; }
+DRIVER_VERSION=620
+select_driver_version >/dev/null
+output=$(install_nvidia_stack)
+[[ $output == *'nvidia-driver-pinning-620'* && $output == *'libnvidia-compute=620.70.06-1ubuntu1'* && $output == *'nvidia-dkms-open=620.70.06-1ubuntu1'* ]] || { echo 'FAIL: 620 driver selection'; exit 1; }
+for package in cudnn9-cuda-13-4 libcudnn9-static-cuda-13 libcudnn9-dev-cuda-13 libcudnn9-cuda-13 libcudnn9-headers-cuda-13; do
+    [[ $output == *"${package}=9.27.0.42-1"* ]] || { echo "FAIL: matching cuDNN version missing for $package"; exit 1; }
+done
 DRIVER_VERSION=595
 output=$(install_nvidia_stack)
 [[ $output == *'libnvidia-compute=595.91.07-1ubuntu1'* && $output != *'=615.'* ]]
@@ -58,7 +73,14 @@ if output=$(install_nvidia_stack 2>&1); then echo 'FAIL: unresolved stack accept
 [[ $output == *'apt-get install -V -y nvidia-driver-pinning-595'* ]]
 [[ $output != *'DRIVER INSTALL CALLED'* ]]
 DRIVER_VERSION=615
-apt-cache() { :; }
+apt-cache() {
+    if [[ $* == 'madison cudnn9-cuda-13-4' ]]; then
+        echo 'cudnn9-cuda-13-4 | 9.27.0.42-1 | repo'
+    fi
+}
 if output=$(install_nvidia_stack 2>&1); then echo 'FAIL: missing branch accepted'; exit 1; fi
+[[ $output != *'APT '* ]]
+apt-cache() { :; }
+if output=$(install_nvidia_stack 2>&1); then echo 'FAIL: missing cuDNN accepted'; exit 1; fi
 [[ $output != *'APT '* ]]
 echo 'NVIDIA package selection checks passed'

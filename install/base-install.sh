@@ -61,9 +61,9 @@ usage() {
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-  --driver  <575|580|595|615>        NVIDIA driver version (default: interactive)
-  --cuda    <12-9|13|13.4>           CUDA toolkit version  (default: interactive)
-  --yes                      Non-interactive mode, use defaults (580 + 12-9)
+  --driver  <575|580|595|615|620>        NVIDIA driver version (default: 620)
+  --cuda    <12-9|13|13.4>           CUDA toolkit version  (default: 13.4)
+  --yes                      Non-interactive mode, use defaults (620 + 13.4)
   --no-gpu-stack             Skip NVIDIA driver / CUDA toolkit / DCGM / gpu-burn install
   --freeze-gpu-stack         Hold the validated NVIDIA/CUDA stack after install
   --unfreeze-gpu-stack       Temporarily unhold NVIDIA/CUDA packages before install, then re-hold after validation
@@ -73,7 +73,7 @@ Options:
 Examples:
   $(basename "$0")                           # Interactive install
   $(basename "$0") --driver 580 --cuda 12-9  # Explicit versions
-  $(basename "$0") --driver 615 --cuda 13.4  # Latest supported stack
+  $(basename "$0") --driver 620 --cuda 13.4  # Latest supported stack
   $(basename "$0") --no-gpu-stack           # Base host tooling only
   $(basename "$0") --freeze-gpu-stack        # Freeze the validated stack after install
   $(basename "$0") --unfreeze-gpu-stack      # Unhold, upgrade, then re-freeze
@@ -307,26 +307,27 @@ hold_gpu_stack_packages() {
 select_driver_version() {
     if [[ -n "${DRIVER_VERSION}" ]]; then
         case "${DRIVER_VERSION}" in
-            575|580|595|615) success "Driver version (--driver arg): ${DRIVER_VERSION}" ; return ;;
-            *) error "Invalid --driver: ${DRIVER_VERSION}. Valid: 575, 580, 595, 615" ;;
+            575|580|595|615|620) success "Driver version (--driver arg): ${DRIVER_VERSION}" ; return ;;
+            *) error "Invalid --driver: ${DRIVER_VERSION}. Valid: 575, 580, 595, 615, 620" ;;
         esac
     fi
     if [[ "${NON_INTERACTIVE}" == true ]]; then
-        DRIVER_VERSION="580"; success "Driver version (default): ${DRIVER_VERSION}"; return
+        DRIVER_VERSION="620"; success "Driver version (default): ${DRIVER_VERSION}"; return
     fi
     echo ""
     echo -e "${BOLD}Select NVIDIA Driver Version:${NC}"
     echo "  1) 575  — stable, widely tested"
-    echo "  2) 580  — recommended [default]"
+    echo "  2) 580  — supported"
     echo "  3) 595  — current"
-    echo "  4) 615  — latest"
+    echo "  4) 620  — latest [default]"
     echo ""
-    read -rp "Enter choice [1-4, default=2]: " driver_choice
+    read -rp "Enter choice [1-4, default=4]: " driver_choice
     case "${driver_choice}" in
         1) DRIVER_VERSION="575" ;;
+        2) DRIVER_VERSION="580" ;;
         3) DRIVER_VERSION="595" ;;
-        4) DRIVER_VERSION="615" ;;
-        *) DRIVER_VERSION="580" ;;
+        4) DRIVER_VERSION="620" ;;
+        *) DRIVER_VERSION="620" ;;
     esac
     success "Driver version: ${DRIVER_VERSION}"
 }
@@ -357,19 +358,19 @@ select_cuda_version() {
         success "CUDA version (--cuda arg): ${CUDA_DISPLAY_VERSION}"; return
     fi
     if [[ "${NON_INTERACTIVE}" == true ]]; then
-        CUDA_TOOLKIT_VERSION="12-9"; CUDA_MAJOR="12"
-        CUDA_DISPLAY_VERSION="12.9"; CUDA_CUDNN_SUFFIX="12"
+        CUDA_TOOLKIT_VERSION="13-4"; CUDA_MAJOR="13"
+        CUDA_DISPLAY_VERSION="13.4"; CUDA_CUDNN_SUFFIX="13-4"
         success "CUDA version (default): ${CUDA_DISPLAY_VERSION}"; return
     fi
     echo ""
     echo -e "${BOLD}Select CUDA Toolkit Version:${NC}"
-    echo "  1) 12.9  — stable [default]"
-    echo "  2) 13.4  — latest"
+    echo "  1) 12.9  — stable"
+    echo "  2) 13.4  — latest [default]"
     echo "  3) 13.0  — legacy 13.x"
     echo ""
-    read -rp "Enter choice [1-3, default=1]: " cuda_choice
+    read -rp "Enter choice [1-3, default=2]: " cuda_choice
     case "${cuda_choice}" in
-        2)
+        2|'')
             CUDA_TOOLKIT_VERSION="13-4"
             CUDA_DISPLAY_VERSION="13.4"
             CUDA_MAJOR="13"
@@ -381,11 +382,17 @@ select_cuda_version() {
             CUDA_MAJOR="13"
             CUDA_CUDNN_SUFFIX="13"
             ;;
-        *)
+        1)
             CUDA_TOOLKIT_VERSION="12-9"
             CUDA_DISPLAY_VERSION="12.9"
             CUDA_MAJOR="12"
             CUDA_CUDNN_SUFFIX="12"
+            ;;
+        *)
+            CUDA_TOOLKIT_VERSION="13-4"
+            CUDA_DISPLAY_VERSION="13.4"
+            CUDA_MAJOR="13"
+            CUDA_CUDNN_SUFFIX="13-4"
             ;;
     esac
     success "CUDA version: ${CUDA_DISPLAY_VERSION}"
@@ -393,7 +400,7 @@ select_cuda_version() {
 
 validate_combination() {
     if [[ "${CUDA_MAJOR}" == "13" && "${DRIVER_VERSION}" == "575" ]]; then
-        warn "Driver 575 + CUDA 13.x may have compatibility issues. Recommended: 580, 595, or 615."
+        warn "Driver 575 + CUDA 13.x may have compatibility issues. Recommended: 580, 595, 615, or 620."
         if [[ "${NON_INTERACTIVE}" == false ]]; then
             read -rp "  Continue anyway? [y/N]: " yn
             [[ "${yn,,}" == "y" ]] || error "Aborted."
@@ -1051,6 +1058,25 @@ install_nvidia_stack() {
     section "NVIDIA Driver + CUDA Stack"
     info "Installing driver=${DRIVER_VERSION}, cuda=${CUDA_DISPLAY_VERSION}, cudnn=cudnn9-cuda-${CUDA_CUDNN_SUFFIX}"
 
+    local -a cudnn_packages=("cudnn9-cuda-${CUDA_CUDNN_SUFFIX}")
+    if [[ "${CUDA_CUDNN_SUFFIX}" == "13-4" ]]; then
+        # The CUDA 13.4 metapackage can lag the generic CUDA 13 libraries.
+        # Select its exact-version dependency chain together, rather than
+        # letting APT choose newer, incompatible library candidates.
+        local cudnn_version
+        cudnn_version=$(apt-cache madison "cudnn9-cuda-${CUDA_CUDNN_SUFFIX}" \
+            | awk '{print $3}' | sort -Vr | awk 'NR == 1 {print}')
+        [[ -n "${cudnn_version}" ]] \
+            || error "cuDNN for CUDA ${CUDA_DISPLAY_VERSION} is unavailable in the configured APT repositories."
+        cudnn_packages=(
+            "cudnn9-cuda-${CUDA_CUDNN_SUFFIX}=${cudnn_version}"
+            "libcudnn9-static-cuda-13=${cudnn_version}"
+            "libcudnn9-dev-cuda-13=${cudnn_version}"
+            "libcudnn9-cuda-13=${cudnn_version}"
+            "libcudnn9-headers-cuda-13=${cudnn_version}"
+        )
+    fi
+
     local -a driver_packages=() obsolete_driver_removals=() pin_packages=()
     local has_legacy_driver_packages=false
     if (( DRIVER_VERSION >= 590 )); then
@@ -1113,12 +1139,12 @@ install_nvidia_stack() {
 
     apt_get_noninteractive --simulate install \
         "cuda-toolkit-${CUDA_TOOLKIT_VERSION}" "${driver_packages[@]}" \
-        "cudnn9-cuda-${CUDA_CUDNN_SUFFIX}" nvtop \
+        "${cudnn_packages[@]}" nvtop \
         || error "APT cannot resolve the requested GPU update. Review conflicts above before changing packages; do not run the full host --uninstall."
 
     apt_get_noninteractive install -V -y \
         "cuda-toolkit-${CUDA_TOOLKIT_VERSION}" "${driver_packages[@]}" \
-        "cudnn9-cuda-${CUDA_CUDNN_SUFFIX}" nvtop \
+        "${cudnn_packages[@]}" nvtop \
         || error "NVIDIA stack install failed — check apt output above"
     success "NVIDIA stack installed"
     check_nvidia_reboot

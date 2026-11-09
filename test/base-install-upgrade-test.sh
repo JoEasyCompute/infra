@@ -49,7 +49,13 @@ output=$(offer_reboot)
 [[ $output == *'Host tooling install complete'* && $output != *'reboot manually'* ]]
 # Failed simulation must prevent the mutating apt transaction.
 CUDA_TOOLKIT_VERSION=13-4 CUDA_CUDNN_SUFFIX=13-4
-apt-cache() { echo "libnvidia-compute | 615.71.09-2ubuntu1 | repo"; }
+apt-cache() {
+    if [[ $* == 'madison cudnn9-cuda-13-4' ]]; then
+        echo 'cudnn9-cuda-13-4 | 9.27.0.42-1 | repo'
+    else
+        echo 'libnvidia-compute | 615.71.09-2ubuntu1 | repo'
+    fi
+}
 sudo() {
     if [[ "$*" == *--simulate* ]]; then return 1; fi
     echo 'MUTATING APT CALLED'; return 0

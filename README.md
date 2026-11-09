@@ -197,7 +197,7 @@ This installs the AMDGPU DKMS driver, ROCm stack, and post-install environment s
 
 The NVIDIA and AMD base-install scripts also install a small operator tool bundle for day-to-day shell work: `fzf`, `jq`, `ripgrep`, `yq`, `fd`, `bat`, `usbutils`, `ethtool`, and `iperf3` (with compatibility symlinks where Ubuntu packages expose `fdfind` / `batcat`; `yq` is installed from the official GitHub release binary, not apt).
 The NVIDIA base installer seeds the default English (UK) keyboard/console debconf answers before package installation and keeps apt noninteractive, so a host with incomplete debconf state does not stop at the `keyboard-configuration` screen.
-On the NVIDIA path, `base-install.sh` currently supports driver 575, 580, 595, and 610, with CUDA toolkit options 12.9, 13.0, and 13.3.
+On the NVIDIA path, `base-install.sh` currently supports drivers 575, 580, 595, 615, and 620, with CUDA toolkit options 12.9, 13.0, and 13.4. Interactive prompts and `--yes` default to driver **620** and CUDA **13.4**.
 If you only want the host tooling and not the NVIDIA stack yet, `base-install.sh --no-gpu-stack` skips the driver, CUDA toolkit, DCGM, and gpu-burn steps.
 Both `base-install.sh` and `amd-base-install.sh` also install a managed boot-policy GRUB drop-in that appends `pcie_aspm=off`, `pci=noaer`, `pci=realloc=on`, `pcie_aspm.policy=performance`, and `nvme_core.default_ps_max_latency_us=0`.
 If you need to inspect or toggle that policy later, use [install/pcie-aspm.sh](install/pcie-aspm.sh).
