@@ -751,11 +751,12 @@ sudo /opt/provision/docker-install.sh --runpod-storage-layout --non-interactive
 Prepare the OS layout during re-imaging (or offline rescue maintenance):
 
 - Keep the 1 GiB EFI partition and 2 GiB `/boot` partition.
-- Create `ubuntu-lv` as 500 GiB, ext4, mounted at `/`.
+- Use LVM with ext4 `ubuntu-lv` mounted at `/`. It may start smaller than
+  500 GiB; the installer grows it online to 500 GiB using free VG extents.
 - Leave the remaining root VG extents free for the installer, or pre-create
   `docker-lv` using all remaining extents and format with `mkfs.xfs -n ftype=1`.
 
-The installer checks the root LV and creates `docker-lv` with `100%FREE`
+The installer checks the root LV, grows it to 500 GiB when smaller, and creates `docker-lv` with `100%FREE`
 when absent. An existing LV is reused only after XFS/ftype checks; it is never
 reformatted automatically. Docker mounts directly at `/var/lib/docker` by UUID
 with `defaults,noatime,prjquota,nofail 0 0`. The bind mount from
@@ -763,8 +764,10 @@ with `defaults,noatime,prjquota,nofail 0 0`. The bind mount from
 Storage checks run again even when a previous installation recorded the disk
 phase as complete. Other layouts retain the default installer's behavior.
 
-This option does not repartition the OS disk or resize root. If root occupies
-the entire disk, back up workloads and use a rescue boot to shrink the unmounted
+This option does not repartition the OS disk or shrink root. It requires enough
+free VG space for root growth plus at least 100 GiB for a new Docker LV. If root
+is already larger than 500 GiB or occupies the entire disk, back up workloads
+and use a rescue boot to shrink the unmounted
 ext4 filesystem **before** reducing its LV, or re-image with the layout above.
 Sizing and rescue commands depend on the host's actual disk geometry and used
 space. Existing loop images and incompatible mounts cause a clear failure and
@@ -778,3 +781,19 @@ Repeat mount, Docker, and GPU checks after a reboot on the actual host.
 For existing loop-image hosts with a full-root LV, see the
 [rescue conversion guide](runpod-storage-rescue-convert.md). The older mount-layout
 converter preserves the loop backing and does not satisfy the dedicated-LV requirement.
+
+
+### Fresh Ubuntu 24.04 install flow
+
+1. Install Ubuntu Server with LVM enabled and ext4 root. Leave unused VG space
+   available; do not extend root to fill the disk. Ensure EFI is 1 GiB and `/boot`
+   is 2 GiB in the installer's storage summary. Installer defaults can vary.
+2. Clone this repository and run `install/base-install.sh` as usual.
+3. Reboot to enable the NVIDIA driver.
+4. Run `sudo bash install/docker-install.sh --runpod-storage-layout --non-interactive`.
+
+For example, a 100 GiB `ubuntu-lv` grows online to 500 GiB, then the remaining VG
+space becomes `docker-lv`. A root already at 500 GiB is reused, and ext4 is grown
+if a previous attempt extended the LV but failed at filesystem growth. An LV or
+filesystem-growth failure prevents Docker LV creation. No extra reboot is needed
+for online ext4 growth itself; perform the normal final reboot acceptance check.

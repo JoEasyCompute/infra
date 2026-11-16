@@ -123,7 +123,7 @@ Options:
   --skip-nvidia-toolkit Skip NVIDIA Container Toolkit install
   --skip-nouveau-blacklist Skip Nouveau blacklist step
   --runpod-storage-layout
-                        Require 500 GiB ext4 ubuntu-lv; use root VG remaining space
+                        Grow ext4 ubuntu-lv to 500 GiB; use root VG remaining space
                         for XFS docker-lv at /var/lib/docker (UUID, no loop fallback);
                         bind-mount /var/lib/docker/containerd to /var/lib/containerd
   --called-by-provision Internal flag set by provision.sh
@@ -528,8 +528,8 @@ get_compose_version() {
 # PHASE FUNCTIONS
 # =============================================================================
 
-# RunPod requires a real LV in the root VG. Never resize a mounted root or
-# convert an existing loop/bind mount implicitly.
+# RunPod requires a real LV in the root VG. Root may grow online to 500 GiB;
+# shrinking root or converting loop/bind layouts requires offline maintenance.
 _runpod_root_vg() {
     local root_device root_type root_name root_size
     root_device=$(findmnt -n -o SOURCE -M /) || return 1
@@ -538,10 +538,12 @@ _runpod_root_vg() {
     root_name=${root_name//[[:space:]]/}
     root_size=$(lvs --noheadings --units b --nosuffix -o lv_size "$root_device") || return 1
     if [[ "$root_type" != ext4 || "$root_name" != ubuntu-lv ]] ||
-        ! awk 'NF {if (NF != 1 || $1 !~ /^[0-9]+([.][0-9]+)?$/ || $1 < 536866717696 || $1 > 536875106304) exit 1; n++} END {if (n != 1) exit 1}' <<< "$root_size"; then
-        error "RunPod requires ubuntu-lv: 500 GiB ext4 at /. Re-image or shrink ext4 and its LV offline in rescue mode after backing up. Root will not be resized here."
+        ! awk 'NF {if (NF != 1 || $1 !~ /^[0-9]+([.][0-9]+)?$/ || $1 <= 0 || $1 > 536870912000) exit 1; n++} END {if (n != 1) exit 1}' <<< "$root_size"; then
+        error "RunPod requires ext4 ubuntu-lv at /, no larger than 500 GiB. Larger roots need offline rescue shrinking or re-imaging; root will never be shrunk here."
         return 1
     fi
+    RUNPOD_ROOT_DEVICE="$root_device"
+    RUNPOD_ROOT_BYTES=$(awk '{printf "%.0f", $1}' <<< "$root_size")
     RUNPOD_VG=$(lvs --noheadings -o vg_name "$root_device") || return 1
     RUNPOD_VG=${RUNPOD_VG//[[:space:]]/}
     [[ -n "$RUNPOD_VG" ]] || return 1
@@ -549,6 +551,38 @@ _runpod_root_vg() {
         error "RunPod requires docker-lv in root VG ${RUNPOD_VG}; --disk and other VGs are unsupported"
         return 1
     fi
+}
+
+_runpod_grow_root() {
+    local existing_docker_lv="$1" target=536870912000 extent_bytes free_extents inspection
+    inspection=$(vgs --noheadings --units b --nosuffix -o vg_extent_size,vg_free_count "$RUNPOD_VG") || return 1
+    if ! awk 'NF {if (NF != 2 || $1 !~ /^[0-9]+([.][0-9]+)?$/ || $1 <= 0 || $2 !~ /^[0-9]+$/) exit 1; n++} END {if (n != 1) exit 1}' <<< "$inspection"; then
+        error "Cannot verify VG extent size and available space; refusing root growth"
+        return 1
+    fi
+    read -r extent_bytes free_extents <<< "$(awk '{printf "%.0f %s", $1, $2}' <<< "$inspection")"
+    if (( target % extent_bytes != 0 )); then
+        error "VG extent size cannot represent exactly 500 GiB; manual storage planning required"
+        return 1
+    fi
+    local required_bytes=$(( target - RUNPOD_ROOT_BYTES )) reserve_bytes=0
+    if [[ "$existing_docker_lv" != true ]]; then
+        reserve_bytes=$(( MIN_CONTAINER_VOL_GB * 1024 * 1024 * 1024 ))
+    fi
+    if (( free_extents * extent_bytes < required_bytes + reserve_bytes )); then
+        error "Not enough free VG space to grow root to 500 GiB and reserve ${MIN_CONTAINER_VOL_GB} GiB for a new docker-lv; no storage changes made"
+        return 1
+    fi
+    local tool
+    for tool in lvextend resize2fs; do
+        command -v "$tool" &>/dev/null || { error "Required tool missing: ${tool}"; return 1; }
+    done
+    if (( required_bytes > 0 )); then
+        info "Growing ${RUNPOD_ROOT_DEVICE} to 500 GiB using free space in ${RUNPOD_VG}"
+        lvextend -L 500G "$RUNPOD_ROOT_DEVICE" || return 1
+    fi
+    # Also repair a previous run that extended the LV but failed to grow ext4.
+    resize2fs "$RUNPOD_ROOT_DEVICE" || return 1
 }
 
 _runpod_verify_volume() {
@@ -587,11 +621,16 @@ _runpod_disk_setup() {
             return 1
         fi
     fi
+    local existing_docker_lv=false
+    if lvs "$device" &>/dev/null; then
+        _runpod_verify_volume "$device" || return 1
+        existing_docker_lv=true
+    elif mountpoint -q "$DOCKER_MOUNTPOINT"; then
+        error "Docker is mounted from another device; migrate offline first"
+        return 1
+    fi
+    _runpod_grow_root "$existing_docker_lv" || return 1
     if ! lvs "$device" &>/dev/null; then
-        if mountpoint -q "$DOCKER_MOUNTPOINT"; then
-            error "Docker is mounted from another device; migrate offline first"
-            return 1
-        fi
         free_extents=$(vgs --noheadings -o vg_free_count "$RUNPOD_VG") || return 1
         if ! [[ "$free_extents" =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]] || (( free_extents < 1 )); then
             error "No free extents in ${RUNPOD_VG}; re-image or shrink root offline in rescue mode"
