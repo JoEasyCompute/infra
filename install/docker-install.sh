@@ -123,7 +123,8 @@ Options:
   --skip-nvidia-toolkit Skip NVIDIA Container Toolkit install
   --skip-nouveau-blacklist Skip Nouveau blacklist step
   --runpod-storage-layout
-                        Mount the XFS volume directly at /var/lib/docker and
+                        Require 500 GiB ext4 ubuntu-lv; use root VG remaining space
+                        for XFS docker-lv at /var/lib/docker (UUID, no loop fallback);
                         bind-mount /var/lib/docker/containerd to /var/lib/containerd
   --called-by-provision Internal flag set by provision.sh
   -h, --help            Show this help
@@ -291,6 +292,9 @@ phase_done() {
 phase_healthy() {
     local phase="$1"
     case "$phase" in
+        DISK_SETUP)
+            [[ "${RUNPOD_STORAGE_LAYOUT:-false}" != true ]]
+            ;;
         DOCKER_INSTALL)
             command -v docker &>/dev/null && dpkg-query -W docker-ce docker-ce-cli containerd.io &>/dev/null
             ;;
@@ -524,10 +528,104 @@ get_compose_version() {
 # PHASE FUNCTIONS
 # =============================================================================
 
+# RunPod requires a real LV in the root VG. Never resize a mounted root or
+# convert an existing loop/bind mount implicitly.
+_runpod_root_vg() {
+    local root_device root_type root_name root_size
+    root_device=$(findmnt -n -o SOURCE -M /) || return 1
+    root_type=$(findmnt -n -o FSTYPE -M /) || return 1
+    root_name=$(lvs --noheadings -o lv_name "$root_device") || return 1
+    root_name=${root_name//[[:space:]]/}
+    root_size=$(lvs --noheadings --units b --nosuffix -o lv_size "$root_device") || return 1
+    if [[ "$root_type" != ext4 || "$root_name" != ubuntu-lv ]] ||
+        ! awk 'NF {if (NF != 1 || $1 !~ /^[0-9]+([.][0-9]+)?$/ || $1 < 536866717696 || $1 > 536875106304) exit 1; n++} END {if (n != 1) exit 1}' <<< "$root_size"; then
+        error "RunPod requires ubuntu-lv: 500 GiB ext4 at /. Re-image or shrink ext4 and its LV offline in rescue mode after backing up. Root will not be resized here."
+        return 1
+    fi
+    RUNPOD_VG=$(lvs --noheadings -o vg_name "$root_device") || return 1
+    RUNPOD_VG=${RUNPOD_VG//[[:space:]]/}
+    [[ -n "$RUNPOD_VG" ]] || return 1
+    if [[ -n "$FORCE_DISK" || ( -n "$FORCE_VG" && "$FORCE_VG" != "$RUNPOD_VG" ) ]]; then
+        error "RunPod requires docker-lv in root VG ${RUNPOD_VG}; --disk and other VGs are unsupported"
+        return 1
+    fi
+}
+
+_runpod_verify_volume() {
+    local device="$1" uuid actual options
+    [[ "$(blkid -s TYPE -o value "$device")" == xfs ]] || {
+        error "${device} must already be XFS; refusing to reformat existing data"
+        return 1
+    }
+    xfs_info "$device" | grep -Eq 'ftype=1([[:space:]]|$)' || {
+        error "${device} requires XFS ftype=1"
+        return 1
+    }
+    uuid=$(blkid -s UUID -o value "$device") || return 1
+    [[ -n "$uuid" ]] || return 1
+    if mountpoint -q "$DOCKER_MOUNTPOINT"; then
+        actual=$(findmnt -n -o UUID -M "$DOCKER_MOUNTPOINT") || return 1
+        [[ "$actual" == "$uuid" && "$(findmnt -n -o FSROOT -M "$DOCKER_MOUNTPOINT")" == / ]] || {
+            error "Existing Docker mount is not the root of ${device}; migrate offline first"
+            return 1
+        }
+        options=$(findmnt -n -o OPTIONS -M "$DOCKER_MOUNTPOINT") || return 1
+        if [[ ",$options," != *,prjquota,* && ",$options," != *,pquota,* ]]; then
+            error "Docker XFS mount needs prjquota; unmount/remount during maintenance first"
+            return 1
+        fi
+    fi
+}
+
+_runpod_disk_setup() {
+    _runpod_root_vg || return 1
+    local device="/dev/${RUNPOD_VG}/docker-lv" uuid free_extents
+    # Reject old loop and bind layouts before creating or formatting anything.
+    if mountpoint -q "$DOCKER_MOUNTPOINT"; then
+        if [[ "$(lsblk -dn -o TYPE "$(findmnt -n -o SOURCE -M "$DOCKER_MOUNTPOINT")")" != lvm ]]; then
+            error "RunPod rejects the existing loop/bind layout. Back up and migrate offline or re-image; existing image is preserved."
+            return 1
+        fi
+    fi
+    if ! lvs "$device" &>/dev/null; then
+        if mountpoint -q "$DOCKER_MOUNTPOINT"; then
+            error "Docker is mounted from another device; migrate offline first"
+            return 1
+        fi
+        free_extents=$(vgs --noheadings -o vg_free_count "$RUNPOD_VG") || return 1
+        if ! [[ "$free_extents" =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]] || (( free_extents < 1 )); then
+            error "No free extents in ${RUNPOD_VG}; re-image or shrink root offline in rescue mode"
+            return 1
+        fi
+        command -v mkfs.xfs &>/dev/null || apt-get install -y xfsprogs
+        lvcreate -l 100%FREE -n docker-lv "$RUNPOD_VG" || return 1
+        mkfs.xfs -n ftype=1 "$device" || return 1
+    fi
+    _runpod_verify_volume "$device" || return 1
+    uuid=$(blkid -s UUID -o value "$device") || return 1
+    _prepare_runpod_direct_mount_target
+    mkdir -p "$DOCKER_MOUNTPOINT"
+    cp -a /etc/fstab "/etc/fstab.runpod.$(date +%Y%m%d%H%M%S).bak"
+    sed -i "\|[[:space:]]${DOCKER_MOUNTPOINT}[[:space:]]|d" /etc/fstab
+    echo "UUID=${uuid}  ${DOCKER_MOUNTPOINT}  xfs  defaults,noatime,prjquota,nofail  0  0" >> /etc/fstab
+    systemctl daemon-reload
+    mountpoint -q "$DOCKER_MOUNTPOINT" || mount "$DOCKER_MOUNTPOINT"
+    _runpod_verify_volume "$device" || return 1
+    _migrate_runpod_staged_docker_data
+    _migrate_existing_data
+    _ensure_subdirs_and_bind_mounts
+    success "RunPod docker-lv mounted by UUID at ${DOCKER_MOUNTPOINT}; containerd bind retained"
+}
+
 # -----------------------------------------------------------------------------
 phase_disk_setup() {
 # -----------------------------------------------------------------------------
     CURRENT_PHASE="DISK_SETUP"
+
+    if [[ "${RUNPOD_STORAGE_LAYOUT:-false}" == true ]]; then
+        _runpod_disk_setup
+        return $?
+    fi
 
     # If the shared volume is already mounted at our target path, just verify
     # the subdirs and bind mounts are in place and return early

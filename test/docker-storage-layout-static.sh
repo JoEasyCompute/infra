@@ -32,7 +32,7 @@ require_help_option "$PROVISION_AMD" "--runpod-storage-layout"
 
 require_source_text "$DOCKER_INSTALL" 'DOCKER_DATA_DIR="${DOCKER_MOUNTPOINT}"'
 require_source_text "$DOCKER_INSTALL" 'CONTAINERD_DATA_DIR="${DOCKER_MOUNTPOINT}/containerd"'
-require_source_text "$DOCKER_INSTALL" "UUID=\${uuid}  \${DOCKER_MOUNTPOINT}  xfs  defaults,noatime,nofail,prjquota  0  2"
+require_source_text "$DOCKER_INSTALL" "UUID=\${uuid}  \${DOCKER_MOUNTPOINT}  xfs  defaults,noatime,prjquota,nofail  0  0"
 require_source_text "$DOCKER_INSTALL" "\${CONTAINERD_DATA_DIR}  \${CONTAINERD_MOUNTPOINT}  none  bind,nofail  0  0"
 require_source_text "$PROVISION" "RUNPOD_STORAGE_LAYOUT"
 require_source_text "$PROVISION_AMD" "RUNPOD_STORAGE_LAYOUT"

@@ -60,7 +60,7 @@ UUID=<uuid>  /data/container-runtime  xfs  defaults,noatime,nofail,prjquota  0  
 **RunPod-compatible layout (`--runpod-storage-layout`):**
 ```
 # XFS volume mounted directly where Docker expects its data root
-UUID=<uuid>  /var/lib/docker  xfs  defaults,noatime,nofail,prjquota  0  2
+UUID=<uuid>  /var/lib/docker  xfs  defaults,noatime,prjquota,nofail  0  0
 
 # containerd remains a real mountpoint, sourced from inside Docker's volume
 /var/lib/docker/containerd  /var/lib/containerd  none  bind,nofail  0  0
@@ -739,3 +739,42 @@ When called by `provision.sh`, the script receives `--called-by-provision` (supp
 After stage 2 completes, `provision.sh` verifies that `/data/container-runtime` is mounted and that both `/var/lib/docker` and `/var/lib/containerd` are active mountpoints before proceeding to stage 3 (`fulltest.sh`). If either bind mount is missing it hard-fails with a clear recovery message rather than silently running validation against the wrong storage.
 
 See `provisioning-guide.md` for the full orchestration flow.
+
+## RunPod root-disk layout
+
+Run with:
+
+```bash
+sudo /opt/provision/docker-install.sh --runpod-storage-layout --non-interactive
+```
+
+Prepare the OS layout during re-imaging (or offline rescue maintenance):
+
+- Keep the 1 GiB EFI partition and 2 GiB `/boot` partition.
+- Create `ubuntu-lv` as 500 GiB, ext4, mounted at `/`.
+- Leave the remaining root VG extents free for the installer, or pre-create
+  `docker-lv` using all remaining extents and format with `mkfs.xfs -n ftype=1`.
+
+The installer checks the root LV and creates `docker-lv` with `100%FREE`
+when absent. An existing LV is reused only after XFS/ftype checks; it is never
+reformatted automatically. Docker mounts directly at `/var/lib/docker` by UUID
+with `defaults,noatime,prjquota,nofail 0 0`. The bind mount from
+`/var/lib/docker/containerd` to `/var/lib/containerd` remains.
+Storage checks run again even when a previous installation recorded the disk
+phase as complete. Other layouts retain the default installer's behavior.
+
+This option does not repartition the OS disk or resize root. If root occupies
+the entire disk, back up workloads and use a rescue boot to shrink the unmounted
+ext4 filesystem **before** reducing its LV, or re-image with the layout above.
+Sizing and rescue commands depend on the host's actual disk geometry and used
+space. Existing loop images and incompatible mounts cause a clear failure and
+are preserved; they require an offline data migration or re-image before rerun.
+EFI and `/boot` are left untouched; their sizes must be set during OS installation.
+
+After provisioning, check `lvs`, `findmnt /var/lib/docker`,
+`findmnt /var/lib/containerd`, `xfs_info /var/lib/docker`, and `/etc/fstab`.
+Repeat mount, Docker, and GPU checks after a reboot on the actual host.
+
+For existing loop-image hosts with a full-root LV, see the
+[rescue conversion guide](runpod-storage-rescue-convert.md). The older mount-layout
+converter preserves the loop backing and does not satisfy the dedicated-LV requirement.
