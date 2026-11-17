@@ -13,8 +13,11 @@ require_text() {
 require_text 'apt_get_noninteractive() {'
 eval "$(awk '$0 == "apt_get_noninteractive() {" {copy=1} copy {print} copy && /^}$/ {exit}' "$SCRIPT")"
 sudo() { printf '%s\n' "$*"; }
-[[ $(apt_get_noninteractive install keyboard-configuration) == 'env DEBIAN_FRONTEND=noninteractive apt-get install keyboard-configuration' ]] \
-    || fail 'apt transactions must always use the noninteractive debconf frontend'
+for transaction in install upgrade; do
+    output=$(apt_get_noninteractive "$transaction" -y)
+    [[ $output == "env DEBIAN_FRONTEND=noninteractive apt-get $transaction -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold" ]] \
+        || fail "$transaction must disable debconf and dpkg conffile prompts"
+done
 
 if awk '
     /^[[:space:]]*sudo env DEBIAN_FRONTEND=noninteractive apt-get / {next}

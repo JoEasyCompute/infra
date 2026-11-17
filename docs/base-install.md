@@ -290,6 +290,11 @@ console settings, as well as the `iperf3` daemon choice. This prevents
 hosts whose debconf state is incomplete. Change the keyboard after provisioning
 with the normal Ubuntu keyboard tools if the host uses a different layout.
 
+All APT transactions also pass `--force-confdef` and `--force-confold` to
+`dpkg`, accepting its default action and retaining the current configuration
+when no default is available. This prevents modified configuration files such
+as `/etc/fluent-bit/fluent-bit.conf` from blocking an unattended upgrade.
+
 `uv` is installed by `base-install.sh` via Astral's standalone installer and
 placed in `/usr/local/bin` so it is available on the system PATH without
 modifying shell profiles.
@@ -471,6 +476,22 @@ sudo reboot
 ---
 
 ## Troubleshooting
+
+### Upgrade stuck at a configuration-file prompt
+
+Older installers disabled debconf dialogs but did not disable `dpkg` conffile
+prompts. If terminal input is unavailable, interrupt the installer with Ctrl+C
+and wait for it to exit. Once no APT/dpkg process is running, finish the
+interrupted configuration while keeping local configuration files:
+
+```bash
+sudo env DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold --configure -a
+sudo env DEBIAN_FRONTEND=noninteractive apt-get -f install -y \
+    -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold
+```
+
+Then rerun the updated installer with the same options. Do not remove package
+manager lock files or run a second package transaction while the first is active.
 
 ### Script exits silently after confirmation prompt
 Check the log file — the most common cause is `apt-get update` failing due to

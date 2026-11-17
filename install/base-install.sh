@@ -34,7 +34,11 @@ error()   { echo -e "${RED}[ERROR]${NC}   $*"; exit 1; }
 section() { echo -e "\n${BOLD}${CYAN}── $* ──${NC}"; }
 
 apt_get_noninteractive() {
-    sudo env DEBIAN_FRONTEND=noninteractive apt-get "$@"
+    # debconf's frontend does not control dpkg conffile prompts. Preserve local
+    # configuration when a package ships a replacement, including on upgrades.
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get "$@" \
+        -o Dpkg::Options::=--force-confdef \
+        -o Dpkg::Options::=--force-confold
 }
 
 # ─── CLI argument parsing ──────────────────────────────────────
